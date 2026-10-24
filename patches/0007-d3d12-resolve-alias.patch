@@ -1,0 +1,110 @@
+diff --git a/libs/video/cellGcmSys.c b/libs/video/cellGcmSys.c
+index 764b7e9..c50c262 100644
+--- a/libs/video/cellGcmSys.c
++++ b/libs/video/cellGcmSys.c
+@@ -1045,6 +1045,10 @@ static void gcm_row_copy(u32 d, u32 s, u32 n)
+     spu_lockline_unlock();
+ }
+ 
++/* rsx_d3d12_backend.c: this backend keeps render targets on the GPU, so the
++ * only way a resolved copy can be sampled is to redirect it to the target. */
++void rsx_d3d12_backend_alias_resolve(u32 dst_off, u32 src_off);
++
+ static void nv3089_blit(void)
+ {
+     /* NV3089_FULL=1: every register of a blit whose destination is in the
+@@ -1276,6 +1280,10 @@ static void nv3089_blit(void)
+         const u32 x1 = (out_x + out_w < cx1) ? out_x + out_w : cx1;
+         const u32 y1 = (out_y + out_h < cy1) ? out_y + out_h : cy1;
+         nv3089_engine_wrote(dst_pitch, x0, y0, x1, y1);
++        /* The copy above moved zeros when the source is a live target: nothing
++         * writes rendered colour back to guest memory. Point the destination at
++         * the target so the composite that samples it shows the scene. */
++        rsx_d3d12_backend_alias_resolve(s_gcm2d.dst_offset, s_nv3089.in_off);
+     }
+     { static int _n = 0; static int cap = -1;
+       if (cap < 0) { const char* e = getenv("NV3089_DBG"); cap = e ? atoi(e) : 0; }
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index 8be52f4..6c07aae 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -3395,6 +3395,63 @@ static int off_rt_find(u32 off)
+     return -1;
+ }
+ 
++/* Aliased resolves: destination guest offset (64K page) -> live target.
++ *
++ * The guest resolves its scene target with NV3089 into an offscreen buffer and
++ * then samples that buffer as a texture, but this backend renders into a host
++ * resource and never writes colour back to guest memory, so the copy the guest
++ * makes of that buffer carries zeros. When a blit's source is a live target,
++ * remember that the destination holds its contents and sample the target
++ * instead: that is the resolved image as this backend keeps it (the guest's
++ * 2x storage is not simulated, so it is 1:1, not a downsample).
++ * Keyed by 64K page because NV3089 tiles a resolve into several blits that
++ * differ only in their low address bits. */
++static struct { u32 dst, src; } s_rt_alias[8];
++static int s_rt_alias_n;
++
++/* The live target whose guest range holds `off` (tiles land mid-surface). */
++static int off_rt_containing(u32 off)
++{
++    int best = -1;
++    for (int i = 0; i < MAX_OFF_RTS; i++) {
++        const OffRT* r = &s_d3d.off_rt[i];
++        if (!r->res || off < r->off) continue;
++        if (off - r->off >= r->w * 4u * r->h) continue;
++        if (best < 0 || r->off > s_d3d.off_rt[best].off) best = i;
++    }
++    return best;
++}
++
++static int off_rt_alias_find(u32 off)
++{
++    const u32 dst = off & ~0xFFFFu;
++    for (int i = 0; i < s_rt_alias_n; i++)
++        if (s_rt_alias[i].dst == dst) return off_rt_find(s_rt_alias[i].src);
++    return -1;
++}
++
++void rsx_d3d12_backend_alias_resolve(u32 dst_off, u32 src_off)
++{
++    const u32 dst = dst_off & ~0xFFFFu;
++    const int s = off_rt_containing(src_off);
++    if (!dst) return;
++    if (s < 0) {
++        /* A real guest copy: the destination's own pixels are the truth again. */
++        for (int i = 0; i < s_rt_alias_n; i++)
++            if (s_rt_alias[i].dst == dst) { s_rt_alias[i] = s_rt_alias[--s_rt_alias_n]; return; }
++        return;
++    }
++    const u32 src = s_d3d.off_rt[s].off;
++    if (dst == src || off_rt_find(dst) >= 0) return;  /* a real target renders here */
++    for (int i = 0; i < s_rt_alias_n; i++)
++        if (s_rt_alias[i].dst == dst) { s_rt_alias[i].src = src; return; }
++    if (s_rt_alias_n < 8) {
++        s_rt_alias[s_rt_alias_n].dst = dst;
++        s_rt_alias[s_rt_alias_n].src = src;
++        s_rt_alias_n++;
++    }
++}
++
+ /* Ensure an RT resource exists for this surface; (re)creates the RTV at
+  * rt_rtv_heap[i] and the SRV at srv_heap[RT_SRV_BASE+i]. */
+ static int off_rt_get(u32 off, u32 w, u32 h, u32 rsx_fmt)
+@@ -4388,6 +4445,7 @@ static void render_frame(void)
+             }
+             if (dr->tex[_u].set) {
+                 int rt = off_rt_find(dr->tex[_u].raw);
++                if (rt < 0) rt = off_rt_alias_find(dr->tex[_u].raw);
+                 if (rt >= 0) {
+                     dr->tex_rt[_u] = rt;
+                     srv_write(wslot, s_d3d.off_rt[rt].res, (DXGI_FORMAT)s_d3d.off_rt[rt].dxgi,
+@@ -7121,5 +7179,7 @@ int rsx_d3d12_backend_pump_messages(void) { return 0; }
+ void rsx_d3d12_backend_present(void) {}
+ void rsx_d3d12_backend_video_frame(const u8* pixels, u32 width, u32 height)
+ { (void)pixels; (void)width; (void)height; }
++void rsx_d3d12_backend_alias_resolve(u32 dst_off, u32 src_off)
++{ (void)dst_off; (void)src_off; }
+ 
+ #endif /* _WIN32 */

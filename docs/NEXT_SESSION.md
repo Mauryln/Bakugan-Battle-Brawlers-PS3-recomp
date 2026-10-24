@@ -5,8 +5,23 @@
 - El **audio quedó casi perfecto**; queda revisar cualquier corte residual.
 - **Battle Arena tarda en cargar, pero inicia el combate.**
 - Las texturas **2D cargan normalmente**.
-- El renderizado **3D sigue pendiente**: personajes y escenario todavía no se ven correctamente.
-- Se detuvo el trabajo a petición del usuario para conservar su cuota. No iniciar más pruebas hoy.
+- El **composite del 3D ya funciona**: el quad que muestrea `0x0DF60000` deja de salir negro (verificado en la pantalla de atracción, 99,5 % de píxeles no negros).
+- La **escena dentro del RT sigue deformada** (triángulos gigantes, texturas estiradas): es el fallo abierto.
+
+## Resolve del render target (continuación, 24 oct)
+
+Ninguna ruta D3D12 escribía píxeles renderizados en memoria del invitado, así que
+el `NV3089` que copia `0xEAB0000` → `0xDF60000` movía ceros y el composite salía
+negro. `rsx_live_draw.c` y `rsx_draw_engine.c`, que sí lo hacen, solo se
+inicializan en Vulkan; `main.cpp` usa `rsx_d3d12_backend_init`.
+
+`patches/0007-d3d12-resolve-alias.patch` registra en el backend un alias por
+página de 64K (`0xDF60000` → `0xEAB0000`) cuando el origen de un blit es un RT
+vivo, y lo consulta al muestrear además de `off_rt_find`. El RT ya se guarda a
+1120×584, así que el alias es 1:1: sin readback y sin stalls de GPU.
+
+Queda abierto: la deformación dentro del RT (viewport/clip, profundidad,
+traducción del VP) y un readback real si algún día la PPU necesita leer el RT.
 
 ## Cambios de esta sesión
 

@@ -205,16 +205,25 @@ principal a 30 FPS. Capturas `diagnostics/stability/narrative_frames/frame_25`,
 
 **Funciona:** arranque, logos de distribuidora, apertura, intro narrativa (977
 frames), pantalla de título, todos los menús, selector de modo, teclado en
-pantalla del juego, texturas 2D, teclado/XInput y escritura de datos de guardado.
+pantalla del juego, texturas 2D, teclado/XInput, escritura de datos de guardado y
+la composición del render target 3D (el quad que muestrea `0x0DF60000` ya no sale
+negro).
 
 **No funciona:**
 
 | Síntoma | Causa conocida |
 |---|---|
-| Modelos 3D y escena de fondo | El target MSAA `0xEAB0000` se limpia y se resuelve cada frame pero **no recibe geometría** (0 draws en 780 frames). Ver §6. |
-| Gameplay (tutorial, combates) | Consecuencia directa de lo anterior: el juego no puede avanzar sin escena. |
+| Escena 3D deformada | El destino del resolve ya muestra el RT `0xEAB0000` (parche 0007), pero **dentro** del RT la escena sale deformada: triángulos gigantes y texturas estiradas. Sospechosos: viewport/clip, profundidad y traducción del vertex program. |
+| Leer el RT desde la PPU | El backend D3D12 no escribe color renderizado en memoria del invitado; el alias solo cubre el caso "el invitado muestrea el destino como textura". |
+| Gameplay (tutorial, combates) | Consecuencia directa de la escena deformada. |
 | Efectos de sonido | Los `SOUND/*.PAST` son ATRAC3; solo está implementado el audio de vídeo (Media Foundation). |
 | Solape de capas 2D en el "gate" del selector | Descartados blend (claves `0x122118B` = alpha estándar y `0x122108B` = aditiva, ambas correctas), scissor y stencil (el juego no los usa) y geometría (los quads caen en pantalla). Pendiente de una referencia visual del juego real. |
+
+El resolve se arregló con un alias, no con un readback: `rsx_live_draw.c` y
+`rsx_draw_engine.c` sí escriben píxeles del invitado pero solo se inicializan en
+Vulkan, y `main.cpp` usa `rsx_d3d12_backend_init`. El backend guarda el RT a
+1120×584 (el almacenamiento 2× del invitado no se simula), así que apuntar
+`0xDF60000` al RT vivo es 1:1 y no cuesta ningún stall.
 
 Los binarios, el código levantado y los assets no se distribuyen: todo se
 regenera con `tools/pipeline.py` desde el disco del usuario.
