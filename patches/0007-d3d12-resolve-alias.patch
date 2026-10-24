@@ -1,5 +1,5 @@
 diff --git a/libs/video/cellGcmSys.c b/libs/video/cellGcmSys.c
-index 764b7e9..c50c262 100644
+index 764b7e9..ab82790 100644
 --- a/libs/video/cellGcmSys.c
 +++ b/libs/video/cellGcmSys.c
 @@ -1045,6 +1045,10 @@ static void gcm_row_copy(u32 d, u32 s, u32 n)
@@ -13,14 +13,18 @@ index 764b7e9..c50c262 100644
  static void nv3089_blit(void)
  {
      /* NV3089_FULL=1: every register of a blit whose destination is in the
-@@ -1276,6 +1280,10 @@ static void nv3089_blit(void)
+@@ -1276,6 +1280,14 @@ static void nv3089_blit(void)
          const u32 x1 = (out_x + out_w < cx1) ? out_x + out_w : cx1;
          const u32 y1 = (out_y + out_h < cy1) ? out_y + out_h : cy1;
          nv3089_engine_wrote(dst_pitch, x0, y0, x1, y1);
 +        /* The copy above moved zeros when the source is a live target: nothing
 +         * writes rendered colour back to guest memory. Point the destination at
-+         * the target so the composite that samples it shows the scene. */
-+        rsx_d3d12_backend_alias_resolve(s_gcm2d.dst_offset, s_nv3089.in_off);
++         * the target so the composite that samples it shows the scene. Only a
++         * scaled blit is a resolve; a 1:1 copy (a UI texture built from a
++         * staging buffer that happens to sit inside the target's range) keeps
++         * its own pixels. */
++        if (s_nv3089.ds_dx != 0x100000u || s_nv3089.dt_dy != 0x100000u)
++            rsx_d3d12_backend_alias_resolve(s_gcm2d.dst_offset, s_nv3089.in_off);
      }
      { static int _n = 0; static int cap = -1;
        if (cap < 0) { const char* e = getenv("NV3089_DBG"); cap = e ? atoi(e) : 0; }
