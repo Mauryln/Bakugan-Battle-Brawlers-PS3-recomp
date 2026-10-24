@@ -1,0 +1,72 @@
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index 6c07aae..2864c33 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -4013,6 +4013,28 @@ static void render_frame(void)
+     double _rf0 = perf_on() ? perf_now() : 0.0;
+     u32 fi = s_d3d.frame_index;
+ 
++    /* Bakugan's battle renders its scene into an offscreen target (1120x584)
++     * and then composites it, but the composite never reaches the display: the
++     * frame presents as a black clear. RX_PASTE=1 shows the surface the frame's
++     * last draw targeted 1:1 in the top-left corner -- a way to look at the 3D
++     * scene, not a rendering fix, because it paints over the 2D HUD.
++     * shortcut: no scaling and no HUD; drop it once the guest's own composite
++     * shows. */
++    {   int covered = 0;
++        for (u32 i = 0; i < s_d3d.draw_count && i < MAX_DRAWS; i++) {
++            const D3D12DrawRecord* dr = &s_d3d.draws[i];
++            if (dr->is_clear || dr->rt_off != 0 || !(dr->cmask & 0xF)) continue;
++            if (dr->vp_w >= s_d3d.width && dr->vp_h >= s_d3d.height) {
++                covered = 1;
++                break;
++            }
++        }
++        static int paste = -1;
++        if (paste < 0) { const char* e = getenv("RX_PASTE"); paste = e ? atoi(e) : 0; }
++        if (paste && s_d3d.draw_count > 0 && !covered && s_last_drawn_slot >= 0)
++            s_composite_src = 2;
++    }
++
+     /* Drain the GPU before touching shared upload resources (vp_vb vertices,
+      * vp_cb constants, per-frame texture staging): the previous frame's draws
+      * may still be reading them, and overwriting mid-flight tears geometry
+@@ -4834,13 +4856,20 @@ static void render_frame(void)
+                 }
+                 /* Per-draw pipeline: prefer the guest's own compiled FP; fall
+                  * back to the hardcoded atlas/colour PS pair. */
++                u32 _bkey = dr->blend_key, _actl = dr->alpha_ctl;
++                /* RX_OPAQUE=1: A/B knob -- draw display-target ops with blending
++                 * and alpha test forced off, telling "state hides the frame" from
++                 * "the frame was never drawn". */
++                { static int op = -1;
++                  if (op < 0) { const char* e = getenv("RX_OPAQUE"); op = e ? atoi(e) : 0; }
++                  if (op && dr->rt_off == 0) { _bkey = 0; _actl = 0; } }
+                 ID3D12PipelineState* dpso =
+-                    dr->fp_addr ? vp_get_fp_pso(dr->vs_idx, dr->fp_addr, dr->blend_key,
++                    dr->fp_addr ? vp_get_fp_pso(dr->vs_idx, dr->fp_addr, _bkey,
+                                                 dr_num_rts(dr),
+                                                 dr->rt_off ? rsx_surface_dxgi(dr->rt_fmt)
+                                                            : DXGI_FORMAT_R8G8B8A8_UNORM,
+                                                 dr->fp_exp32, dr->cmask, dr->cull,
+-                                                dr_cube_mask(dr), dr->depth_key, dr->alpha_ctl) : NULL;
++                                                dr_cube_mask(dr), dr->depth_key, _actl) : NULL;
+                 s_d3d.cmd_list->lpVtbl->SetPipelineState(s_d3d.cmd_list,
+                                                          dpso ? dpso : vpso);
+                 /* Per-draw viewport: the guest rect when sane, else the
+@@ -4922,6 +4951,15 @@ static void render_frame(void)
+                   } }
+                 s_d3d.cmd_list->lpVtbl->DrawInstanced(s_d3d.cmd_list,
+                     dr->vertex_count, 1, dr->vb_byte_offset / 256, 0);
++                { static int cap = -1, n = 0;
++                  if (cap < 0) { const char* e = getenv("RX_DISPDBG"); cap = e ? atoi(e) : 0; }
++                  if (cap && n < cap && dr->rt_off == 0 && dr->fp_addr) { n++;
++                    fprintf(stderr, "[DISPDRAW] d=%u verts=%u pso=%s vp=%ux%u bl=%d/%X "
++                                    "at=%X dp=%X texrt=%d tex0=0x%X%c",
++                            d, dr->vertex_count, dpso ? "guest-fp" : "fallback",
++                            dr->vp_w, dr->vp_h, dr->blend, dr->blend_key,
++                            dr->alpha_ctl, dr->depth_key, dr->tex_rt[0],
++                            dr->tex[0].raw, 10); } }
+                 /* VP_SUBMIT=<N>: prove the VP pass actually reaches the GPU.
+                  * "records exist" and "draws were submitted" are different
+                  * claims, and every blank-output investigation conflates them. */

@@ -206,14 +206,15 @@ principal a 30 FPS. Capturas `diagnostics/stability/narrative_frames/frame_25`,
 **Funciona:** arranque, logos de distribuidora, apertura, intro narrativa (977
 frames), pantalla de título, todos los menús, selector de modo, teclado en
 pantalla del juego, texturas 2D, teclado/XInput, escritura de datos de guardado y
-la composición del render target 3D (el quad que muestrea `0x0DF60000` ya no sale
-negro).
+el resolve del render target 3D: el quad que muestrea `0x0DF60000` recibe el RT
+`0xEAB0000` en vivo (parche 0007, confirmado con `texrt=0`).
 
 **No funciona:**
 
 | Síntoma | Causa conocida |
 |---|---|
-| Escena 3D deformada | El destino del resolve ya muestra el RT `0xEAB0000` (parche 0007), pero **dentro** del RT la escena sale deformada: triángulos gigantes y texturas estiradas. Sospechosos: viewport/clip, profundidad y traducción del vertex program. |
+| Batalla en negro | El combate dibuja 400+ ops fuera de pantalla y 13–20 ops a display (quad de composición con `pso=guest-fp`, `vp=1280x720`, blend `SRC_ALPHA`, sin test de profundidad, muestreando el RT vivo), pero **nada de ese pase deja píxeles**: ni la escena ni los sprites del HUD. El menú usa el mismo estado y sí se ve. Descartados: alias, canal alfa del RT, test de profundidad, PSO de fallback, cellResc y blits ocultos. Ver `docs/NEXT_SESSION.md` para el plan de pruebas. |
+| Escena 3D deformada | **Dentro** del RT la escena sale deformada: estelas radiales, triángulos gigantes y texturas estiradas. Sospechosos: constantes del vertex program y el fallback de `vp_fill_cb_slot` (sustituye `c0..c3` según `c00`), no las texturas. |
 | Leer el RT desde la PPU | El backend D3D12 no escribe color renderizado en memoria del invitado; el alias solo cubre el caso "el invitado muestrea el destino como textura". |
 | Gameplay (tutorial, combates) | Consecuencia directa de la escena deformada. |
 | Efectos de sonido | Los `SOUND/*.PAST` son ATRAC3; solo está implementado el audio de vídeo (Media Foundation). |
