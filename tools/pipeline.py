@@ -195,6 +195,7 @@ def step_hle_nids(force: bool) -> None:
 def step_spu_lift(force: bool) -> None:
     if done(SPU / "spu_workloads.c") and not force:
         print("SPU workloads already lifted")
+        run([PY, ROOT / "tools" / "build_audio_overlays.py"])
         return
     log("7/8 lifting SPU images + workload registry")
     SPU.mkdir(parents=True, exist_ok=True)
@@ -205,6 +206,7 @@ def step_spu_lift(force: bool) -> None:
          "--register-fn", "bakugan_spu_register_all",
          "--title", "bakugan",
          "--constructor"] + (["--relift"] if force else []))
+    run([PY, ROOT / "tools" / "build_audio_overlays.py"] + (["--force"] if force else []))
 
 
 FUNCS = {

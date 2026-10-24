@@ -1,0 +1,284 @@
+diff --git a/runtime/syscalls/lv2_register.c b/runtime/syscalls/lv2_register.c
+--- a/runtime/syscalls/lv2_register.c
++++ b/runtime/syscalls/lv2_register.c
+@@ -338,6 +338,9 @@
+      * waiting on the command queue never woke. */
+     struct { uint32_t spup; uint32_t queue; } evt_bind[8];
+     int                 evt_bind_n;
++    /* Inbound SPU queues are distinct from outbound user-event ports. */
++    struct { uint32_t spuq; uint32_t queue; } receive_bind[8];
++    int                 receive_bind_n;
+ } spu_thread_t;
+ 
+ typedef struct {
+@@ -1709,6 +1712,89 @@
+     return 1;
+ }
+ 
++static int64_t spu_queue_result(ppu_context* ctx, int32_t result)
++{
++    ctx->gpr[3] = (uint64_t)(int64_t)result;
++    return result;
++}
++
++static int64_t sys_spu_thread_bind_queue_handler(ppu_context* ctx)
++{
++    spu_thread_t* t = spu_find_thread((uint32_t)ctx->gpr[3]);
++    uint32_t queue = (uint32_t)ctx->gpr[4], spuq = (uint32_t)ctx->gpr[5];
++    if (!t) return spu_queue_result(ctx, (int32_t)CELL_ESRCH);
++    if (!queue || queue > SYS_EVENT_QUEUE_MAX || !g_sys_event_queues[queue - 1].active)
++        return spu_queue_result(ctx, (int32_t)CELL_ESRCH);
++    if (g_sys_event_queues[queue - 1].type != SYS_SPU_QUEUE)
++        return spu_queue_result(ctx, (int32_t)CELL_EINVAL);
++    AcquireSRWLockExclusive(&s_spu_port_lock);
++    for (int i = 0; i < t->receive_bind_n; i++) {
++        if (t->receive_bind[i].spuq == spuq || t->receive_bind[i].queue == queue) {
++            ReleaseSRWLockExclusive(&s_spu_port_lock);
++            return spu_queue_result(ctx, (int32_t)CELL_EBUSY);
++        }
++    }
++    if (t->receive_bind_n == 8) {
++        ReleaseSRWLockExclusive(&s_spu_port_lock);
++        return spu_queue_result(ctx, (int32_t)CELL_EAGAIN);
++    }
++    int i = t->receive_bind_n++;
++    t->receive_bind[i].spuq = spuq;
++    t->receive_bind[i].queue = queue;
++    WakeAllConditionVariable(&s_spu_port_bound);
++    ReleaseSRWLockExclusive(&s_spu_port_lock);
++    fprintf(stderr, "[SPU] bind_queue tid=0x%X queue=%u key=0x%08X\n", t->tid, queue, spuq);
++    return spu_queue_result(ctx, 0);
++}
++
++static int64_t sys_spu_thread_unbind_queue_handler(ppu_context* ctx)
++{
++    spu_thread_t* t = spu_find_thread((uint32_t)ctx->gpr[3]);
++    uint32_t spuq = (uint32_t)ctx->gpr[4];
++    if (!t) return spu_queue_result(ctx, (int32_t)CELL_ESRCH);
++    AcquireSRWLockExclusive(&s_spu_port_lock);
++    for (int i = 0; i < t->receive_bind_n; i++) {
++        if (t->receive_bind[i].spuq == spuq) {
++            t->receive_bind[i] = t->receive_bind[--t->receive_bind_n];
++            ReleaseSRWLockExclusive(&s_spu_port_lock);
++            return spu_queue_result(ctx, 0);
++        }
++    }
++    ReleaseSRWLockExclusive(&s_spu_port_lock);
++    return spu_queue_result(ctx, (int32_t)CELL_ESRCH);
++}
++
++static int spu_service_stop(spu_context* spu)
++{
++    if (spu->stop_code != 0x110u) return 0;
++    uint32_t result = CELL_EINVAL, queue = 0;
++    if (!spu->ch_out_mbox.count) goto reply;
++    uint32_t spuq = spu_channel_read(&spu->ch_out_mbox);
++    if (spu->ch_in_mbox.count || spu->rcv_evt_n) { result = CELL_EBUSY; goto reply; }
++    AcquireSRWLockShared(&s_spu_port_lock);
++    const spu_thread_t* t = spu_find_thread(spu->spu_id);
++    if (t) for (int i = 0; i < t->receive_bind_n; i++) {
++        if (t->receive_bind[i].spuq == spuq) { queue = t->receive_bind[i].queue; break; }
++    }
++    ReleaseSRWLockShared(&s_spu_port_lock);
++    if (queue) {
++        /* The ordinary queue wait blocks on its condition variable, releases
++         * the queue lock, and returns the payload in registers r5..r7. */
++        ppu_context call = {0};
++        call.gpr[3] = queue;
++        result = (uint32_t)sys_event_queue_receive(&call);
++        if (!result) {
++            for (unsigned i = 0; i < 3; i++) spu->rcv_evt[i + 1] = (uint32_t)call.gpr[i + 5];
++        }
++    }
++reply:
++    spu->rcv_evt[0] = result;
++    spu->rcv_evt_i = 0;
++    spu->rcv_evt_n = result ? 1 : 4;
++    spu->status = SPU_STATUS_RUNNING;
++    return 1;
++}
++
+ static int64_t sys_spu_thread_group_disconnect_event_handler(ppu_context* ctx)
+ {
+     uint32_t group_id = (uint32_t)ctx->gpr[3];
+@@ -2576,8 +2662,10 @@
+     lv2_syscall_register(tbl, SYS_SPU_THREAD_SET_SPU_CFG,    sys_spu_thread_set_spu_cfg_handler);
+     lv2_syscall_register(tbl, SYS_SPU_THREAD_GET_SPU_CFG,    sys_spu_thread_get_spu_cfg_handler);
+     lv2_syscall_register(tbl, SYS_SPU_THREAD_WRITE_SPU_MB,  sys_spu_thread_write_spu_mb_handler);
+-    lv2_syscall_register(tbl, SYS_SPU_THREAD_BIND_QUEUE,      sys_spu_thread_stub);
+-    lv2_syscall_register(tbl, SYS_SPU_THREAD_UNBIND_QUEUE,    sys_spu_thread_stub);
++    { extern int (*g_spu_stop_hook)(spu_context*);
++      g_spu_stop_hook = spu_service_stop; }
++    lv2_syscall_register(tbl, SYS_SPU_THREAD_BIND_QUEUE,      sys_spu_thread_bind_queue_handler);
++    lv2_syscall_register(tbl, SYS_SPU_THREAD_UNBIND_QUEUE,    sys_spu_thread_unbind_queue_handler);
+     lv2_syscall_register(tbl, SYS_SPU_THREAD_GROUP_CONNECT_EVENT_ALL_THREADS, sys_spu_thread_group_connect_event_all_threads_handler);
+ }
+ 
+diff --git a/runtime/spu/spu_channels.c b/runtime/spu/spu_channels.c
+--- a/runtime/spu/spu_channels.c
++++ b/runtime/spu/spu_channels.c
+@@ -128,6 +128,7 @@
+  * handler that maps spu_group_id -> connected event queue and pushes an event.
+  * NULL until installed (plain SPU jobs with no PPU listener stay a no-op). */
+ int (*g_spu_user_event_hook)(spu_context*, uint32_t) = NULL;
++int (*g_spu_stop_hook)(spu_context*) = NULL;
+ void (*g_spu_out_mbox_hook)(uint32_t group_id, uint32_t spu_id,
+                             int is_intr, uint32_t value) = 0;
+ 
+@@ -184,6 +185,10 @@
+  * service. Env YDKJ_STOP_NOHALT restores the old (looping) behavior for A/B. */
+ void spu_stop(spu_context* ctx)
+ {
++    /* LV2 services such as receive_event resume at the instruction following
++     * STOP. Leaving STOPPED set returns from the lifted block and can replay
++     * the same mailbox request forever in the caller's drain loop. */
++    if (g_spu_stop_hook && g_spu_stop_hook(ctx)) return;
+     /* A lifted `stop` sets status and RETURNS to its caller -- for a SPURS
+      * policy this is stop-and-signal: it returns up into the kernel/policy
+      * service loop, which continues (i.e. the SPU "resumes" past the stop). That
+@@ -319,9 +324,14 @@
+ 
+ static mfc_engine* mfc_for(spu_context* ctx)
+ {
+-    { static volatile LONG started = 0; const char* e;
+-      if (!started && (e = getenv("SPU_PCSAMPLE")) && !InterlockedExchange(&started, 1))
+-          CreateThread(NULL, 0, spu_pcsample_thread, (LPVOID)(uintptr_t)(atoi(e) * 1000), 0, NULL); }
++    { static volatile LONG checked = 0;
++      /* Even a disabled probe must be cached. getenv takes a process-wide CRT
++       * lock; doing it on every MFC channel serializes the audio SPUs. */
++      if (!checked && !InterlockedCompareExchange(&checked, 1, 0)) {
++          const char* e = getenv("SPU_PCSAMPLE");
++          if (e && atoi(e) > 0)
++              CreateThread(NULL, 0, spu_pcsample_thread, (LPVOID)(uintptr_t)(atoi(e) * 1000), 0, NULL);
++      } }
+     AcquireSRWLockShared(&s_mfc_claim_lock);
+     for (spu_mfc_slot* slot = s_mfc_slots; slot; slot = slot->next) {
+         if (slot->ctx == ctx) {
+@@ -1978,6 +1988,22 @@
+  * the small instruction set such stubs use, and exit back into lifted code at
+  * the first branch (trampoline re-dispatch). Returns 1 if it executed to a
+  * branch, 0 on an unknown opcode (caller falls through to BRANCH-TO-0). */
++/* A live-code interpreter must preserve an owning drain's return boundary and
++ * schedule a compiled rejoin. Otherwise a top-level transfer silently ends,
++ * or a nested return runs its caller's continuation twice. */
++static int spu_interpret_live_code(spu_context* ctx, uint32_t pc)
++{
++    const uint32_t return_pc = ctx->drain_ret_pc;
++    uint32_t result = spu_interp_run_until(ctx, pc, return_pc);
++    if (ctx->image_id >= 0 && (ctx->status & SPU_STATUS_RUNNING) &&
++        (!return_pc || (ctx->pc & SPU_LS_MASK) != return_pc) &&
++        spu_lifted_lookup(ctx, ctx->pc)) {
++        g_spu_trampoline_fn = spu_indirect_branch;
++        return 1;
++    }
++    return result ? 1 : 0;
++}
++
+ static int spu_smc_microstep(spu_context* ctx)
+ {
+     uint32_t pc = ctx->pc & SPU_LS_MASK & ~3u;
+@@ -2132,20 +2158,7 @@
+         /* Stop at the drain's return point too: it sits mid-function, so it is
+          * no lifted entry, and a job's return would otherwise run on through
+          * the caller's code (GH3's song-freeze; see drain_ret_pc). */
+-        const uint32_t return_pc = ctx->drain_ret_pc;
+-        uint32_t result = spu_interp_run_until(ctx, pc, return_pc);
+-        /* A live interpreter rejoin is a transfer, not a host return. Nested
+-         * drains can repair an empty trampoline, but the top-level driver
+-         * otherwise ends the run before executing the lifted target.
+-         * An already-owning drain must retain its own host continuation;
+-         * stopped states and diagnostic exits keep their existing behavior. */
+-        if (ctx->image_id >= 0 && (ctx->status & SPU_STATUS_RUNNING) &&
+-            (!return_pc || (ctx->pc & SPU_LS_MASK) != return_pc) &&
+-            spu_lifted_lookup(ctx, ctx->pc)) {
+-            g_spu_trampoline_fn = spu_indirect_branch;
+-            return 1;
+-        }
+-        return result ? 1 : 0;
++        return spu_interpret_live_code(ctx, pc);
+     }
+     { static int _n = 0; if (PS3_LOG_FIRST(_n, 4))
+         fprintf(stderr, "[spu-smc] microstep img=%d runaway (4096 steps from 0x%05X)\n",
+@@ -2393,7 +2406,7 @@
+         if (!known && n_seen < 16) {
+             seen[n_seen++] = ctx->pc;
+             fprintf(stderr, "[spu] img=%d branched into unlifted LS 0x%05X "
+-                    "(lr=0x%05X) -- ending the job\n",
++                    "(lr=0x%05X)\n",
+                     ctx->image_id, ctx->pc, ctx->gpr[0]._u32[0] & SPU_LS_MASK);
+             { fprintf(stderr, "      last dispatched PCs (oldest first):");
+               for (unsigned q = 0; q < 8; q++) {
+@@ -2427,13 +2440,13 @@
+           uint32_t w0 = ((uint32_t)ctx->ls[p] << 24) | ((uint32_t)ctx->ls[p+1] << 16) |
+                         ((uint32_t)ctx->ls[p+2] << 8) | ctx->ls[p+3];
+           static int s_iu = -1;
+-          if (s_iu < 0) { const char* e = getenv("SPU_INTERP_UNLIFTED"); s_iu = e ? 1 : 0; }
++          if (s_iu < 0) { const char* e = getenv("SPU_INTERP_UNLIFTED"); s_iu = e && strcmp(e, "0") != 0; }
+           if (s_iu && w0) {
+               static int _n = 0;
+               if (PS3_LOG_FIRST(_n, 8))
+                   fprintf(stderr, "[spu] img=%d interpreting unlifted LS 0x%05X "
+                           "(runtime-loaded code)\n", ctx->image_id, p);
+-              spu_interp_run(ctx, p);
++              spu_interpret_live_code(ctx, p);
+               return;
+           } }
+         spu_halt(ctx);
+@@ -2878,4 +2891,4 @@
+ 
+ #ifdef __cplusplus
+ }
+-#endif
+\ No newline at end of file
++#endif
+diff --git a/libs/audio/cellAudio.c b/libs/audio/cellAudio.c
+--- a/libs/audio/cellAudio.c
++++ b/libs/audio/cellAudio.c
+@@ -569,8 +569,11 @@
+     unsigned long long blocks = 0;
+     while (s_mix_thread_running) {
+         const int room = audio_backend_room();
+-        if (room >= 0 && room < CELL_AUDIO_BLOCK_SAMPLES) { audio_backend_wait(); continue; }
+-        if (room < 0) {
++        /* WASAPI releases space in device-period batches. Spare capacity is
++         * not permission to consume several guest blocks at once: that races
++         * the producer awakened by each audio event and clears unwritten slots.
++         * Keep the PS3 heartbeat steady even with a working host device. */
++        {
+             LARGE_INTEGER now; QueryPerformanceCounter(&now);
+             const long long due = q0.QuadPart +
+                 (long long)(blocks * CELL_AUDIO_BLOCK_SAMPLES * qf.QuadPart / CELL_AUDIO_SAMPLE_RATE);
+@@ -581,6 +584,7 @@
+                 q0.QuadPart = now.QuadPart -
+                     (long long)(blocks * CELL_AUDIO_BLOCK_SAMPLES * qf.QuadPart / CELL_AUDIO_SAMPLE_RATE);
+         }
++        if (room >= 0 && room < CELL_AUDIO_BLOCK_SAMPLES) { audio_backend_wait(); continue; }
+         blocks++;
+         /* Mix and submit one block */
+         audio_mix_one_block();
+@@ -705,6 +709,7 @@
+     }
+     printf("[cellAudio] Init()\n");
+ 
++
+     if (s_audio_initialized)
+         return CELL_AUDIO_ERROR_ALREADY_INIT;
+ 
+diff --git a/runtime/syscalls/sys_timer.c b/runtime/syscalls/sys_timer.c
+--- a/runtime/syscalls/sys_timer.c
++++ b/runtime/syscalls/sys_timer.c
+@@ -220,7 +220,13 @@
+ #ifdef _WIN32
+     /* Use high-resolution sleep via waitable timer for better precision */
+     if (usec >= 1000) {
+-        HANDLE timer = CreateWaitableTimerW(NULL, TRUE, NULL);
++        /* The ordinary timer can round a 1ms guest poll to a scheduler tick,
++         * especially when Windows 11 ignores timeBeginPeriod for an occluded
++         * window. Multistream polls three times per audio job: those delays
++         * then become ~47ms for just 10.7ms of samples. */
++        HANDLE timer = CreateWaitableTimerExW(NULL, NULL, 0x00000002u,
++                                             TIMER_ALL_ACCESS); /* HIGH_RESOLUTION, Windows 10 1803+ */
++        if (!timer) timer = CreateWaitableTimerW(NULL, TRUE, NULL);
+         if (timer) {
+             LARGE_INTEGER due;
+             due.QuadPart = -((LONGLONG)usec * 10); /* 100ns units, negative = relative */

@@ -160,7 +160,7 @@ elseif(PORT_ENABLE_SPU)
              "${PS3RECOMP_DIR}/runtime/spu/spu_dispatch_mt.c")
         # Generated beside the lift; each is present only once its generator
         # has been run, so each is included only if it is actually here.
-        foreach(gen IN ITEMS spu_workloads.c jobmods_register.c taskset_policy_bytes.c)
+        foreach(gen IN ITEMS spu_workloads.c spu_audio_overlays.c jobmods_register.c taskset_policy_bytes.c)
             if(EXISTS "${SPU_DIR}/${gen}")
                 list(APPEND SPU_SOURCES "${SPU_DIR}/${gen}")
             else()
@@ -195,6 +195,21 @@ if(SPU_SOURCES)
         COMPILE_DEFINITIONS SPU_USE_DISPATCH_MT)
     if(NOT MSVC OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
         set_source_files_properties(${SPU_SOURCES} PROPERTIES COMPILE_OPTIONS "-O2")
+    endif()
+endif()
+
+option(PORT_SPU_SSE41 "Use SSE4.1 SPU helpers on Windows x64 (requires SSE4.1 CPU)" ON)
+option(PORT_SPU_AVX2 "Use exact vector SPU floating point (requires AVX2 CPU)" ON)
+if(PORT_SPU_SSE41 AND SPU_SOURCES AND WIN32 AND CMAKE_SIZEOF_VOID_P EQUAL 8
+   AND MSVC AND CMAKE_C_COMPILER_ID MATCHES "Clang" AND NOT CMAKE_SYSTEM_PROCESSOR MATCHES "ARM|arm")
+    # Enable the toolkit's tested SIMD shuffle path in generated SPU code.
+    # Keep this source-scoped so the large PPU lift does not rebuild.
+    set_property(SOURCE ${SPU_SOURCES} APPEND PROPERTY COMPILE_OPTIONS "/clang:-msse4.1")
+    set_property(SOURCE main.cpp APPEND PROPERTY COMPILE_DEFINITIONS BAKUGAN_SPU_SSE41=1)
+    if(PORT_SPU_AVX2)
+        set_property(SOURCE ${SPU_SOURCES} APPEND PROPERTY COMPILE_OPTIONS
+            "/clang:-mavx2" "/clang:-ffp-contract=off")
+        set_property(SOURCE main.cpp APPEND PROPERTY COMPILE_DEFINITIONS BAKUGAN_SPU_AVX2=1)
     endif()
 endif()
 

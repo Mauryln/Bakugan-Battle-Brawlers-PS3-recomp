@@ -31,6 +31,9 @@
 /* The lifter's generated header, which declares ppu_context and the function
  * table. It comes first: everything below is written against that struct. */
 #include "ppu_recomp.h"
+#if defined(BAKUGAN_SPU_SSE41)
+#include <intrin.h>
+#endif
 
 /* The Win32 names -- Sleep, GetTickCount64, CreateThread, InterlockedIncrement,
  * VirtualAlloc, the scalar typedefs -- from one place. On Windows this is a
@@ -495,6 +498,23 @@ static void harness_guest_caller(uint32_t opd, uint64_t a0, uint64_t a1,
 
 int main(int argc, char** argv)
 {
+#if defined(BAKUGAN_SPU_SSE41)
+    int cpu_features[4];
+    __cpuid(cpu_features, 1);
+    if (!(cpu_features[2] & (1 << 19))) {
+        fprintf(stderr, "This build requires SSE4.1. Rebuild with -DPORT_SPU_SSE41=OFF for this CPU.\n");
+        return 2;
+    }
+#if defined(BAKUGAN_SPU_AVX2)
+    int cpu_extended[4];
+    __cpuidex(cpu_extended, 7, 0);
+    if (!(cpu_extended[1] & (1 << 5)) || !(cpu_features[2] & (1 << 27)) ||
+        !(cpu_features[2] & (1 << 28))) {
+        fprintf(stderr, "This build requires AVX2. Rebuild with -DPORT_SPU_AVX2=OFF for this CPU.\n");
+        return 2;
+    }
+#endif
+#endif
     if (argc < 2) {
         printf("usage: %s <PPU ELF>\n", argv[0]);
         return 2;
@@ -502,6 +522,10 @@ int main(int argc, char** argv)
 
 #ifdef _WIN32
 #pragma comment(lib, "winmm.lib")
+    /* Multistream generates SPU mixer kernels in high local store. They have
+     * no static image to lift; execute live bytes and rejoin compiled code.
+     * Keep an explicit 0 override for diagnosis. Set before any worker starts. */
+    if (!getenv("SPU_INTERP_UNLIFTED")) _putenv_s("SPU_INTERP_UNLIFTED", "1");
     /* 1 ms timer resolution. The default granularity is about 15.6 ms, which
      * inflates every shorter wait the title makes and throttles the whole
      * thing. POSIX timers are already fine-grained. */

@@ -1,6 +1,10 @@
 # Estado del port — Bakugan: Battle Brawlers (BLES00758)
 
-Última actualización: **menús y vídeos completos; gameplay pendiente**.
+Última actualización: **audio casi perfecto; Battle Arena inicia; 3D pendiente**.
+
+El cierre de la sesión del 24/10/2026 y el plan para retomarla están en
+[NEXT_SESSION.md](NEXT_SESSION.md). Ese reporte actualiza las conclusiones
+históricas sobre audio y geometría que aparecen más abajo.
 
 El juego arranca, reproduce sus vídeos (logos, apertura, intro narrativa),
 recorre todas las pantallas de menú y acepta teclado. **Lo que no funciona:
