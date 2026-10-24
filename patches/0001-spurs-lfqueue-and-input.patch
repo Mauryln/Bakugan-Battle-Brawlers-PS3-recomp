@@ -1,0 +1,1066 @@
+diff --git a/libs/input/cellPad.c b/libs/input/cellPad.c
+index 7fa8cab..fac1018 100644
+--- a/libs/input/cellPad.c
++++ b/libs/input/cellPad.c
+@@ -206,11 +206,16 @@ static void pad_poll_keyboard(void)
+     static const struct { int vk; u16 btn; } map[] = {
+         { VK_UP,     CELL_PAD_CTRL_UP },      { VK_DOWN,  CELL_PAD_CTRL_DOWN },
+         { VK_LEFT,   CELL_PAD_CTRL_LEFT },    { VK_RIGHT, CELL_PAD_CTRL_RIGHT },
+-        { 'Z',       CELL_PAD_CTRL_CROSS },   { 'X',      CELL_PAD_CTRL_CIRCLE },
+-        { 'A',       CELL_PAD_CTRL_SQUARE },  { 'S',      CELL_PAD_CTRL_TRIANGLE },
+-        { 'Q',       CELL_PAD_CTRL_L1 },      { 'W',      CELL_PAD_CTRL_R1 },
+-        { '1',       CELL_PAD_CTRL_L2 },      { '2',      CELL_PAD_CTRL_R2 },
+-        { VK_RETURN, CELL_PAD_CTRL_START },   { VK_TAB,   CELL_PAD_CTRL_SELECT },
++        /* X confirms (Cross) -- the key a player reaches for. C is Circle,
++         * Z is Square, S is Triangle: Z X C S reads in the pad's own order.
++         * Space and Backspace are aliases so a keyboard-only player never has
++         * to hunt for them. */
++        { 'X',       CELL_PAD_CTRL_CROSS },   { 'C',       CELL_PAD_CTRL_CIRCLE },
++        { 'Z',       CELL_PAD_CTRL_SQUARE },  { 'S',       CELL_PAD_CTRL_TRIANGLE },
++        { 'Q',       CELL_PAD_CTRL_L1 },      { 'E',       CELL_PAD_CTRL_R1 },
++        { '1',       CELL_PAD_CTRL_L2 },      { '2',       CELL_PAD_CTRL_R2 },
++        { VK_RETURN, CELL_PAD_CTRL_START },   { VK_TAB,    CELL_PAD_CTRL_SELECT },
++        { VK_SPACE,  CELL_PAD_CTRL_CROSS },   { VK_BACK,   CELL_PAD_CTRL_SELECT },
+     };
+ 
+     u16 btns = 0;
+diff --git a/libs/spurs/cellSpurs.c b/libs/spurs/cellSpurs.c
+index 19a8516..6d8d23a 100644
+--- a/libs/spurs/cellSpurs.c
++++ b/libs/spurs/cellSpurs.c
+@@ -244,6 +244,19 @@ static inline void ef_broadcast(EventFlagSync* s)
+ #define EF_EVENT_QUEUE_ID    0x7Cu  /* be u32 */
+ #define EF_GUEST_SIZE        0x80u
+ 
++/* The workload event flag (cellSpursEventFlagInitialize with taskset == NULL).
++ * The SPURS kernel sets a workload's bit in it when the workload finishes; the
++ * HLE path below does that from the SPU completion hook. */
++static uint32_t s_workload_flag_ea;
++
++s32 cellSpursEventFlagSet(CellSpursEventFlag* eventFlag, u16 bits);
++
++void spurs_workload_flag_set(uint16_t bits)
++{
++    if (!s_workload_flag_ea || !bits) return;
++    cellSpursEventFlagSet((CellSpursEventFlag*)(uintptr_t)s_workload_flag_ea, bits);
++}
++
+ /* Layer-2 hook: wake an SPU task that registered a wait slot and slept via
+  * the taskset syscall. Implemented in runtime/spu (task park/wake); the
+  * event-flag core only reports WHO must wake. */
+@@ -839,6 +852,33 @@ static int spurs_guest_range_valid(u32 ea, u32 bytes)
+  * Taskset
+  * =====================================================================*/
+ 
++/* spurs instance -> the taskset(s) created on it.
++ *
++ * A CellSpursLFQueue's eaSignal (+0x70) names the SPURS *instance* the queue
++ * belongs to, not the taskset that consumes it: Bakugan passes
++ * _cellSpursLFQueueInitialize(owner=0x10000401) for the instance at 0x10000400
++ * (bit 0 is the direction), while its task is parked on taskset 0x10017000.
++ * A push that signals the owner verbatim therefore wakes nobody. Remember the
++ * mapping at create time so the queue can reach the task.
++ */
++#define SPURS_TS_MAP_MAX 8
++static struct { uint32_t spurs, taskset; } s_ts_map[SPURS_TS_MAP_MAX];
++
++static void spurs_ts_map_set(uint32_t spurs_ea, uint32_t taskset_ea)
++{
++    for (int i = 0; i < SPURS_TS_MAP_MAX; i++)
++        if (s_ts_map[i].spurs == spurs_ea) { s_ts_map[i].taskset = taskset_ea; return; }
++    for (int i = 0; i < SPURS_TS_MAP_MAX; i++)
++        if (!s_ts_map[i].spurs) { s_ts_map[i].spurs = spurs_ea; s_ts_map[i].taskset = taskset_ea; return; }
++}
++
++static uint32_t spurs_ts_map_get(uint32_t spurs_ea)
++{
++    for (int i = 0; i < SPURS_TS_MAP_MAX; i++)
++        if (s_ts_map[i].spurs == spurs_ea) return s_ts_map[i].taskset;
++    return 0;
++}
++
+ static s32 spurs_create_taskset(CellSpurs* spurs, CellSpursTaskset* taskset,
+                                 u64 args, const u8* priority, u32 maxContention,
+                                 u32 taskset_size)
+@@ -877,6 +917,7 @@ static s32 spurs_create_taskset(CellSpurs* spurs, CellSpursTaskset* taskset,
+     g_ydkj_real_taskset_ea = taskset_ea;
+ 
+     g_ydkj_real_spurs_ea = spurs_ea;   /* capture for the taskset-policy handoff (LS[0x1C0]) */
++    spurs_ts_map_set(spurs_ea, taskset_ea);
+     printf("[cellSpurs] CreateTaskset() ea=0x%08X spurs=0x%08X (real BE layout)\n", taskset_ea, spurs_ea);
+     return CELL_OK;
+ }
+@@ -1235,7 +1276,7 @@ s32 cellSpursCreateTaskWithAttribute(CellSpursTaskset* taskset,
+      * (a no-context task may not block -- SPU task-lib waits then fail with
+      * ERROR_STAT). Learn the real field offsets from the bytes. */
+     { uint32_t aea = (uint32_t)(uintptr_t)attr;
+-      static int _n = 0; if (PS3_LOG_FIRST(_n, 6)) {
++      static int _n = 0; if (PS3_LOG_FIRST(_n, 4000)) {
+         fprintf(stderr, "[cellSpurs] CreateTaskWithAttr attr=0x%08X raw:", aea);
+         for (int o = 0; o < 0x40; o += 4) fprintf(stderr, " %08X", vm_read32(aea + o));
+         fprintf(stderr, "\n"); } }
+@@ -1935,8 +1976,18 @@ s32 cellSpursEventFlagInitialize(CellSpursTaskset* taskset,
+     vm_write8(eventFlag_ea + EF_CLEAR_MODE, (uint8_t)clearMode);
+     /* addr = the owning taskset (isIwl=0); SPU-side Set uses it to find whom
+      * to signal, and our Set hook passes it to spu_taskset_signal_task. */
+-    vm_write8(eventFlag_ea + EF_IS_IWL, 0);
+-    vm_write64(eventFlag_ea + EF_ADDR, (uint64_t)taskset_ea);
++    if (taskset_ea) {
++        vm_write8(eventFlag_ea + EF_IS_IWL, 0);
++        vm_write64(eventFlag_ea + EF_ADDR, (uint64_t)taskset_ea);
++    } else {
++        /* taskset == NULL: a WORKLOAD flag. The SPURS kernel signals the bit of
++         * a workload when it finishes, and Bakugan waits on exactly this flag
++         * after queueing its inflate jobs (the worker completes and nothing
++         * ever sets the bit). Remember it so the completion path can. */
++        vm_write8(eventFlag_ea + EF_IS_IWL, 1);
++        vm_write64(eventFlag_ea + EF_ADDR, 0);
++        s_workload_flag_ea = eventFlag_ea;
++    }
+ 
+     EventFlagSync* sync = ef_sync_alloc(eventFlag_ea);
+     if (!sync) {
+@@ -2938,128 +2989,210 @@ s32 cellSpursQueueSize(u64 queue_ea, u64 size_ea)
+     if (queue_ea & 0x7F)       return CELL_SPURS_TASK_ERROR_ALIGN;
+ 
+     uint32_t q   = (uint32_t)queue_ea;
+-    int32_t  w0  = (int32_t)vm_read32(q + 0x00);
+-    int32_t  w1  = (int32_t)vm_read32(q + 0x04);
+-    int32_t  mod = (int32_t)vm_read32(q + 0x0C);
+-    if (mod <= 0) return CELL_SPURS_TASK_ERROR_INVAL;
+-
+-    int32_t  pop  = (w0 < 0) ? ~w0 : w0;
+-    int32_t  push = (w1 < 0) ? ~w1 : w1;
+-    uint32_t n    = (uint32_t)((pop > push) ? push - pop + 2 * mod : push - pop);
++    /* SDK CellSyncLFQueue: published push index is push1.m_h5 (+0x08), published
++     * pop index is pop1.m_h1 (+0x00), occupancy runs modulo 2*depth (+0x14). */
++    int32_t  depth = (int32_t)vm_read32(q + 0x14);
++    if (depth <= 0) return CELL_SPURS_TASK_ERROR_INVAL;
++
++    int32_t  pop  = (int16_t)vm_read16(q + 0x00);
++    int32_t  push = (int16_t)vm_read16(q + 0x08);
++    uint32_t n    = (uint32_t)((push < pop) ? push - pop + 2 * depth : push - pop);
+     vm_write32((uint32_t)size_ea, n);
+ 
+     static int _n = 0;
+     if (_n < 8 || (n && _n < 64))
+-        printf("[cellSpurs] QueueSize(q=0x%08X) -> %u (pop=%d push=%d mod=%d)\n", q, n, pop, push, mod);
++        printf("[cellSpurs] QueueSize(q=0x%08X) -> %u (pop=%d push=%d depth=%d)\n",
++               q, n, pop, push, depth);
+     _n++;
+     return CELL_OK;
+ }
+ 
+-/* SDK ABI: cellSpursQueuePushBody(CellSpursQueue*, const void* buffer, bool isBlocking) */
++/* SDK ABI: cellSpursQueuePushBody(CellSpursQueue*, const void* buffer, bool isBlocking)
++ * Same ring as the internal entry the tasks use; see the LF queue block below. */
++static s32 lfqueue_push(u64 queue_ea, u64 data_ea, int deliver);
++
+ s32 cellSpursQueuePushBody(u64 queue_ea, u64 data_ea, u32 isBlocking)
+ {
+-    /* SPURS_QUEUE_PUSH=1 -- EXPERIMENT, off by default.
+-     *
+-     * A deliberately self-revealing probe rather than a finished push. The
+-     * waiter half of the protocol is known (see PROGRESS.md phase 19): the
+-     * 16-byte group at queue+0x20 is a ring of blocked task ids, byte[0] the
+-     * count and byte[13] the cursor. The DATA half is not: which ring slot an
+-     * element belongs in has never been observed, because nothing has ever
+-     * pushed and so the consumer has never taken its non-empty path.
+-     *
+-     * So push into a CANDIDATE slot (a counter kept in the push1 half of the
+-     * line at +0x0C), wake the registered waiter, and let the consumer's own
+-     * DMA say where it actually looks. Its read address names the correct slot
+-     * whether or not the guess was right, which turns one run into the answer.
+-     * Everything is logged for that reason. */
+-    static int s_exp = -1;
+-    if (s_exp < 0) s_exp = getenv("SPURS_QUEUE_PUSH") ? 1 : 0;
++    (void)isBlocking;
++    return lfqueue_push(queue_ea, data_ea, 1);
++}
++
++/* -------------------------------------------------------------------------
++ * The LF queue the SPURS tasks actually consume.
++ *
++ * This is a CellSyncLFQueue as the SDK defines it (128-byte line, big-endian):
++ *
++ *   0x00 pop1 : u16 m_h1 (published pop), m_h2, m_h3 (busy), m_h4 (reserved pop)
++ *   0x08 push1: u16 m_h5 (published push), m_h6 (in-flight mask),
++ *               m_h7 (busy), m_h8 (reserved push)
++ *   0x10 size (u32)      0x14 depth (u32)     0x18 buffer (u64)
++ *   0x20 m_bs[4]         0x24 direction        0x28 v1      0x2C init
++ *   0x30 push2 (pack)    0x50 pop2 (pack)      0x70 eaSignal (u64)
++ *
++ * The earlier initialiser wrote `depth` at +0x0C, which is push1.m_h7/m_h8 --
++ * i.e. it handed the consumer a push pointer of 47 on an empty queue. Bakugan
++ * then pushed into a queue the consumer read as full of zeros, the consumer's
++ * output was garbage, and every push the game made after that answered "full"
++ * (the title asserts on `0 == ret`, 45 times at boot).
++ *
++ * The indices live modulo 2*depth so "full" and "empty" are distinguishable.
++ * A producer reserves h8, copies the element, then publishes h5; a consumer
++ * reserves h4, copies out, then publishes h1. Only the published pointers are
++ * compared for occupancy. The pack/hs1/hs2 bookkeeping those functions also
++ * maintain is the blocked-task wake-up ledger; with nobody registered in it
++ * (pack == 0, which is what an empty queue holds) it is a no-op, and the wake
++ * below goes through the runtime's own WAIT_SIGNAL channel instead.
++ * ---------------------------------------------------------------------- */
++
++/* -------------------------------------------------------------------------
++ * Diagnostics: the last LF queue this title initialised and the first few
++ * elements pushed into it, so a port can dump real state without hardcoding
++ * guest addresses (the heap layout differs from run to run).
++ * ---------------------------------------------------------------------- */
++uint32_t g_ps3_lfq_ea, g_ps3_lfq_buf, g_ps3_lfq_size, g_ps3_lfq_depth;
++int      g_ps3_lfq_first_n;
++uint8_t  g_ps3_lfq_first[8][64];
++
++enum {
++    LFQ_POP      = 0x00u,
++    LFQ_PUSH     = 0x08u,
++    LFQ_SIZE     = 0x10u,
++    LFQ_DEPTH    = 0x14u,
++    LFQ_BUFFER   = 0x18u,
++    LFQ_BS       = 0x20u,
++    LFQ_DIR      = 0x24u,
++    LFQ_V1       = 0x28u,
++    LFQ_INIT     = 0x2Cu,
++    LFQ_SIGNAL   = 0x70u,
++};
++
++/* h8 (reserved push) / h5 (published push) / h4 / h1 as signed 16-bit indices */
++static inline int32_t lfq_u16(int32_t v) { return (int32_t)(int16_t)(uint16_t)v; }
++
++static int32_t lfq_occupancy(int32_t head, int32_t tail, int32_t depth)
++{
++    int32_t n = tail - head;
++    if (n < 0) n += depth * 2;
++    return n;
++}
++
++/* Wake whatever is parked on the taskset this queue signals. */
++static void lfq_wake(uint32_t q, int deliver)
++{
++    if (!deliver) return;
++    u32 owner = (u32)vm_read64(q + LFQ_SIGNAL);
++    if (!owner) return;
++
++    extern int  spu_taskset_signal_parked_obj(uint32_t, uint32_t);
++    extern void spu_taskset_latch_wake(uint32_t);
++
++    u32 base = owner & ~1u;                 /* bit 0 is the direction */
++    u32 taskset = spurs_ts_map_get(base);
++    int woke = 0;
++    if (taskset) woke = spu_taskset_signal_parked_obj(taskset, 0);
++    if (!woke)   woke = spu_taskset_signal_parked_obj(base, 0);
++    if (!woke)   woke = spu_taskset_signal_parked_obj(owner, 0);
++    if (taskset && !woke) spu_taskset_latch_wake(taskset);   /* parks a moment later */
+ 
+     static int _n = 0;
+-    if (!s_exp) {
+-        if (_n < 8)
+-            printf("[cellSpurs] QueuePushBody(q=0x%08X data=0x%08X blocking=%u)\n",
+-                   (u32)queue_ea, (u32)data_ea, isBlocking);
+-        else if (_n == 8)
+-            printf("[cellSpurs] QueuePushBody further logs suppressed\n");
+-        _n++;
+-        return CELL_OK;
++    if (PS3_LOG_FIRST(_n, 4000))
++        printf("[cellSpurs] LFQueue wake: taskset=0x%08X parked=%d\n", taskset, woke);
++}
++
++static s32 lfqueue_push(u64 queue_ea, u64 data_ea, int deliver)
++{
++    if (!queue_ea || !data_ea) return CELL_SPURS_TASK_ERROR_NULL_POINTER;
++    if (queue_ea & 127u)       return CELL_SPURS_TASK_ERROR_ALIGN;
++
++    u32 q        = (u32)queue_ea;
++    u32 size     = vm_read32(q + LFQ_SIZE);
++    int32_t depth = (int32_t)vm_read32(q + LFQ_DEPTH);
++    u32 buf      = (u32)vm_read64(q + LFQ_BUFFER) & ~1u;
++    if (!size || depth <= 0 || depth > 0x4000 || !buf) {
++        static int _n = 0;
++        if (PS3_LOG_FIRST(_n, 8))
++            fprintf(stderr, "[cellSpurs] LFQueuePush REJECT q=0x%08X size=%u depth=%d buf=0x%08X\n",
++                    q, size, depth, buf);
++        return CELL_SPURS_TASK_ERROR_INVAL;
++    }
++
++    int32_t pop  = lfq_u16(vm_read16(q + LFQ_POP));            /* m_h1 */
++    int32_t push = lfq_u16(vm_read16(q + LFQ_PUSH + 6));       /* m_h8, reserved */
++    if (lfq_occupancy(pop, push, depth) >= depth) {
++        static int _n = 0;
++        if (PS3_LOG_FIRST(_n, 8))
++            fprintf(stderr, "[cellSpurs] LFQueuePush FULL q=0x%08X pop=%d push=%d depth=%d\n",
++                    q, pop, push, depth);
++        return CELL_SPURS_TASK_ERROR_AGAIN;
+     }
+ 
++    uint32_t slot = (uint32_t)(push % depth);
++    memcpy(vm_base + buf + (size_t)slot * size, vm_base + (uint32_t)data_ea, size);
++
++    if (g_ps3_lfq_first_n < 8) {
++        size_t n = size < sizeof(g_ps3_lfq_first[0]) ? size : sizeof(g_ps3_lfq_first[0]);
++        memcpy(g_ps3_lfq_first[g_ps3_lfq_first_n], vm_base + (uint32_t)data_ea, n);
++        g_ps3_lfq_first_n++;
++    }
++
++    int32_t nxt = push + 1;
++    if (nxt >= depth * 2) nxt -= depth * 2;
++    vm_write16(q + LFQ_PUSH + 6, (u16)nxt);   /* reserve */
++    vm_write16(q + LFQ_PUSH + 0, (u16)nxt);   /* publish (m_h5), data already in place */
++
++    static int _n = 0;
++    if (PS3_LOG_FIRST(_n, 4000))
++        printf("[cellSpurs] LFQueuePush q=0x%08X slot=%u push %d->%d size=%u depth=%d\n",
++               q, slot, push, nxt, size, depth);
++
++    lfq_wake(q, deliver);
++    return CELL_OK;
++}
++
++/* NID 0x8A85674D: _cellSpursLFQueuePushBody(CellSpursLFQueue*, const void*) */
++s32 _cellSpursLFQueuePushBody(u64 queue_ea, u64 data_ea)
++{
++    return lfqueue_push(queue_ea, data_ea, 1);
++}
++
++/* NID 0x91066667: cellSpursQueuePopBody(CellSpursQueue*, void*, bool) */
++s32 cellSpursQueuePopBody(u64 queue_ea, u64 data_ea, u32 isBlocking)
++{
++    (void)isBlocking;
+     if (!queue_ea || !data_ea) return CELL_SPURS_TASK_ERROR_NULL_POINTER;
++    if (queue_ea & 127u)       return CELL_SPURS_TASK_ERROR_ALIGN;
+ 
+-    uint32_t q   = (uint32_t)queue_ea;
+-    uint32_t sz  = vm_read32(q + 0x10);
+-    uint32_t dep = vm_read32(q + 0x14);
+-    uint32_t buf = (uint32_t)vm_read64(q + 0x18);
+-    uint32_t tsp = (uint32_t)vm_read64(q + 0x70);      /* eaSignal: taskset */
+-    if (!sz || !dep || !buf) return CELL_SPURS_TASK_ERROR_INVAL;
+-
+-    /* Derived ring model (see PROGRESS.md phase 22). Working the dataflow of
+-     * the consumer's decision at 0x12914..0x129D0 backwards:
+-     *
+-     *   r11 = normalise(W0)        W0 = queue+0x00
+-     *   r2  = normalise(W1)        W1 = queue+0x04
+-     *   r60 = W3                   W3 = queue+0x0C
+-     *     where normalise(v) is  cgti/nor/selb  ==  (v >= 0 ? v : ~v)
+-     *
+-     *   r81 = r2 - r11
+-     *   r79 = (r2 + r60) - (r11 - r60)  =  r2 - r11 + 2*r60
+-     *   r68 = (r11 > r2) ? r79 : r81    =  (r2 - r11) mod 2*r60
+-     *   ceqi r77, r68, 0                -> the EMPTY test
+-     *
+-     * and, separately at 0x129A8..0x129B8,
+-     *
+-     *   r14 = (r60 > r11) ? r11 : r11 - r60   =  index mod r60
+-     *
+-     * which is the buffer slot. So this is an ordinary ring: W0 is the pop
+-     * index, W1 the push index, indices run modulo 2*W3, and the slot is the
+-     * index modulo W3 -- the standard scheme that keeps "full" distinguishable
+-     * from "empty". W3 is therefore the depth.
+-     *
+-     * And that is the bug: the initialiser left queue+0x0C at ZERO, so r60 = 0
+-     * and the whole computation degenerates -- occupancy is (W1-W0) mod 0 and
+-     * the slot is index mod 0. With both indices at 0 the empty test is
+-     * trivially true, which is precisely why the consumer parked every time and
+-     * never once read the element buffer, whatever the producer wrote. */
+-    uint8_t* qp = vm_base + q;
+-
+-    int32_t  sync  = (int32_t)vm_read32(q + 0x00);          /* W0, pop  */
+-    int32_t  tail  = (int32_t)vm_read32(q + 0x04);          /* W1, push */
+-    int32_t  mod   = (int32_t)vm_read32(q + 0x0C);          /* W3       */
+-    if (mod <= 0) mod = (int32_t)dep;                       /* pre-fix queues */
+-
+-    int32_t  nsync = (sync < 0) ? ~sync : sync;             /* normalise */
+-    int32_t  cur   = (tail < 0) ? ~tail : tail;
+-    uint32_t slot  = (uint32_t)(cur % mod);
+-
+-    memcpy(vm_base + buf + (size_t)slot * sz, vm_base + (uint32_t)data_ea, sz);
+-
+-    int32_t  nxt   = (cur + 1) % (2 * mod);
+-    int32_t  ntail = nxt;
+-    vm_write32(q + 0x04, (uint32_t)ntail);
+-
+-    /* Waiter ring at +0x20: byte[0] = count, byte[1..12] = task ids. */
+-    uint32_t waiters = qp[0x20];
+-    int woke = -1;
+-    if (waiters > 0 && waiters <= 3 && tsp) {
+-        /* The entry area is m_bs[1..3] ONLY -- bytes 0x21..0x23. Shifting the
+-         * whole 16-byte group (as a first cut of this did) walks straight over
+-         * direction at +0x24 and init at +0x2C and corrupts the header; the
+-         * trace caught it as direction turning from 00000002 into 00020000. */
+-        woke = qp[0x21];
+-        qp[0x21] = qp[0x22];
+-        qp[0x22] = qp[0x23];
+-        qp[0x23] = 0;
+-        qp[0x20] = (uint8_t)(waiters - 1);
+-        extern void spu_taskset_signal_task(uint32_t taskset_ea, uint32_t taskId);
+-        spu_taskset_signal_task(tsp, (uint32_t)woke);
+-    }
+-
+-    if (PS3_LOG_FIRST(_n, 16))
+-        printf("[cellSpurs] QueuePush#%d q=0x%08X slot=%u (cur=%u->%u) buf=0x%08X+0x%X "
+-               "size=%u depth=%u waiters=%u woke=%d sync=%d/%d tail=%d->%d taskset=0x%08X\n",
+-               _n, q, slot, cur, nxt, buf, slot * sz, sz, dep, waiters, woke, sync, nsync, tail, ntail, tsp);
++    u32 q        = (u32)queue_ea;
++    u32 size     = vm_read32(q + LFQ_SIZE);
++    int32_t depth = (int32_t)vm_read32(q + LFQ_DEPTH);
++    u32 buf      = (u32)vm_read64(q + LFQ_BUFFER) & ~1u;
++    if (!size || depth <= 0 || !buf) return CELL_SPURS_TASK_ERROR_INVAL;
++
++    int32_t push = lfq_u16(vm_read16(q + LFQ_PUSH));           /* m_h5, published */
++    int32_t pop  = lfq_u16(vm_read16(q + LFQ_POP + 6));        /* m_h4, reserved */
++    if (lfq_occupancy(pop, push, depth) <= 0) return CELL_SPURS_TASK_ERROR_AGAIN;
++
++    uint32_t slot = (uint32_t)(pop % depth);
++    memcpy(vm_base + (uint32_t)data_ea, vm_base + buf + (size_t)slot * size, size);
++
++    int32_t nxt = pop + 1;
++    if (nxt >= depth * 2) nxt -= depth * 2;
++    vm_write16(q + LFQ_POP + 6, (u16)nxt);    /* reserve */
++    vm_write16(q + LFQ_POP + 0, (u16)nxt);    /* publish (m_h1) */
++
++    static int _n = 0;
++    if (PS3_LOG_FIRST(_n, 4000))
++        printf("[cellSpurs] LFQueuePop q=0x%08X slot=%u pop %d->%d\n", q, slot, pop, nxt);
++    return CELL_OK;
++}
++
++/* NID 0x73E06F91: nothing to detach -- completion signalling is our own
++ * task-signal path, not an lv2 event queue. */
++s32 cellSpursLFQueueDetachLv2EventQueue(u64 queue_ea)
++{
++    static int _n = 0;
++    if (PS3_LOG_FIRST(_n, 8))
++        printf("[cellSpurs] LFQueueDetachLv2EventQueue(q=0x%08X)\n", (u32)queue_ea);
+     return CELL_OK;
+ }
+ 
+@@ -3388,26 +3521,43 @@ s32 _cellSpursLFQueueInitialize(u64 owner_ea, u64 queue_ea, u64 buffer_ea,
+     uint32_t q = (uint32_t)queue_ea;
+     for (uint32_t o = 0; o < 128; o += 4) vm_write32(q + o, 0);
+ 
+-    /* W3 at +0x0C is the ring modulus the consumer reduces indices by: the
+-     * empty test is (W1-W0) mod 2*W3 and the buffer slot is index mod W3
+-     * (derived at 0x12914..0x129B8). Leaving it zero degenerated both and made
+-     * the queue look permanently empty no matter what a producer wrote. */
+-    vm_write32(q + 0x0C, depth);
+-    vm_write32(q + 0x10, size);
+-    vm_write32(q + 0x14, depth);
+-    vm_write64(q + 0x18, (u64)(uint32_t)buffer_ea);   /* bcptr<void,u64> */
+-    /* NOT direction at +0x24 and NOT init at +0x2C. Both sit inside the
+-     * 16-byte group at +0x20..+0x2F that the consumer owns and shifts wholesale
+-     * (shlqbyi <group>,1 at 0x12A0C). The trace shows the two values we used to
+-     * write there marching through it one byte per dequeue --
+-     *   +0x24: 00000002 -> 00000200 -> 00020000 -> 02000000
+-     *   +0x2C: 00000001 -> 00000100 -> 00010000 -> 01000000
+-     * -- i.e. we were feeding garbage into the SPU's own state every cycle.
+-     * Whatever holds direction/init, it is not these offsets. */                          /* init: constructed */
+-    vm_write64(q + 0x70, (u64)(uint32_t)owner_ea);    /* eaSignal <- taskset/spurs */
++    /* The SDK CellSyncLFQueue layout (see the push/pop block below). The fields
++     * the arguments determine outright: size, depth, buffer, direction, the
++     * blocked-slot bytes, and the signal EA. pop1/push1 stay zero -- the
++     * documented empty state. The previous version also wrote `depth` at
++     * +0x0C, which is push1.m_h7/m_h8: every consumer then believed the queue
++     * already held `depth` elements. */
++    vm_write32(q + LFQ_SIZE,   size);
++    vm_write32(q + LFQ_DEPTH,  depth);
++    vm_write64(q + LFQ_BUFFER, (u64)(uint32_t)buffer_ea);   /* bcptr<void,u64> */
++    vm_write32(q + LFQ_DIR,    direction);
++    vm_write32(q + LFQ_INIT,   0);                          /* constructed */
++    vm_write64(q + LFQ_SIGNAL, (u64)(uint32_t)owner_ea);    /* eaSignal <- taskset/spurs */
++
++    if (direction == 3) {
++        /* CELL_SYNC_QUEUE_ANY2ANY: bit 0 of the buffer marks the mode, the first
++         * two blocked-slot bytes are "all slots free", m_v1 starts at -1 and the
++         * two pack ledgers start empty-but-wrapped (0xFFFF). Bakugan passes
++         * direction 3 for its inflate queue. */
++        vm_write64(q + LFQ_BUFFER, (u64)((uint32_t)buffer_ea | 1u));
++        vm_write16(q + LFQ_BS + 0, 0xFFFF);
++        vm_write16(q + LFQ_BS + 2, 0xFFFF);
++        vm_write32(q + LFQ_V1, 0xFFFFFFFFu);
++        vm_write16(q + 0x30, 0xFFFF);   /* push2.pack */
++        vm_write16(q + 0x50, 0xFFFF);   /* pop2.pack */
++    } else {
++        vm_write32(q + LFQ_BS, 0xFFFFFFFFu);   /* m_bs[0..3]: no blocked tasks */
++        vm_write32(q + LFQ_V1, 0);
++    }
+ 
+     memset(vm_base + (uint32_t)buffer_ea, 0, (size_t)size * depth);
+ 
++    g_ps3_lfq_ea = q;
++    g_ps3_lfq_buf = (uint32_t)buffer_ea;
++    g_ps3_lfq_size = size;
++    g_ps3_lfq_depth = depth;
++    g_ps3_lfq_first_n = 0;
++
+     static int _n = 0;
+     if (PS3_LOG_FIRST(_n, 8))
+         printf("[cellSpurs] _LFQueueInitialize(owner=0x%08X q=0x%08X buf=0x%08X size=%u depth=%u dir=%u) -> BE line written\n",
+diff --git a/libs/video/cellGcmSys.c b/libs/video/cellGcmSys.c
+index efad9b9..764b7e9 100644
+--- a/libs/video/cellGcmSys.c
++++ b/libs/video/cellGcmSys.c
+@@ -1047,6 +1047,43 @@ static void gcm_row_copy(u32 d, u32 s, u32 n)
+ 
+ static void nv3089_blit(void)
+ {
++    /* NV3089_FULL=1: every register of a blit whose destination is in the
++     * 0xDF6 page (the 1120x584 menu background texture), plus a sample of the
++     * source rectangle. The summary line alone cannot tell a strip copy from a
++     * mip step: the pitch/scale fields are what say which. */
++    { static int fd = -1; if (fd < 0) fd = getenv("NV3089_FULL") ? 1 : 0;
++      if (fd && (s_gcm2d.dst_offset >> 16) == 0x0DF6u) {
++          extern PPU_THREAD_LOCAL ppu_context* g_active_ctx;
++          const u32 _cia = g_active_ctx ? (u32)g_active_ctx->cia : 0u;
++          const u32 _lr  = g_active_ctx ? (u32)g_active_ctx->lr  : 0u;
++          static int n = 0;
++          if (n < 6) { n++;
++            const u32 sl = (s_nv3089.src_dma != 0xFEED0001u) ? 1u : 0u;
++            const u32 ea = cellGcmResolveLocated((int)sl, s_nv3089.in_off);
++            u32 nz = 0, tot = 0;
++            { extern u8* vm_base;
++              if (vm_base) {
++                  const u32 pitch = s_nv3089.in_fmt & 0xFFFF;
++                  const u32 w = s_nv3089.in_sz & 0xFFFF, h = s_nv3089.in_sz >> 16;
++                  for (u32 y = 0; y < h && y < 1024; y += 7)
++                      for (u32 x = 0; x < w && x < 1024; x += 7) {
++                          tot++;
++                          if (vm_base[ea + (u64)y * pitch + x * 4u]) nz++;
++                      } } }
++            fprintf(stderr, "[BLITFULL] dstoff=0x%08X dstpitch=%u dstdma=0x%08X srcdma=0x%08X"
++                            " in_off=0x%08X(ea=0x%08X nz=%u/%u) pitch=%u fmt=0x%X"
++                            " in_sz=%ux%u out_pt=%u,%u out_sz=%ux%u clip=%u,%u %ux%u"
++                            " ds=0x%X dt=0x%X uv=0x%08X op=0x%X cia=0x%08X lr=0x%08X%c",
++                    s_gcm2d.dst_offset, s_gcm2d.pitch >> 16, s_gcm2d.dst_dma,
++                    s_nv3089.src_dma, s_nv3089.in_off, ea, nz, tot,
++                    s_nv3089.in_fmt & 0xFFFF, s_nv3089.fmt & 0xFF,
++                    s_nv3089.in_sz & 0xFFFF, s_nv3089.in_sz >> 16,
++                    s_nv3089.out_pt & 0xFFFF, s_nv3089.out_pt >> 16,
++                    s_nv3089.out_sz & 0xFFFF, s_nv3089.out_sz >> 16,
++                    s_nv3089.clip_pt & 0xFFFF, s_nv3089.clip_pt >> 16,
++                    s_nv3089.clip_sz & 0xFFFF, s_nv3089.clip_sz >> 16,
++                    s_nv3089.ds_dx, s_nv3089.dt_dy, s_nv3089.in_uv,
++                    s_nv3089.op, _cia, _lr, 10); } } }
+     u32 out_w = s_nv3089.out_sz & 0xFFFF, out_h = s_nv3089.out_sz >> 16;
+     u32 out_x = s_nv3089.out_pt & 0xFFFF, out_y = s_nv3089.out_pt >> 16;
+     u32 in_pitch = s_nv3089.in_fmt & 0xFFFF;
+@@ -1282,7 +1319,14 @@ static void gcm_2d_method(u32 subch, u32 method, u32 data)
+         case 0x0184: case 0x0188: s_gcm2d.dst_dma = data; return;
+         case 0x0300: s_gcm2d.color_fmt  = data; return;
+         case 0x0304: s_gcm2d.pitch      = data; return;
+-        case 0x030C: s_gcm2d.dst_offset = data; return;
++        case 0x030C: s_gcm2d.dst_offset = data;
++            { static int d = -1; if (d < 0) d = getenv("GCM2D_DST") ? 1 : 0;
++              if (d) { static u32 seen[48]; static int n = 0; int f = 0;
++                  for (int k = 0; k < n; k++) if (seen[k] == data) f = 1;
++                  if (!f && n < 48) { seen[n++] = data;
++                      fprintf(stderr, "[GCM2DST] NV3062 dst set -> 0x%08X (pitch %u, fmt 0x%X)%c",
++                              data, s_gcm2d.pitch >> 16, s_gcm2d.color_fmt, 10); } } }
++            return;
+         }
+         return;
+     }
+@@ -2673,6 +2717,20 @@ u32 cellGcm_display_buffer_count(void)
+ 
+ static s32 gcm_flip_request(u32 bufferId, int in_fifo)
+ {
++    /* FLIP_PC=1: the guest PC that asked for the first few flips. This is the
++     * title's frame-submit function: the only anchor back into the recompiled
++     * code for a command stream that is written inline (no cellGcmSet* imports
++     * to trap), and the place to start reading when a pass in that stream is
++     * missing. */
++    { static int _f = -1; if (_f < 0) _f = getenv("FLIP_PC") ? 1 : 0;
++      if (_f) {
++          extern PPU_THREAD_LOCAL ppu_context* g_active_ctx;
++          static int _n = 0;
++          if (_n < 8) { _n++;
++              fprintf(stderr, "[FLIPPC] #%d cia=0x%08X lr=0x%08X buf=%u fifo=%d%c",
++                      _n, g_active_ctx ? (u32)g_active_ctx->cia : 0u,
++                      g_active_ctx ? (u32)g_active_ctx->lr : 0u,
++                      bufferId, in_fifo, 10); } } }
+     /* GCM_FLIPCOUNT=1: every flip, with a timestamp. FLIP_DBG caps at 20 lines,
+      * which answers "did it ever flip?" and not "is it still flipping, and how
+      * fast?" -- the question that matters when a title stops appearing on
+diff --git a/libs/video/rsx_commands.c b/libs/video/rsx_commands.c
+index 6be29e4..8d4c694 100644
+--- a/libs/video/rsx_commands.c
++++ b/libs/video/rsx_commands.c
+@@ -130,22 +130,28 @@ static int process_surface_method(rsx_state* state, u32 method, u32 data)
+     case NV4097_SET_SURFACE_COLOR_AOFFSET:
+         state->surface_color_offset[0] = data;
+         { static int _s = -1; if (_s < 0) _s = getenv("SURFDBG") ? 1 : 0;
+-          static unsigned _seen[32]; static int _n = 0;
+-          if (_s) { int f = 0; for (int k = 0; k < _n; k++) if (_seen[k] == data) f = 1;
+-              if (!f && _n < 32) { _seen[_n++] = data;
+-                  fprintf(stderr, "[SURF] color offset -> 0x%08X%c", data, 10); } } }
++          static unsigned _seen[64]; static int _n = 0;
++          if (_s) { int f = 0; for (int k = 0; k < _n; k++) if (_seen[k] == (data ^ 0x5A5A0000u)) f = 1;
++              if (!f && _n < 64) { _seen[_n++] = data ^ 0x5A5A0000u;
++                  fprintf(stderr, "[SURF] A color offset -> 0x%08X%c", data, 10); } } }
+         state->surface_dirty = 1;
+         return 0;
+     case NV4097_SET_SURFACE_COLOR_BOFFSET:
+         state->surface_color_offset[1] = data;
++        { static int _s = -1; if (_s < 0) _s = getenv("SURFDBG") ? 1 : 0;
++          if (_s) fprintf(stderr, "[SURF] B color offset -> 0x%08X%c", data, 10); }
+         state->surface_dirty = 1;
+         return 0;
+     case NV4097_SET_SURFACE_COLOR_COFFSET:
+         state->surface_color_offset[2] = data;
++        { static int _s = -1; if (_s < 0) _s = getenv("SURFDBG") ? 1 : 0;
++          if (_s) fprintf(stderr, "[SURF] C color offset -> 0x%08X%c", data, 10); }
+         state->surface_dirty = 1;
+         return 0;
+     case NV4097_SET_SURFACE_COLOR_DOFFSET:
+         state->surface_color_offset[3] = data;
++        { static int _s = -1; if (_s < 0) _s = getenv("SURFDBG") ? 1 : 0;
++          if (_s) fprintf(stderr, "[SURF] D color offset -> 0x%08X%c", data, 10); }
+         state->surface_dirty = 1;
+         return 0;
+     case NV4097_SET_SURFACE_ZETA_OFFSET:
+@@ -333,8 +339,12 @@ static int process_vertex_attrib_method(rsx_state* state, u32 method, u32 data)
+  * Main method dispatch
+  * -----------------------------------------------------------------------*/
+ 
++int g_vpsel = 0;
++int g_mtdbg = 0;
++
+ int rsx_process_method(rsx_state* state, u32 method, u32 data)
+ {
++    { static int _i = -1; if (_i < 0) { g_vpsel = getenv("VPSEL") ? 1 : 0; g_mtdbg = getenv("MTDBG") ? 1 : 0; _i = 0; } }
+     /* RSX_TRACE=<N>: trace the first N methods (bare "1" keeps the old 250).
+      * The fixed 250 was spent entirely on boot-time setup, so the methods around
+      * the first real draw -- exactly the ones worth seeing -- were never traced. */
+@@ -568,6 +578,8 @@ int rsx_process_method(rsx_state* state, u32 method, u32 data)
+     if (method == NV4097_SET_STENCIL_TEST_ENABLE) {
+         state->stencil_test_enable = data ? 1 : 0;
+         state->stencil_dirty = 1;
++        { extern int g_mtdbg; if (g_mtdbg) { static int _n=0; if (_n++ < 40)
++            fprintf(stderr, "[MTDBG] stencil enable=%u\n", data); } }
+         return 0;
+     }
+     if (method == NV4097_SET_STENCIL_FUNC) {
+@@ -633,6 +645,8 @@ int rsx_process_method(rsx_state* state, u32 method, u32 data)
+         state->transform_program_load = data;
+         state->vp_ucode_write = data * 16;
+         state->shader_dirty = 1;
++        { extern int g_vpsel; if (g_vpsel) { static int _n=0; if (_n++ < 120)
++            fprintf(stderr, "[VPSEL] LOAD  slot=%u @+%u\n", data, data*16); } }
+         return 0;
+     }
+ 
+@@ -640,6 +654,8 @@ int rsx_process_method(rsx_state* state, u32 method, u32 data)
+         if (state->transform_program_start != data) state->vp_dirty = 1;
+         state->transform_program_start = data;
+         state->shader_dirty = 1;
++        { extern int g_vpsel; if (g_vpsel) { static int _n=0; if (_n++ < 120)
++            fprintf(stderr, "[VPSEL] START slot=%u @+%u\n", data, data*16); } }
+         return 0;
+     }
+ 
+@@ -801,6 +817,28 @@ int rsx_process_method(rsx_state* state, u32 method, u32 data)
+     if (method == NV4097_DRAW_ARRAYS) {
+         u32 first = data & 0xFFFFFF;
+         u32 count = ((data >> 24) & 0xFF) + 1;
++        /* VPSEL=1: which vertex program each distinct (start slot, tex0) draw
++         * picks. A 3D transform program selected for a 2D sprite collapses the
++         * quad (its basis attributes are not bound), so the pairing is the
++         * first thing to read when a whole layer renders nothing. */
++        { extern int g_vpsel; if (g_vpsel) {
++            static u32 seen[96]; static int ns = 0;
++            u32 k = (state->transform_program_start << 8) ^ (state->textures[0].offset & 0xFFFFFFu);
++            int f = 0; for (int i = 0; i < ns; i++) if (seen[i] == k) f = 1;
++            if (!f && ns < 96) { seen[ns++] = k;
++                fprintf(stderr, "[VPSEL] DRAW tpstart=%u (@+%u) tex0=0x%08X n=%u%c",
++                        state->transform_program_start,
++                        state->transform_program_start * 16u,
++                        state->textures[0].offset, count, 10); } } }
++        /* Ground truth, independent of the backend's surface classification:
++         * how many draws the FIFO actually issues while each surface offset is
++         * bound. A count that stays at zero for an offset means the title never
++         * renders into it, no matter what the op list says. */
++        { extern u32 g_draw_surf_eab, g_draw_surf_disp, g_draw_surf_other;
++          const u32 s0 = state->surface_color_offset[0];
++          if (s0 == 0x0EAB0000u) g_draw_surf_eab++;
++          else if (s0 == 0x0F8E0000u || s0 == 0x0FC70000u) g_draw_surf_disp++;
++          else g_draw_surf_other++; }
+         { static int _d=0; if (PS3_LOG_FIRST(_d, 32)) fprintf(stderr, "[RSX] DRAW_ARRAYS prim=%u first=%u count=%u\n", state->primitive_type, first, count); }
+         { static int _sq=0, _e=-1; if (_e < 0) _e = getenv("SEQ_DBG") ? 1 : 0; if (_e && PS3_LOG_FIRST(_sq, 500))
+             fprintf(stderr, "[SEQ] DRAW surf0=0x%X c256.x=%.4f c257.y=%.4f\n",
+@@ -855,6 +893,18 @@ int rsx_process_method(rsx_state* state, u32 method, u32 data)
+     }
+ 
+     /* Scissor */
++    if (method == NV4097_SET_SCISSOR_HORIZONTAL) {
++        state->scissor_x = data & 0xFFFFu; state->scissor_w = ((data >> 16) & 0xFFFFu) + 1u;
++        { extern int g_mtdbg; if (g_mtdbg) { static int _n=0; if (_n++ < 40)
++            fprintf(stderr, "[MTDBG] scissor H x=%u w=%u\n", state->scissor_x, state->scissor_w); } }
++        return 0;
++    }
++    if (method == NV4097_SET_SCISSOR_VERTICAL) {
++        state->scissor_y = data & 0xFFFFu; state->scissor_h = ((data >> 16) & 0xFFFFu) + 1u;
++        { extern int g_mtdbg; if (g_mtdbg) { static int _n=0; if (_n++ < 40)
++            fprintf(stderr, "[MTDBG] scissor V y=%u h=%u\n", state->scissor_y, state->scissor_h); } }
++        return 0;
++    }
+     if (method == NV4097_SET_SCISSOR_HORIZONTAL) {
+         state->scissor_x = data & 0xFFFF;
+         state->scissor_w = (data >> 16) & 0xFFFF;
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index 0ecca8e..adf8a77 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -18,6 +18,7 @@
+ 
+ #include <time.h>
+ #include "ps3emu/log_first.h"
++#include "../../runtime/ppu/ppu_context.h"   /* g_active_ctx: guest PC at a bind */
+ #include "rsx_d3d12_backend.h"
+ #include "rsx_primitives.h"
+ #include "rsx_vertex_fetch.h"
+@@ -112,6 +113,10 @@ typedef struct {
+     int vs_idx;         /* VPVSEntry slot for this draw's vertex program (-1 = primary) */
+     int blend;          /* guest blend enable at draw time */
+     u32 blend_key;      /* packed guest blend state (factors+equation), PSO key */
++    u8  depth_en;       /* guest SET_DEPTH_TEST_ENABLE at draw time (PSO key):
++                         * a 2D layer drawn after a full-screen quad that wrote
++                         * z=0 is rejected outright when depth is forced on, and
++                         * the layer silently disappears. */
+     /* Render-to-texture: which colour surface this op targets. 0 = a display
+      * buffer (the swap-chain backbuffer); else the resolved vm offset of an
+      * offscreen surface (demosaic chains its effect passes through local-
+@@ -214,6 +219,7 @@ typedef struct {
+                              * stale compile forever. */
+     u32 cmask;              /* colour write mask (PSO key) */
+     u32 cull;               /* packed face culling (PSO key) */
++    u32 depth_en;           /* guest depth-test enable (PSO key) */
+     u32 cube_mask;          /* which units are cube textures (PSO key): the HLSL
+                              * declares those samplers as TextureCube, so a cube
+                              * and a 2D variant of the same program are different
+@@ -385,6 +391,24 @@ static ID3D12Resource* s_screen_copy = NULL;
+  * 256x256 regions captured and handed to fp 0x5DB81/0x5EA81/0x5EF81/0x5E381. */
+ #define SUBVP_SLOTS 4
+ static struct { ID3D12Resource* res; u32 x, y, w, h; } s_subvp[SUBVP_SLOTS];
++
++/* Every d3d12_draw_arrays call, recorded or not. A frame whose callback count
++ * far exceeds its recorded op count is losing geometry to an early-out (no
++ * vertex attrib 0, no pipeline, ...) -- which is invisible in the op list. */
++/* NODEPTH=1 disables depth on every PSO. A one-switch way to tell "this draw
++ * is rejected by the depth test" from "this draw never reaches the GPU". */
++static int ps3_depth_on(void)
++{
++    static int n = -1;
++    if (n < 0) n = getenv("NODEPTH") ? 0 : 1;
++    return n;
++}
++
++u64 g_arrays_calls = 0;
++
++/* Draws the FIFO issued while each known surface offset was bound (counted in
++ * rsx_commands.c at the DRAW_ARRAYS dispatch). */
++u32 g_draw_surf_eab = 0, g_draw_surf_disp = 0, g_draw_surf_other = 0;
+ static int s_subvp_n = 0;
+ 
+ static void subvp_note(u32 x, u32 y, u32 w, u32 h)
+@@ -931,7 +955,7 @@ static int init_d3d12(u32 width, u32 height)
+              * Games with depth_test_enable=0 in RSX state can still render —
+              * LESS just means new-z must be less than existing — but future
+              * work should mirror RSX depth state into a PSO cache. */
+-            pso_desc.DepthStencilState.DepthEnable    = TRUE;
++            pso_desc.DepthStencilState.DepthEnable    = ps3_depth_on();
+             pso_desc.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
+             pso_desc.DepthStencilState.DepthFunc      = D3D12_COMPARISON_FUNC_LESS_EQUAL;
+             pso_desc.DepthStencilState.StencilEnable  = FALSE;
+@@ -1656,7 +1680,7 @@ static void compile_vp(void)
+      * CELL_GCM_LEQUAL). Without it the cube's faces drew in submission order and
+      * back faces overwrote the front -> you saw through the near face to the
+      * darker interior. The depth buffer is bound + cleared to 1.0 each frame. */
+-    pd.DepthStencilState.DepthEnable = TRUE;
++    pd.DepthStencilState.DepthEnable = ps3_depth_on();
+     pd.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
+     pd.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS_EQUAL;
+     pd.DepthStencilState.StencilEnable = FALSE;
+@@ -1896,6 +1920,8 @@ static u8 gl_blend_op_d3d(u32 e)
+  * plain 1/0 before any register arrives, so treat those defaults as BACK/CW. */
+ static u32 rsx_cull_key(const rsx_state* st)
+ {
++    { static int nc = -1; if (nc < 0) nc = getenv("PS3_NO_CULL") ? 1 : 0;
++      if (nc) return 0; }
+     if (!st || !st->cull_face_enable) return 0;
+     u32 k = 1u;
+     if (st->cull_face == 0x0404u || st->cull_face == 0x0408u) k |= 2u;  /* FRONT */
+@@ -1913,6 +1939,17 @@ static u32 rsx_blend_key(const rsx_state* st, int enable)
+             fprintf(stderr, "[BLEND] enable=%d sfactor=0x%X dfactor=0x%X%c", enable,
+                     st?st->blend_sfactor:0, st?st->blend_dfactor:0, 10); } } }
+     if (!enable) return 0;
++    /* PS3_FORCE_ALPHA_BLEND=1: replace the guest's blend factors with the
++     * standard straight-alpha blend. Text that the guest draws with a modulate
++     * blend over a black backbuffer multiplies to black; forcing alpha blend
++     * shows the raw colour and answers "is it the blend or the pixels". */
++    { static int fb = -1; if (fb < 0) fb = getenv("PS3_FORCE_ALPHA_BLEND") ? 1 : 0;
++      if (fb) return 1u
++             | ((u32)D3D12_BLEND_SRC_ALPHA     << 1)
++             | ((u32)D3D12_BLEND_INV_SRC_ALPHA << 6)
++             | ((u32)D3D12_BLEND_ONE           << 11)
++             | ((u32)D3D12_BLEND_INV_SRC_ALPHA << 16)
++             | ((u32)D3D12_BLEND_OP_ADD << 21) | ((u32)D3D12_BLEND_OP_ADD << 24); }
+     /* Factors never programmed: keep the legacy straight-alpha behaviour
+      * (dbgfont-style text enables blending without setting factors). */
+     if (!st || (st->blend_sfactor == 0 && st->blend_dfactor == 0))
+@@ -1975,7 +2012,7 @@ static u32 dr_cube_mask(const D3D12DrawRecord* dr)
+ 
+ static ID3D12PipelineState* vp_get_fp_pso(int vs_idx, u32 fp_addr, u32 blend, int nrt,
+                                           DXGI_FORMAT rtfmt, int exp32, u32 cmask, u32 cull,
+-                                          u32 cube_mask)
++                                          u32 cube_mask, u32 depth_en)
+ {
+     if (nrt < 1) nrt = 1; if (nrt > 4) nrt = 4;
+     if (rtfmt == 0) rtfmt = DXGI_FORMAT_R8G8B8A8_UNORM;
+@@ -2031,7 +2068,8 @@ static ID3D12PipelineState* vp_get_fp_pso(int vs_idx, u32 fp_addr, u32 blend, in
+             s_d3d.vp_fp[i].rtfmt == (u32)rtfmt && s_d3d.vp_fp[i].exp32 == exp32 &&
+             s_d3d.vp_fp[i].ucode_hash == uhash && s_d3d.vp_fp[i].cmask == cmask &&
+             s_d3d.vp_fp[i].cull == cull &&
+-            s_d3d.vp_fp[i].cube_mask == cube_mask)
++            s_d3d.vp_fp[i].cube_mask == cube_mask &&
++            s_d3d.vp_fp[i].depth_en == depth_en)
+             return s_d3d.vp_fp[i].pso;
+     s_perf_pso_miss++;      /* falls through to a full decompile + D3DCompile */
+     /* PSOMISSDBG=1: on a miss, name the key field that differs from an existing
+@@ -2364,8 +2402,14 @@ static ID3D12PipelineState* vp_get_fp_pso(int vs_idx, u32 fp_addr, u32 blend, in
+     for (int _r = 0; _r < nrt; _r++)
+         pd.BlendState.RenderTarget[_r].RenderTargetWriteMask = (UINT8)(cmask & 0xF);
+     pd.DSVFormat = DXGI_FORMAT_D24_UNORM_S8_UINT;
+-    pd.DepthStencilState.DepthEnable = TRUE;
+-    pd.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
++    /* Honour the guest's depth-test enable. Forcing it on rejected every 2D
++     * layer drawn after a full-screen quad that had already written z=0 (this
++     * title's menus draw the background first, then the dialog panel and button
++     * at a farther z): the panel and button rasterized nothing while the text,
++     * which lands at z=0, still showed. */
++    pd.DepthStencilState.DepthEnable = depth_en ? TRUE : FALSE;
++    pd.DepthStencilState.DepthWriteMask = depth_en ? D3D12_DEPTH_WRITE_MASK_ALL
++                                                   : D3D12_DEPTH_WRITE_MASK_ZERO;
+     pd.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS_EQUAL;
+     pd.DepthStencilState.StencilEnable = FALSE;
+     /* DEPTH_OFF=1: drop the depth test for guest-FP draws, so submission order
+@@ -2407,6 +2451,7 @@ static ID3D12PipelineState* vp_get_fp_pso(int vs_idx, u32 fp_addr, u32 blend, in
+     s_d3d.vp_fp[s_d3d.vp_fp_n].cmask   = cmask;
+     s_d3d.vp_fp[s_d3d.vp_fp_n].cull    = cull;
+     s_d3d.vp_fp[s_d3d.vp_fp_n].cube_mask = cube_mask;
++    s_d3d.vp_fp[s_d3d.vp_fp_n].depth_en = depth_en;
+     s_d3d.vp_fp[s_d3d.vp_fp_n].pso     = pso;
+     s_d3d.vp_fp_n++;
+     return pso;
+@@ -3164,9 +3209,9 @@ static void vp_record_cb(u32 slot, int vs_idx, const D3D12DrawRecord* dr)
+         int last_nz = -1;
+         for (int i = 0; i < RSX_MAX_VERTEX_CONSTANTS * 4; i++)
+             if (c[i] > 1e-9f || c[i] < -1e-9f) last_nz = i / 4;
+-        fprintf(stderr, "[VPMVP] slot=%u lastNZ=c%d  c260=(%g %g %g %g) c467=(%g %g %g %g)\n",
++        fprintf(stderr, "[VPMVP] slot=%u lastNZ=c%d  c465=(%g %g %g %g) c467=(%g %g %g %g)\n",
+                 slot, last_nz,
+-                c[260*4+0], c[260*4+1], c[260*4+2], c[260*4+3],
++                c[465*4+0], c[465*4+1], c[465*4+2], c[465*4+3],
+                 c[467*4+0], c[467*4+1], c[467*4+2], c[467*4+3]); } }
+     /* RSX_DBG_CB=<hex tex0 offset>: the constants as they land in the per-draw
+      * constant buffer for that texture's draws -- i.e. exactly what the shader
+@@ -3935,9 +3980,32 @@ static void render_frame(void)
+ 
+     /* Frames with no ops (init/boot presents) don't count against the cap --
+      * PNG-decode-heavy titles burn hundreds of empty presents before the first
+-     * real draw. */
+-    if (getenv("RTT_DUMP") && s_d3d.draw_count > 0) { static int _f=0; int _cap = atoi(getenv("RTT_DUMP")); if (_cap < 2) _cap = 14; if (PS3_LOG_FIRST(_f, _cap)) {
+-        fprintf(stderr, "[RTT] frame %d: %u ops\n", _f, s_d3d.draw_count);
++     * real draw. RTT_DUMP_START=<n> skips the first n non-empty frames so a
++     * later screen (loading, OSK, menu) can be dumped without raising the cap. */
++    static u32 _rt_frame = 0;
++    if (s_d3d.draw_count > 0) _rt_frame++;
++    if (getenv("RTT_STAT") && s_d3d.draw_count > 0) {
++        static int _init = 0;
++        if (!_init && getenv("RTT_STAT")) _init = 1;
++        u32 _off = 0, _disp = 0, _clr = 0, _texdf = 0;
++        for (u32 _d = 0; _d < s_d3d.draw_count && _d < MAX_DRAWS; _d++) {
++            D3D12DrawRecord* r = &s_d3d.draws[_d];
++            if (r->is_clear) { _clr++; if (r->rt_off) _off++; }
++            else if (r->rt_off) _off++;
++            else _disp++;
++            if (r->tex[0].raw == 0xDF60000) _texdf++;
++        }
++        if (_rt_frame <= 8 || (_rt_frame % 60) == 0)
++            fprintf(stderr, "[RTTSTAT] frame=%u ops=%u clear=%u offtarget=%u display=%u texDF60000=%u calls=%llu surfEAB=%u surfDisp=%u surfOther=%u%c",
++                    _rt_frame, s_d3d.draw_count, _clr, _off, _disp, _texdf,
++                    (unsigned long long)g_arrays_calls,
++                    g_draw_surf_eab, g_draw_surf_disp, g_draw_surf_other, 10);
++    }
++    if (getenv("RTT_DUMP") && s_d3d.draw_count > 0) { static int _f=0; int _cap = atoi(getenv("RTT_DUMP")); if (_cap < 2) _cap = 14;
++      { static int _start = -1; if (_start < 0) { const char* e = getenv("RTT_DUMP_START"); _start = e ? atoi(e) : 0; }
++        if (_rt_frame <= (u32)_start) _cap = 0; }
++      if (PS3_LOG_FIRST(_f, _cap)) {
++        fprintf(stderr, "[RTT] frame %d (abs %u): %u ops\n", _f, _rt_frame, s_d3d.draw_count);
+         for (u32 _d = 0; _d < s_d3d.draw_count && _d < MAX_DRAWS; _d++) {
+             D3D12DrawRecord* r = &s_d3d.draws[_d];
+             fprintf(stderr, "[RTT]  op%02u %s rt=0x%X mrt=0x%X/0x%X/0x%X t0=0x%X fp=0x%X n=%u cmask=%X vp=%u,%u %ux%u blend=%d\n",
+@@ -4267,7 +4335,8 @@ static void render_frame(void)
+                                        dr_num_rts(dr),
+                                        dr->rt_off ? rsx_surface_dxgi(dr->rt_fmt)
+                                                   : DXGI_FORMAT_R8G8B8A8_UNORM,
+-                                       dr->fp_exp32, dr->cmask, dr->cull, dr_cube_mask(dr));
++                                       dr->fp_exp32, dr->cmask, dr->cull, dr_cube_mask(dr),
++                                       dr->depth_en);
+         if (perf_on()) s_perf_pso += perf_now() - _ps0;
+     }
+ 
+@@ -4605,7 +4674,7 @@ static void render_frame(void)
+                                                 dr->rt_off ? rsx_surface_dxgi(dr->rt_fmt)
+                                                            : DXGI_FORMAT_R8G8B8A8_UNORM,
+                                                 dr->fp_exp32, dr->cmask, dr->cull,
+-                                                dr_cube_mask(dr)) : NULL;
++                                                dr_cube_mask(dr), dr->depth_en) : NULL;
+                 s_d3d.cmd_list->lpVtbl->SetPipelineState(s_d3d.cmd_list,
+                                                          dpso ? dpso : vpso);
+                 /* Per-draw viewport: the guest rect when sane, else the
+@@ -6051,6 +6120,7 @@ static void d3d12_draw_arrays(void* ud, u32 primitive, u32 first, u32 count)
+     /* Log the first 20 calls in detail, then every 1000th to show liveness
+      * without flooding. */
+     static u64 s_total = 0;
++    { extern u64 g_arrays_calls; g_arrays_calls++; }
+     if (s_total < 20 || (s_total % 1000) == 0) {
+         printf("[D3D12] draw_arrays #%llu prim=%u first=%u count=%u\n",
+                (unsigned long long)s_total, primitive, first, count);
+@@ -6060,6 +6130,69 @@ static void d3d12_draw_arrays(void* ud, u32 primitive, u32 first, u32 count)
+     if (!s_d3d.pipeline_ready || !s_d3d.vb_mapped) return;
+     if (count == 0 || count > MAX_VERTICES) return;
+ 
++    /* VTXALLF=<frame>: bounds of every draw's attribute-0 for one frame. The
++     * only way to say which layer a visible artefact belongs to: a quad that
++     * lands where it should not is a vertex problem, and one that lands right
++     * but paints wrong is a sampling/blend problem. */
++    { static const char* vf = (const char*)1; static u32 wf = 0;
++      if (vf == (const char*)1) { vf = getenv("VTXALLF");
++          wf = vf ? (u32)strtoul(vf, NULL, 0) : 0; }
++      static int _gate = -1;
++      if (_gate < 0) _gate = getenv("VTXGATE") ? 1 : 0;
++      u32 _t0 = s_d3d.cur_texs[0].raw;
++      int _hit = ((!_gate) || (_t0 == 0x0AB51900u || _t0 == 0x0A8A6D80u ||
++                               _t0 == 0x09FFC080u || _t0 == 0x09E51480u ||
++                               _t0 == 0x09EA6A80u))
++                  && ((!wf) || (s_d3d.frame_count >= wf));
++      if (_hit && s_d3d.current_rsx_state) {
++          static int _n = 0; if (_n >= 140) { } else { _n++;
++          const rsx_state* st = s_d3d.current_rsx_state;
++          extern void rsx_fetch_attrib(const rsx_state*, int, u32, float*);
++          float lo[3] = {1e9f,1e9f,1e9f}, hi[3] = {-1e9f,-1e9f,-1e9f};
++          u32 lim = count < 64u ? count : 64u;
++          for (u32 k = 0; k < lim; k++) {
++              float a0[4]; rsx_fetch_attrib(st, 0, first + k, a0);
++              for (int c = 0; c < 3; c++) { if (a0[c] < lo[c]) lo[c] = a0[c];
++                                            if (a0[c] > hi[c]) hi[c] = a0[c]; }
++          }
++          fprintf(stderr, "[VTXALL] draw=%-3u tex0=0x%08X n=%-3u x[%.0f..%.0f] y[%.0f..%.0f] z[%.2f..%.2f]%c",
++                  s_d3d.draw_count, s_d3d.cur_texs[0].raw, count,
++                  lo[0], hi[0], lo[1], hi[1], lo[2], hi[2], 10);
++      } } }
++
++    /* VDEFDBG=<hex tex0 raw>: the constant vertex-attribute registers
++     * (NV4097_SET_VERTEX_DATA4F_M) an attribute array feeds when it is off, plus
++     * the enable mask, for the draws that bind that texture. A transform program
++     * that reads an unbound attribute collapses every vertex onto one point
++     * unless the guest's default value is what it expects. */
++    { static const char* vd = (const char*)1; static u32 want = 0; static int n = 0;
++      if (vd == (const char*)1) { vd = getenv("VDEFDBG");
++                                  want = vd ? (u32)strtoul(vd, NULL, 16) : 0; }
++      if (want && s_d3d.cur_texs[0].raw == want && n < 2 && s_d3d.current_rsx_state) {
++          const rsx_state* st = s_d3d.current_rsx_state; n++;
++          u32 mask = 0;
++          for (int i = 0; i < 16; i++) if (st->vertex_attribs[i].enabled) mask |= 1u << i;
++          fprintf(stderr, "[VDEF] tex0=0x%08X count=%u tpstart=%u mask=0x%04X%c",
++                  want, count, st->transform_program_start, mask, 10);
++          for (int i = 0; i < 12; i++)
++              fprintf(stderr, "[VDEF]   a%-2d off=0x%08X stride=%2u size=%u type=%u val=(%g %g %g %g)%c",
++                      i, st->vertex_attribs[i].offset, st->vertex_attribs[i].stride,
++                      st->vertex_attribs[i].size, st->vertex_attribs[i].type,
++                      st->vertex_data4f[i][0], st->vertex_data4f[i][1],
++                      st->vertex_data4f[i][2], st->vertex_data4f[i][3], 10);
++          { extern void rsx_fetch_attrib(const rsx_state*, int, u32, float*);
++            for (u32 k = 0; k < count && k < 4; k++) {
++                float a0[4];
++                rsx_fetch_attrib(st, 0, first + k, a0);
++                fprintf(stderr, "[VDEF]   v%u a0=(%g %g %g %g)%c",
++                        k, a0[0], a0[1], a0[2], a0[3], 10);
++            }
++            for (int r = 8; r <= 15; r++)
++                fprintf(stderr, "[VDEF]   c%d=(%g %g %g %g)%c", r,
++                        st->vertex_constants[r][0], st->vertex_constants[r][1],
++                        st->vertex_constants[r][2], st->vertex_constants[r][3], 10); }
++      } }
++
+     /* QUADS (prim 8) have no D3D12 topology; expand to a triangle list.
+      * dbgfont draws all text as quads. Prefer the real vertex-program path
+      * (exact position + texcoord): upload raw float4 attrib0 into vp_vb and
+@@ -6117,6 +6250,7 @@ static void d3d12_draw_arrays(void* ud, u32 primitive, u32 first, u32 count)
+                 dr->is_clear = 0;
+                 dr->blend = s_d3d.current_rsx_state ? s_d3d.current_rsx_state->blend_enable : 1;
+                 dr->blend_key = rsx_blend_key(s_d3d.current_rsx_state, dr->blend);
++        dr->depth_en  = s_d3d.current_rsx_state ? (u8)s_d3d.current_rsx_state->depth_test_enable : 1;
+                 if (getenv("BLENDDBG")) { static u32 seen[32]; static int ns=0;
+                     u32 k = (dr->blend ? 0x80000000u : 0u) | dr->blend_key;
+                     int f=0; for (int i=0;i<ns;i++) if (seen[i]==k) f=1;
+@@ -6239,6 +6373,7 @@ static void d3d12_draw_arrays(void* ud, u32 primitive, u32 first, u32 count)
+             dr->is_clear = 0;
+             dr->blend = s_d3d.current_rsx_state ? s_d3d.current_rsx_state->blend_enable : 1;
+             dr->blend_key = rsx_blend_key(s_d3d.current_rsx_state, dr->blend);
++        dr->depth_en  = s_d3d.current_rsx_state ? (u8)s_d3d.current_rsx_state->depth_test_enable : 1;
+             dr->rt_off = current_rt_off(&dr->rt_w, &dr->rt_h, dr->rt_mrt);
+             dr->rt_fmt = s_d3d.current_rsx_state ? s_d3d.current_rsx_state->surface_format : 0;
+             if (s_d3d.current_rsx_state) {
+@@ -6382,6 +6517,7 @@ static void d3d12_draw_indexed(void* ud, u32 primitive, u32 first, u32 count)
+         dr->is_clear = 0;
+         dr->blend = s_d3d.current_rsx_state ? s_d3d.current_rsx_state->blend_enable : 1;
+         dr->blend_key = rsx_blend_key(s_d3d.current_rsx_state, dr->blend);
++        dr->depth_en  = s_d3d.current_rsx_state ? (u8)s_d3d.current_rsx_state->depth_test_enable : 1;
+         dr->rt_off = current_rt_off(&dr->rt_w, &dr->rt_h, dr->rt_mrt);
+         dr->rt_fmt = s_d3d.current_rsx_state ? s_d3d.current_rsx_state->surface_format : 0;
+         if (s_d3d.current_rsx_state) {
+@@ -6467,6 +6603,24 @@ static void d3d12_bind_texture(void* ud, u32 unit, const rsx_texture_state* tex)
+      * as-seen 0xA1 with the LN flag) is wired up so far; other formats fall
+      * back to untextured. */
+     u32 base_fmt = format & 0x9F;   /* strip LN(0x20)/UN(0x40) flags */
++    /* MENUTEX_DBG=<hex raw offset>: name the guest code that binds a texture.
++     * The raw offset alone does not say where the pixels come from -- the
++     * binding site does: its caller is the loader/render pass that owns the
++     * surface this texture aliases. */
++    { static const char* mt = (const char*)1; static u32 want = 0; static int n = 0;
++      if (mt == (const char*)1) { mt = getenv("MENUTEX_DBG");
++                                 want = mt ? (u32)strtoul(mt, NULL, 16) : 0; }
++      if (want && offset == want && n < 24) {
++          extern PPU_THREAD_LOCAL ppu_context* g_active_ctx;          u32 cia = g_active_ctx ? (u32)g_active_ctx->cia : 0;
++          u32 lr  = g_active_ctx ? (u32)g_active_ctx->lr  : 0;
++          u32 r3  = g_active_ctx ? (u32)g_active_ctx->gpr[3] : 0;
++          u32 r4  = g_active_ctx ? (u32)g_active_ctx->gpr[4] : 0;
++          n++;
++          fprintf(stderr, "[MENUTEX] bind unit=%u raw=0x%X fmt_word=0x%X loc=%u %ux%u"
++                          " cia=0x%08X lr=0x%08X r3=0x%08X r4=0x%08X tid=%u%c",
++                  unit, offset, tex->format, tex->format & 3, width, height,
++                  cia, lr, r3, r4,
++                  g_active_ctx ? (unsigned)g_active_ctx->thread_id : 0u, 10); } }
+     /* VP path: record the latest bound texture (any supported format) so draws
+      * can carry it per-draw. Location bits (format[1:0]): 1 = LOCAL, 2 = MAIN. */
+     extern u32 cellGcmResolveLocated(int local, u32 offset);
+diff --git a/runtime/spu/spu_workload.c b/runtime/spu/spu_workload.c
+index 2008961..b660a9b 100644
+--- a/runtime/spu/spu_workload.c
++++ b/runtime/spu/spu_workload.c
+@@ -846,6 +846,12 @@ static void spu_async_run(spu_async_job* j)
+                     "(job ran to completion, did not loop)\n", j->image_id, rc);
+             spu_serial_release();
+             if (j->taskset_ea) spu_taskset_task_exited(j->taskset_ea, j->taskid);
++            /* SPURS signals the workload's event-flag bit when the workload
++             * finishes; without it a PPU thread polling that flag waits for
++             * ever even though the work is done (Bakugan queues its inflate
++             * jobs this way and never leaves the first screen). */
++            { extern void spurs_workload_flag_set(uint16_t);
++              spurs_workload_flag_set(0x0001); }
+         }
+         /* Persistent LS is retained in its taskset slot for the next task; a
+          * per-dispatch LS is freed. */

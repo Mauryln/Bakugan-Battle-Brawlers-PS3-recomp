@@ -1,0 +1,256 @@
+diff --git a/libs/codec/cellSail.c b/libs/codec/cellSail.c
+--- a/libs/codec/cellSail.c
++++ b/libs/codec/cellSail.c
+@@ -54,6 +54,62 @@
+         if (s_sail_players[i].in_use && s_sail_players[i].self_ea == self_ea)
+             return i;
+     return -1;
++}
++
++/* Futures used by synchronous HLE completions. Never report an unset result as
++ * success: Bakugan tests the output word after boot and otherwise skips FMVs. */
++s32 cellSailFutureInitialize(u32 self)
++{
++    if (!self) return (s32)CELL_SAIL_ERROR_INVALID_ARGUMENT;
++    for (u32 i = 0; i < 24; i += 4) vm_write32(self + i, 0);
++    return CELL_OK;
++}
++
++s32 cellSailFutureSet(u32 self, s32 result)
++{
++    if (!self) return (s32)CELL_SAIL_ERROR_INVALID_ARGUMENT;
++    vm_write32(self + 12, (u32)result);
++    vm_write32(self + 8, 1);
++    return CELL_OK;
++}
++
++s32 cellSailFutureGet(u32 self, u64 timeout, u32 result)
++{
++    (void)timeout;
++    if (!self || !result) return (s32)CELL_SAIL_ERROR_INVALID_ARGUMENT;
++    if (!vm_read32(self + 8)) return (s32)0x80610708; /* NOT_AVAILABLE */
++    vm_write32(result, vm_read32(self + 12));
++    return CELL_OK;
++}
++
++s32 cellSailPlayerReplaceEventHandler(u32 self, u32 callback, u32 arg,
++                                     u32 previous_callback, u32 previous_arg)
++{
++    int slot = sail_player_slot(self);
++    if (slot < 0) return (s32)CELL_SAIL_ERROR_INVALID_ARGUMENT;
++    if (previous_callback) vm_write32(previous_callback, s_sail_players[slot].callback_ea);
++    if (previous_arg) vm_write32(previous_arg, s_sail_players[slot].arg_ea);
++    s_sail_players[slot].callback_ea = callback;
++    s_sail_players[slot].arg_ea = arg;
++    return CELL_OK;
++}
++
++s32 cellSailPlayerFinalize(u32 self)
++{
++    int slot = sail_player_slot(self);
++    if (slot < 0) return (s32)CELL_SAIL_ERROR_INVALID_ARGUMENT;
++    memset(&s_sail_players[slot], 0, sizeof(s_sail_players[slot]));
++    return CELL_OK;
++}
++
++s32 cellSailGraphicsAdapterFinalize(u32 self)
++{
++    return self ? CELL_OK : (s32)CELL_SAIL_ERROR_INVALID_ARGUMENT;
++}
++
++s32 cellSailSoundAdapterFinalize(u32 self)
++{
++    return self ? CELL_OK : (s32)CELL_SAIL_ERROR_INVALID_ARGUMENT;
+ }
+ 
+ /* Lifecycle */
+@@ -458,10 +514,15 @@
+ 
+ s32 cellSailDescriptorGetUri(CellSailDescriptorHandle desc, char* uri, u32 maxLen)
+ {
+-    if (desc >= MAX_DESCRIPTORS || !s_descs[desc].in_use || !uri)
+-        return (s32)CELL_SAIL_ERROR_INVALID_ARGUMENT;
+-    strncpy(GUEST_PTR(uri, char*), s_descs[desc].uri, maxLen - 1);
+-    uri[maxLen - 1] = '\0';
++    if (desc >= MAX_DESCRIPTORS || !s_descs[desc].in_use || !uri || !maxLen)
++        return (s32)CELL_SAIL_ERROR_INVALID_ARGUMENT;
++    u32 ea = (u32)(uintptr_t)uri;
++    u32 n = 0;
++    while (n < maxLen - 1 && s_descs[desc].uri[n]) {
++        vm_write8(ea + n, (u8)s_descs[desc].uri[n]);
++        ++n;
++    }
++    vm_write8(ea + n, 0);
+     return CELL_OK;
+ }
+ 
+@@ -509,19 +570,20 @@
+         return (s32)CELL_SAIL_ERROR_INVALID_ARGUMENT;
+     }
+ 
+-    sail_zero_guest(pSelf, SAIL_PLAYER_CLEAR);
+-
++    if (sail_player_slot(pSelf) >= 0)
++        return (s32)CELL_SAIL_ERROR_ALREADY_INITIALIZED;
+     for (int i = 0; i < CELL_SAIL_PLAYER_MAX; i++) {
+         if (!s_sail_players[i].in_use) {
++            sail_zero_guest(pSelf, SAIL_PLAYER_CLEAR);
+             s_sail_players[i].in_use       = 1;
+             s_sail_players[i].self_ea      = pSelf;
+             s_sail_players[i].allocator_ea = pAllocator;
+             s_sail_players[i].callback_ea  = pCallback;
+             s_sail_players[i].arg_ea       = pUserParam;
+-            break;
++            return CELL_OK;
+         }
+     }
+-    return CELL_OK;
++    return (s32)CELL_SAIL_ERROR_OUT_OF_MEMORY;
+ }
+ 
+ /* cellSailSoundAdapterInitialize(pSelf, pCallbacks, pArg) -- NID 0x3D0D3B72.
+diff --git a/libs/codec/cellSail.h b/libs/codec/cellSail.h
+--- a/libs/codec/cellSail.h
++++ b/libs/codec/cellSail.h
+@@ -72,6 +72,14 @@
+ /* Functions */
+ s32 cellSailInit(void);
+ s32 cellSailTerm(void);
++s32 cellSailFutureInitialize(u32 self);
++s32 cellSailFutureSet(u32 self, s32 result);
++s32 cellSailFutureGet(u32 self, u64 timeout, u32 result);
++s32 cellSailPlayerFinalize(u32 self);
++s32 cellSailPlayerReplaceEventHandler(u32 self, u32 callback, u32 arg,
++                                     u32 previous_callback, u32 previous_arg);
++s32 cellSailGraphicsAdapterFinalize(u32 self);
++s32 cellSailSoundAdapterFinalize(u32 self);
+ 
+ s32 cellSailPlayerCreate(const CellSailPlayerAttribute* attr,
+                            const CellSailPlayerResource* resource,
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -3771,6 +3771,82 @@
+     s_d3d.cmd_list->lpVtbl->ResourceBarrier(s_d3d.cmd_list, 2, b);
+ }
+ 
++
++static SRWLOCK s_video_lock = SRWLOCK_INIT;
++static u8* s_video_pixels;
++static u32 s_video_width, s_video_height;
++static ID3D12Resource* s_video_upload;
++
++void rsx_d3d12_backend_video_frame(const u8* pixels, u32 width, u32 height)
++{
++    AcquireSRWLockExclusive(&s_video_lock);
++    if (!pixels || !width || !height || width > 8192 || height > 8192) {
++        s_video_width = s_video_height = 0;
++    } else {
++        size_t size = (size_t)width * height * 4;
++        u8* copy = (u8*)realloc(s_video_pixels, size);
++        if (copy) {
++            s_video_pixels = copy;
++            memcpy(copy, pixels, size);
++            s_video_width = width; s_video_height = height;
++        }
++    }
++    ReleaseSRWLockExclusive(&s_video_lock);
++}
++
++/* Native media presentation is independent of the guest's offscreen resolve.
++ * render_frame has already drained the GPU before reusing this upload buffer. */
++static void video_present(u32 fi)
++{
++    AcquireSRWLockShared(&s_video_lock);
++    if (!s_video_width) { ReleaseSRWLockShared(&s_video_lock); return; }
++    u32 w = s_d3d.width, h = s_d3d.height;
++    u32 pitch = (w * 4u + 255u) & ~255u;
++    if (!s_video_upload) {
++        D3D12_HEAP_PROPERTIES hp = {0}; hp.Type = D3D12_HEAP_TYPE_UPLOAD;
++        D3D12_RESOURCE_DESC bd = {0}; bd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
++        bd.Width = (u64)pitch * h; bd.Height = 1; bd.DepthOrArraySize = 1;
++        bd.MipLevels = 1; bd.SampleDesc.Count = 1; bd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
++        s_d3d.device->lpVtbl->CreateCommittedResource(s_d3d.device, &hp, D3D12_HEAP_FLAG_NONE,
++            &bd, D3D12_RESOURCE_STATE_GENERIC_READ, NULL, &IID_ID3D12Resource, (void**)&s_video_upload);
++    }
++    if (!s_video_upload) { ReleaseSRWLockShared(&s_video_lock); return; }
++    u8* mapped = NULL; D3D12_RANGE nr = {0,0};
++    if (FAILED(s_video_upload->lpVtbl->Map(s_video_upload, 0, &nr, (void**)&mapped))) {
++        ReleaseSRWLockShared(&s_video_lock); return;
++    }
++    u32 dw = w, dh = (u32)((u64)w * s_video_height / s_video_width);
++    if (dh > h) { dh = h; dw = (u32)((u64)h * s_video_width / s_video_height); }
++    u32 left = (w - dw) / 2, top = (h - dh) / 2;
++    memset(mapped, 0, (size_t)pitch * h);
++    for (u32 y = 0; y < dh; y++) {
++        const u8* src = s_video_pixels + (size_t)((u64)y * s_video_height / dh) * s_video_width * 4;
++        u8* dst = mapped + (size_t)(y + top) * pitch + left * 4;
++        for (u32 x = 0; x < dw; x++) {
++            const u8* px = src + (size_t)((u64)x * s_video_width / dw) * 4;
++            dst[x*4] = px[2]; dst[x*4+1] = px[1]; dst[x*4+2] = px[0]; dst[x*4+3] = 255;
++        }
++    }
++    D3D12_RANGE wr = {0,(SIZE_T)pitch*h};
++    s_video_upload->lpVtbl->Unmap(s_video_upload, 0, &wr);
++    ReleaseSRWLockShared(&s_video_lock);
++    D3D12_RESOURCE_BARRIER b = {0}; b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
++    b.Transition.pResource = s_d3d.render_targets[fi];
++    b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
++    b.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
++    b.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
++    s_d3d.cmd_list->lpVtbl->ResourceBarrier(s_d3d.cmd_list, 1, &b);
++    D3D12_TEXTURE_COPY_LOCATION dst = {0}, src = {0};
++    dst.pResource = s_d3d.render_targets[fi]; dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
++    src.pResource = s_video_upload; src.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
++    src.PlacedFootprint.Footprint.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
++    src.PlacedFootprint.Footprint.Width = w; src.PlacedFootprint.Footprint.Height = h;
++    src.PlacedFootprint.Footprint.Depth = 1; src.PlacedFootprint.Footprint.RowPitch = pitch;
++    s_d3d.cmd_list->lpVtbl->CopyTextureRegion(s_d3d.cmd_list, &dst, 0, 0, 0, &src, NULL);
++    b.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
++    b.Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
++    s_d3d.cmd_list->lpVtbl->ResourceBarrier(s_d3d.cmd_list, 1, &b);
++}
+ 
+ static void guest_fb_present(u32 fi)
+ {
+@@ -4975,6 +5051,7 @@
+ skip_dump_consider: ;
+     guest_fb_present(fi);
+     composite_present(fi);
++    video_present(fi);
+     int dumping = (s_d3d.dump_frames_left > 0 && s_d3d.readback_buf
+                    && s_d3d.dump_skip_left == 0);
+     { static int mind2 = -1;
+@@ -6884,6 +6961,10 @@
+ 
+     if (s_d3d.hwnd) DestroyWindow(s_d3d.hwnd);
+ 
++    rsx_d3d12_backend_video_frame(NULL, 0, 0);
++    free(s_video_pixels); s_video_pixels = NULL;
++    if (s_video_upload) { s_video_upload->lpVtbl->Release(s_video_upload); s_video_upload = NULL; }
++
+     rsx_set_backend(NULL);
+     s_d3d.initialized = 0;
+ 
+@@ -7006,5 +7087,7 @@
+ void rsx_d3d12_backend_shutdown(void) {}
+ int rsx_d3d12_backend_pump_messages(void) { return 0; }
+ void rsx_d3d12_backend_present(void) {}
++void rsx_d3d12_backend_video_frame(const u8* pixels, u32 width, u32 height)
++{ (void)pixels; (void)width; (void)height; }
+ 
+ #endif /* _WIN32 */
+diff --git a/libs/video/rsx_d3d12_backend.h b/libs/video/rsx_d3d12_backend.h
+--- a/libs/video/rsx_d3d12_backend.h
++++ b/libs/video/rsx_d3d12_backend.h
+@@ -49,6 +49,10 @@
+ /* Force a present (useful for debugging). */
+ void rsx_d3d12_backend_present(void);
+ 
++/* Optional native media plane, BGRA8 top-down. NULL disables it. The backend
++ * owns a copy; callers may release their frame as soon as this returns. */
++void rsx_d3d12_backend_video_frame(const u8* pixels, u32 width, u32 height);
++
+ #ifdef __cplusplus
+ }
+ #endif

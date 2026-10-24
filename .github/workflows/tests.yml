@@ -1,0 +1,21 @@
+# The game itself needs a copyrighted disc dump and a full toolkit checkout, so
+# it cannot be built here. What can run is the part that decides whether our
+# patch series still applies and whether the tooling still parses.
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  python:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Compile every script
+        run: python -m compileall -q tools
+      - name: Patch series applies cleanly
+        run: python tools/test_pipeline_patches.py

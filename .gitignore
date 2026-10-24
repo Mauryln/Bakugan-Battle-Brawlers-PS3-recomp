@@ -1,0 +1,64 @@
+# ---------------------------------------------------------------------------
+# Game content. Everything here is rebuilt from the user's own disc image by
+# tools/pipeline.py and must never be committed.
+# ---------------------------------------------------------------------------
+iso/
+game/
+gamedata/
+analysis/
+diagnostics/
+pictures/
+bakugan-recomp/recompiled/
+bakugan-recomp/spu/
+bakugan-recomp/build/
+*.bmp
+dump_tex.bin
+dump_dest.bin
+*.PUP
+
+# ---------------------------------------------------------------------------
+# Toolkit checkout. It is upstream code (github.com/sp00nznet/ps3recomp); our
+# changes live in patches/ and are applied by `tools/pipeline.py --only patch`.
+# Never vendor it, never make it a submodule.
+# ---------------------------------------------------------------------------
+ps3recomp-src/
+
+# ---------------------------------------------------------------------------
+# Downloaded tools (RPCS3 is only used once to decrypt EBOOT.BIN)
+# ---------------------------------------------------------------------------
+tools/rpcs3/
+tools/rpcs3.7z
+tools/bin/
+
+# ---------------------------------------------------------------------------
+# Python
+# ---------------------------------------------------------------------------
+.venv/
+__pycache__/
+*.pyc
+
+# ---------------------------------------------------------------------------
+# Run output, captures, shader dumps, credentials
+# ---------------------------------------------------------------------------
+*.log
+*.err
+run.log
+run.err
+build.log
+screenshot*.png
+cap*/
+rsxcap/
+pad.txt
+dbg.txt*
+*.hlsl
+keys/
+*.token
+.env
+.env.*
+famous-ref/
+
+# Ignore every screenshot by default, then allow the curated ones the README
+# needs. Order matters: negation must come after the exclude.
+*.png
+!docs/img/*.png
+!docs/img/*.gif

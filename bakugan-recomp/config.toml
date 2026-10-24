@@ -1,0 +1,76 @@
+# Bakugan: Battle Brawlers -- ps3recomp project configuration
+#
+# NOTE: this file documents the port. The build does not read it: the lifted
+# sources are pointed at by RECOMP_DIR in CMakeLists.txt, the graphics/audio
+# backends are chosen at compile time in main.cpp, and the runtime knobs are
+# environment variables (see docs/DIAGNOSTICS.md in the toolkit).
+
+[input]
+# Decrypted PPU executable (RPCS3 --decrypt on PS3_GAME/USRDIR/EBOOT.BIN)
+elf_path = "../game/PS3_GAME/USRDIR/EBOOT.elf"
+sfo_path = "../game/PS3_GAME/PARAM.SFO"
+
+[game]
+title      = "Bakugan: Battle Brawlers"
+title_id   = "BLES00758"
+region     = "Europe (En,Fr,De,Es,It,Nl,Sv)"
+app_ver    = "01.00"
+category   = "DG"
+# 195 firmware imports across 14 libraries, 98% NIDs resolved by the toolkit.
+# 12,834 OPD functions, 2 PT_LOAD segments (0x10000 .. 0x6da480).
+
+[output]
+output_dir  = "recompiled/"
+func_prefix = "recomp_"
+
+[modules]
+# Every library this title imports, answered by the toolkit's HLE layer.
+# Sources: analysis/imports_named.json.
+sys_fs          = "hle"   # 13
+sys_io          = "hle"   # 6
+sysPrxForUser   = "hle"   # 23  (ppu_sysprx.cpp: TLS, threads, spu image import)
+cellSysmodule   = "hle"   # 2
+cellSysutil     = "hle"   # 19
+cellGcmSys      = "hle"   # 22
+cellResc        = "hle"   # 12
+cellAudio       = "hle"   # 12
+cellSpurs       = "hle"   # 32
+cellSail        = "hle"   # 33  (partial in the toolkit: MP4 playback)
+cellGame        = "hle"   # 3
+cellSaveData    = "hle"   # 1
+cellRtc         = "hle"   # 2
+sceNpTrophy     = "hle"   # 15
+# Loaded implicitly by the game via cellSysmoduleLoadModule, no direct imports:
+cellPad         = "hle"
+cellPngDec      = "hle"
+cellJpgDec      = "hle"
+cellFont        = "hle"
+cellSync        = "hle"
+cellSync2       = "hle"
+
+[memory]
+main_ram_mb    = 256
+vram_mb        = 256
+thread_stack_kb = 1024
+
+[threading]
+max_ppu_threads = 64
+max_spu_threads = 6
+use_host_threads = true
+
+[graphics]
+backend      = "auto"   # D3D12 on Windows, chosen in main.cpp
+width        = 0
+height       = 0
+vsync        = "on"
+scale_factor = 1
+
+[audio]
+backend     = "auto"    # WASAPI on Windows
+sample_rate = 48000
+buffer_size = 512
+
+[debug]
+log_hle_calls         = true
+log_missing_nids      = true
+break_on_unimplemented = false

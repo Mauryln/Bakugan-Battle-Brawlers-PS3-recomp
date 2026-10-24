@@ -1,0 +1,15 @@
+# One policy for the whole tree: text files are LF in the repository, whatever
+# the editor, and a handful of file types are never touched.
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.gif binary
+*.ico binary
+*.bmp binary
+*.iso binary
+*.pup binary
+*.dll binary
+*.exe binary
+
+*.patch text eol=lf

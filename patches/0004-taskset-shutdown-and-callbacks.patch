@@ -1,0 +1,505 @@
+diff --git a/runtime/ppu/ppu_loader.cpp b/runtime/ppu/ppu_loader.cpp
+--- a/runtime/ppu/ppu_loader.cpp
++++ b/runtime/ppu/ppu_loader.cpp
+@@ -3694,6 +3694,40 @@
+         s_opd_fixups[s_opd_fixup_n].code = code; s_opd_fixups[s_opd_fixup_n].toc = toc; s_opd_fixup_n++; }
+ }
+ 
++extern "C" uint32_t ppu_thread_callback_stack(void);
++
++static uint32_t callback_stack(const ppu_context* caller)
++{
++    /* Leave the caller's linkage area and temporary out-parameters intact.
++     * Nested callbacks start below the currently active guest frame. */
++    if (caller && caller->gpr[1] >= 0x100u)
++        return (uint32_t)(caller->gpr[1] - 0x100u) & ~15u;
++    static PPU_THREAD_LOCAL uint32_t host_stack = 0;
++    if (!host_stack) host_stack = ppu_thread_callback_stack();
++    return host_stack;
++}
++
++static uint64_t callback_tls(const ppu_context* caller)
++{
++    if (caller) return caller->gpr[13];
++    static PPU_THREAD_LOCAL uint32_t host_tls = 0;
++    if (!host_tls) host_tls = ppu_tls_new_block();
++    return host_tls ? host_tls : PPU_TLS_TP;
++}
++
++struct CallbackContextScope {
++    ppu_context* previous = g_active_ctx;
++    void (*trampoline)(void*) = g_trampoline_fn;
++    explicit CallbackContextScope(ppu_context* ctx) {
++        g_active_ctx = ctx;
++        g_trampoline_fn = nullptr;
++    }
++    ~CallbackContextScope() {
++        g_active_ctx = previous;
++        g_trampoline_fn = trampoline;
++    }
++};
++
+ extern "C" uint64_t ppu_guest_call(uint32_t opd_addr,
+                                    uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3,
+                                    uint64_t a4, uint64_t a5, uint64_t a6, uint64_t a7)
+@@ -3718,24 +3752,22 @@
+                 vm_read32(opd_addr + 8), vm_read32(opd_addr + 12));
+         return 0; }
+ 
+-    /* Private scratch stack high in the guest stack region, distinct from the
+-     * main + ppu_thread stacks. One callback at a time per caller thread. */
+-    static PPU_THREAD_LOCAL uint32_t s_cb_sp = 0;
+-    if (!s_cb_sp) s_cb_sp = 0xCFFE0000u;
++    ppu_context* saved_active = g_active_ctx;
++    uint32_t stack = callback_stack(saved_active);
++    if (!stack) { fprintf(stderr, "[ppu] callback stack allocation failed\n"); return 0; }
+ 
+     ppu_context ctx;
+     memset(&ctx, 0, sizeof(ctx));
+-    ctx.gpr[1]  = s_cb_sp;
++    ctx.gpr[1]  = stack;
+     ctx.gpr[2]  = toc;
+     ctx.gpr[3]  = a0; ctx.gpr[4] = a1; ctx.gpr[5] = a2; ctx.gpr[6] = a3;
+     ctx.gpr[7]  = a4; ctx.gpr[8] = a5; ctx.gpr[9] = a6; ctx.gpr[10] = a7;
+-    ctx.gpr[13] = PPU_TLS_TP;
++    ctx.gpr[13] = callback_tls(saved_active);
+     ctx.cia     = code;
+     /* Save/restore g_active_ctx: this scratch ctx lives on the stack, so leaving
+      * g_active_ctx pointing at it after we return leaves a DANGLING pointer once the
+      * frame is reused -- corrupting the crash handler / any diagnostic that reads the
+      * current-thread ctx. Restore the caller's. */
+-    ppu_context* saved_active = g_active_ctx;
+     /* Thread identity: a zeroed scratch ctx used to run callbacks as thread_id 0
+      * -- aliasing the main thread in every owner-tracking primitive. Inherit the
+      * calling guest thread's id; host-only threads (ticker) get a per-host-thread
+@@ -3746,10 +3778,9 @@
+ #else
+     ctx.thread_id = saved_active ? saved_active->thread_id : 0x7FFF0000ull;
+ #endif
+-    g_active_ctx = &ctx;
++    CallbackContextScope scope(&ctx);
+     fn(&ctx);
+     while (g_trampoline_fn) { void (*tf)(void*) = g_trampoline_fn; g_trampoline_fn = 0; tf(&ctx); }
+-    g_active_ctx = saved_active;
+     return ctx.gpr[3];
+ }
+ 
+@@ -3765,20 +3796,20 @@
+     ppu_fn fn = ppu_lookup(code);
+     if (!fn) { fprintf(stderr, "[ppu] guest_call_ct: code 0x%08X not registered\n", code); return 0; }
+ 
+-    static PPU_THREAD_LOCAL uint32_t s_cb_sp = 0;
+-    if (!s_cb_sp) s_cb_sp = 0xCFFE0000u;
++    ppu_context* saved_active = g_active_ctx;
++    uint32_t stack = callback_stack(saved_active);
++    if (!stack) { fprintf(stderr, "[ppu] callback stack allocation failed\n"); return 0; }
+ 
+     ppu_context ctx;
+     memset(&ctx, 0, sizeof(ctx));
+-    ctx.gpr[1]  = s_cb_sp;
++    ctx.gpr[1]  = stack;
+     ctx.gpr[2]  = toc;
+     ctx.gpr[3]  = a0; ctx.gpr[4] = a1; ctx.gpr[5] = a2; ctx.gpr[6] = a3;
+     ctx.gpr[7]  = a4; ctx.gpr[8] = a5; ctx.gpr[9] = a6; ctx.gpr[10] = a7;
+-    ctx.gpr[13] = PPU_TLS_TP;
++    ctx.gpr[13] = callback_tls(saved_active);
+     ctx.cia     = code;
+     /* Save/restore g_active_ctx (see ppu_guest_call): the scratch ctx is stack-local,
+      * so a dangling g_active_ctx after return corrupts the crash handler / diagnostics. */
+-    ppu_context* saved_active = g_active_ctx;
+     /* Inherit the caller's thread identity (see ppu_guest_call above). */
+ #ifdef _WIN32
+     ctx.thread_id = saved_active ? saved_active->thread_id
+@@ -3786,10 +3817,9 @@
+ #else
+     ctx.thread_id = saved_active ? saved_active->thread_id : 0x7FFF0000ull;
+ #endif
+-    g_active_ctx = &ctx;
++    CallbackContextScope scope(&ctx);
+     fn(&ctx);
+     while (g_trampoline_fn) { void (*tf)(void*) = g_trampoline_fn; g_trampoline_fn = 0; tf(&ctx); }
+-    g_active_ctx = saved_active;
+     return ctx.gpr[3];
+ }
+ 
+diff --git a/runtime/syscalls/sys_ppu_thread.c b/runtime/syscalls/sys_ppu_thread.c
+--- a/runtime/syscalls/sys_ppu_thread.c
++++ b/runtime/syscalls/sys_ppu_thread.c
+@@ -340,6 +340,17 @@
+                 vctx, (void*)g_ppu_threads, in_range, lr); }
+     if (in_range)
+         t->prof_pc = lr;
++}
++
++/* Host callbacks need a real, private guest stack too. Allocate under the
++ * same lock as PPU threads so their stack reservations cannot overlap. */
++uint32_t ppu_thread_callback_stack(void)
++{
++    const uint32_t size = 0x100000u;
++    table_lock();
++    uint32_t base = vm_stack_allocate(&g_vm_stack_alloc, size);
++    table_unlock();
++    return base ? base + size - 0x100u : 0;
+ }
+ 
+ int64_t sys_ppu_thread_create(ppu_context* ctx)
+diff --git a/libs/spurs/cellSpurs.c b/libs/spurs/cellSpurs.c
+--- a/libs/spurs/cellSpurs.c
++++ b/libs/spurs/cellSpurs.c
+@@ -955,22 +955,26 @@
+ 
+ s32 cellSpursShutdownTaskset(CellSpursTaskset* taskset)
+ {
+-    taskset = GUEST_PTR(taskset, CellSpursTaskset*);
+-    if (!taskset)
++    uint32_t ea = (uint32_t)(uintptr_t)taskset;
++    if (!ea) return CELL_SPURS_TASK_ERROR_NULL_POINTER;
++    if (!spurs_taskset_request_shutdown(ea)) return CELL_SPURS_TASK_ERROR_NOMEM;
++    /* Tasks leave cooperatively at WAIT_SIGNAL after their current work.
++     * JoinTaskset remains the barrier before queues/context may be freed. */
++    extern int spu_taskset_signal_parked_obj(uint32_t, uint32_t);
++    spu_taskset_signal_parked_obj(ea, 0);
++    printf("[cellSpurs] ShutdownTaskset(0x%08X)\n", ea);
++    return CELL_OK;
++}
++
++s32 cellSpursJoinTaskset(CellSpursTaskset* taskset)
++{
++    uint32_t taskset_ea = (uint32_t)(uintptr_t)taskset;
++    if (!taskset_ea)
+         return CELL_SPURS_TASK_ERROR_NULL_POINTER;
+ 
+-    printf("[cellSpurs] ShutdownTaskset()\n");
+-    return CELL_OK;
+-}
+-
+-s32 cellSpursJoinTaskset(CellSpursTaskset* taskset)
+-{
+-    taskset = GUEST_PTR(taskset, CellSpursTaskset*);
+-    if (!taskset)
+-        return CELL_SPURS_TASK_ERROR_NULL_POINTER;
+-
+-    printf("[cellSpurs] JoinTaskset()\n");
+-    /* In a full implementation, wait for all tasks to complete */
++    printf("[cellSpurs] JoinTaskset(0x%08X): waiting for tasks\n", taskset_ea);
++    spurs_taskset_wait_idle(taskset_ea);
++    printf("[cellSpurs] JoinTaskset(0x%08X): complete\n", taskset_ea);
+     return CELL_OK;
+ }
+ 
+diff --git a/libs/spurs/spurs_taskset.c b/libs/spurs/spurs_taskset.c
+--- a/libs/spurs/spurs_taskset.c
++++ b/libs/spurs/spurs_taskset.c
+@@ -8,7 +8,64 @@
+  * (the PPU create path) and the PM dispatcher call these.
+  */
+ #include "spurs_taskset.h"
++#include "../../runtime/platform/win32_compat.h"
+ #include <stdint.h>
++
++/* Host lifecycle state, kept outside the SDK's guest-memory layout. All
++ * readers use a host lifecycle lock; reinitialization removes the old state. */
++#include <stdlib.h>
++#include <stdatomic.h>
++typedef struct ShutdownTaskset {
++    uint32_t ea;
++    struct ShutdownTaskset* next;
++} ShutdownTaskset;
++static ShutdownTaskset* shutdown_tasksets;
++extern void spu_lockline_lock(void);
++extern void spu_lockline_unlock(void);
++
++static atomic_flag shutdown_state_lock = ATOMIC_FLAG_INIT;
++static void shutdown_lock(void) {
++    while (atomic_flag_test_and_set_explicit(&shutdown_state_lock, memory_order_acquire)) { }
++}
++static void shutdown_unlock(void) {
++    atomic_flag_clear_explicit(&shutdown_state_lock, memory_order_release);
++}
++
++static void taskset_reset_shutdown(uint32_t ea)
++{
++    ShutdownTaskset* removed = NULL;
++    shutdown_lock();
++    for (ShutdownTaskset** p = &shutdown_tasksets; *p; p = &(*p)->next) {
++        if ((*p)->ea == ea) { removed = *p; *p = removed->next; break; }
++    }
++    shutdown_unlock();
++    free(removed);
++}
++
++int spurs_taskset_is_shutting_down(uint32_t ea)
++{
++    int result = 0;
++    shutdown_lock();
++    for (ShutdownTaskset* p = shutdown_tasksets; p; p = p->next)
++        if (p->ea == ea) { result = 1; break; }
++    shutdown_unlock();
++    return result;
++}
++
++int spurs_taskset_request_shutdown(uint32_t ea)
++{
++    ShutdownTaskset* entry = malloc(sizeof(*entry));
++    if (!entry) return 0;
++    entry->ea = ea;
++    shutdown_lock();
++    for (ShutdownTaskset* p = shutdown_tasksets; p; p = p->next) {
++        if (p->ea == ea) { shutdown_unlock(); free(entry); return 1; }
++    }
++    entry->next = shutdown_tasksets;
++    shutdown_tasksets = entry;
++    shutdown_unlock();
++    return 1;
++}
+ 
+ /* Initialize a fresh taskset: clear all task bitsets and write the header fields.
+  * spurs_ea = the CellSpurs object EA; args = taskset args doubleword; wid = workload
+@@ -16,6 +73,7 @@
+ void spurs_taskset_init(uint32_t taskset_ea, uint32_t spurs_ea, uint64_t args,
+                         uint32_t wid, uint32_t size, uint32_t evf1, uint32_t evf2)
+ {
++    taskset_reset_shutdown(taskset_ea);
+     /* clear running/ready/pending_ready/enabled/signalled/waiting (each 16 bytes) */
+     for (uint32_t off = CSTS_RUNNING; off <= CSTS_WAITING; off += 0x10) {
+         vm_write64(taskset_ea + off + 0, 0);
+@@ -91,3 +149,22 @@
+ {
+     vm_write64(taskset_ea + CSTS_X78, handler_ea);
+ }
++
++/* A join is a lifetime barrier: after it returns the PPU may free the task's
++ * queues and context. Observe task exit under the same lock used by SPU commits
++ * and the host exit path, rather than racing their bitset updates. */
++void spurs_taskset_wait_idle(uint32_t taskset_ea)
++{
++    extern void spu_lockline_lock(void);
++    extern void spu_lockline_unlock(void);
++    extern uint8_t* vm_base;
++    for (;;) {
++        unsigned active = 0;
++        spu_lockline_lock();
++        for (unsigned i = 0; i < 16; i++)
++            active |= vm_base[taskset_ea + CSTS_ENABLED + i];
++        spu_lockline_unlock();
++        if (!active) return;
++        Sleep(1);
++    }
++}
+diff --git a/libs/spurs/spurs_taskset.h b/libs/spurs/spurs_taskset.h
+--- a/libs/spurs/spurs_taskset.h
++++ b/libs/spurs/spurs_taskset.h
+@@ -39,6 +39,11 @@
+ /* ---- CellSpursTaskset (main memory, 128-byte aligned) --------------------
+  * The PM reads the task bitsets to pick a ready task and the TaskInfo array for
+  * its ELF/context/args. Max 128 tasks; each TaskInfo is 48 bytes. */
++/* Wait until all 128 enabled task bits have been cleared by task exit. */
++void spurs_taskset_wait_idle(uint32_t taskset_ea);
++int spurs_taskset_request_shutdown(uint32_t taskset_ea);
++int spurs_taskset_is_shutting_down(uint32_t taskset_ea);
++
+ enum {
+     CSTS_RUNNING        = 0x00,   /* atomic 128-bit bitset (4 BE u32) */
+     CSTS_READY          = 0x10,
+diff --git a/runtime/spu/spu_channels.c b/runtime/spu/spu_channels.c
+--- a/runtime/spu/spu_channels.c
++++ b/runtime/spu/spu_channels.c
+@@ -813,8 +813,25 @@
+ /* ===========================================================================
+  * Channel write
+  * ===========================================================================*/
++/* Shutdown may arrive while a task polls its queue with DMA rather than
++ * WAIT_SIGNAL. Stop on the execution owner at a channel boundary, then let
++ * the dispatcher retire its context and clear the enabled bit for join. */
++static int taskset_shutdown_checkpoint(spu_context* ctx)
++{
++    extern void spu_workload_current_task(uint32_t*, uint32_t*);
++    extern int spurs_taskset_is_shutting_down(uint32_t);
++    uint32_t taskset = 0, task = 0;
++    spu_workload_current_task(&taskset, &task);
++    if (!taskset || !spurs_taskset_is_shutting_down(taskset)) return 0;
++    ctx->status = SPU_STATUS_STOPPED_BY_STOP;
++    spu_halt(ctx);
++    return 1;
++}
++
++
+ void spu_wrch(spu_context* ctx, uint32_t channel, u128 value)
+ {
++    if (taskset_shutdown_checkpoint(ctx)) return;
+     /* SPU_CHHIST=1: which channels a job actually touches, and how often. A
+      * worker that never issues an MFC command is either not being handed its
+      * work descriptor or is waiting on a channel we never satisfy; the channel
+@@ -1045,8 +1062,10 @@
+ /* ===========================================================================
+  * Channel read (returns value in the preferred word slot)
+  * ===========================================================================*/
++
+ u128 spu_rdch(spu_context* ctx, uint32_t channel)
+ {
++    if (taskset_shutdown_checkpoint(ctx)) { u128 zero = {0}; return zero; }
+     { static int s_c = -1; if (s_c < 0) { const char* e = getenv("SPU_CHHIST"); s_c = e ? (atoi(e) > 0 ? atoi(e) : 2000) : 0; }
+       if (s_c) { static unsigned long long r[128]; static unsigned long long n;
+           r[channel & 127]++;
+@@ -1816,6 +1835,19 @@
+                 num, a[0],a[1],a[2],a[3], a[4],a[5],a[6],a[7],
+                 a[8],a[9],a[10],a[11], a[12],a[13],a[14],a[15], ctx->image_id);
+         fflush(stderr); } } }
++    /* Shutdown is cooperative at a taskset kernel boundary. Dispatch identity
++     * remains valid even if the task restored over its synthetic LS context. */
++    {
++        extern void spu_workload_current_task(uint32_t*, uint32_t*);
++        extern int spurs_taskset_is_shutting_down(uint32_t);
++        uint32_t taskset = 0, task = 0;
++        spu_workload_current_task(&taskset, &task);
++        if (taskset && spurs_taskset_is_shutting_down(taskset)) {
++            ctx->status = SPU_STATUS_STOPPED_BY_STOP;
++            spu_halt(ctx);
++            return;
++        }
++    }
+     /* NOTE (YDKJ cri_mpv): the cri task's BOOTSTRAP (func_00003040) calls the
+      * task-API syscall and EXPECTS IT TO RETURN, then branches to the real task
+      * entry (0x3050). Halting on num=0 here kills the task at bootstrap before it
+@@ -1859,6 +1891,8 @@
+                        ((uint32_t)ctx->ls[0x27BE] << 8)  |  (uint32_t)ctx->ls[0x27BF];
+         uint32_t tid = ((uint32_t)ctx->ls[0x27D4] << 24) | ((uint32_t)ctx->ls[0x27D5] << 16) |
+                        ((uint32_t)ctx->ls[0x27D6] << 8)  |  (uint32_t)ctx->ls[0x27D7];
++        extern void spu_workload_current_task(uint32_t*, uint32_t*);
++        spu_workload_current_task(&ts, &tid);
+         /* The guest names its wait OBJECT in the task-API argument at LS 0x2FD0
+          * (low nibble is flags). It reads its received event bits from
+          * object+0x30, so this is both who to wake and where to deliver. */
+@@ -1910,6 +1944,8 @@
+             extern void spu_taskset_parked_add(uint32_t, uint32_t, uint32_t);
+             extern void spu_taskset_parked_del(uint32_t, uint32_t);
+             extern int spu_taskset_consume_wake(uint32_t);
++            extern int spurs_taskset_is_shutting_down(uint32_t);
++            if (spurs_taskset_is_shutting_down(ts)) { spu_halt(ctx); return; }
+             if (spu_taskset_consume_wake(ts)) {   /* a Set beat us to the park */
+                 spu_ef_deliver_owed(ctx, wobj);
+                 ctx->gpr[3]._u32[0] = 0;
+@@ -1917,9 +1953,10 @@
+             }
+             yz_lockstep_block_begin(ctx);
+             spu_taskset_parked_add(ts, tid, wobj);
+-            spu_taskset_wait_signal(ts, tid);
++            int shutting_down = spu_taskset_wait_signal(ts, tid);
+             spu_taskset_parked_del(ts, tid);
+             yz_lockstep_block_end(ctx);
++            if (shutting_down) { spu_halt(ctx); return; }
+             spu_ef_deliver_owed(ctx, wobj);
+         }
+         ctx->gpr[3]._u32[0] = 0;
+diff --git a/runtime/spu/spu_workload.c b/runtime/spu/spu_workload.c
+--- a/runtime/spu/spu_workload.c
++++ b/runtime/spu/spu_workload.c
+@@ -6,6 +6,7 @@
+  * spu_workload_dispatch(); the registry is populated by the title's lifted set.
+  */
+ #include "spu_workload.h"
++#include "../../libs/spurs/spurs_taskset.h"
+ #include "spu_lifted_job.h"   /* spu_run_lifted_job */
+ #include "../ps3_log.h"      /* ps3_log_verbose */
+ #include <stdio.h>
+@@ -455,6 +456,7 @@
+     uint32_t start_t[128], start_elf[128], start_ctx[128];
+     size_t start_sz[128];
+     int n_start = 0;
++    int shutting_down = spurs_taskset_is_shutting_down(taskset_ea);
+     spu_lockline_lock();
+     if (done_task < 128) {
+         uint8_t m = (uint8_t)(0x80u >> (done_task & 7));
+@@ -466,6 +468,12 @@
+     for (uint32_t t = 0; t < 128 && run; t++) {
+         uint8_t m = (uint8_t)(0x80u >> (t & 7));
+         if (!(ts[0x30 + t / 8] & m) || (run[t / 8] & m)) continue;
++        if (shutting_down) {
++            ts[0x10 + t / 8] &= (uint8_t)~m;
++            ts[0x20 + t / 8] &= (uint8_t)~m;
++            ts[0x30 + t / 8] &= (uint8_t)~m;
++            continue;
++        }
+         if (!((ts[0x10 + t / 8] | ts[0x20 + t / 8]) & m)) continue;
+         const uint8_t* ti = ts + 0x80 + 0x30 * t;
+         uint32_t elf = ((uint32_t)ti[0x14] << 24) | ((uint32_t)ti[0x15] << 16) |
+@@ -503,8 +511,18 @@
+     if (taskset_ea) spu_taskset_task_exited(taskset_ea, 0xFFFFFFFFu);
+ }
+ 
++/* Stable dispatch identity. A task can restore LS over the synthetic policy
++ * context, so syscall handling must not depend on LS[0x27BC] staying intact. */
++static _Thread_local uint32_t current_taskset, current_task;
++void spu_workload_current_task(uint32_t* taskset, uint32_t* task)
++{
++    if (current_taskset) { *taskset = current_taskset; *task = current_task; }
++}
++
+ static void spu_async_run(spu_async_job* j)
+ {
++    current_taskset = j->taskset_ea;
++    current_task = j->taskid;
+     spu_taskset_mark(j->taskset_ea, j->taskid, 1);
+     /* Persistent per-taskset LS: acquire (+serialize) the taskset's LS, or fall
+      * back to a fresh per-dispatch LS when disabled / no taskset. */
+@@ -845,13 +863,13 @@
+             fprintf(stderr, "[spu_workload] async image=%d RETURNED rc=%d "
+                     "(job ran to completion, did not loop)\n", j->image_id, rc);
+             spu_serial_release();
+-            if (j->taskset_ea) spu_taskset_task_exited(j->taskset_ea, j->taskid);
+             /* SPURS signals the workload's event-flag bit when the workload
+              * finishes; without it a PPU thread polling that flag waits for
+              * ever even though the work is done (Bakugan queues its inflate
+              * jobs this way and never leaves the first screen). */
+             { extern void spurs_workload_flag_set(uint16_t);
+               spurs_workload_flag_set(0x0001); }
++            if (j->taskset_ea) spu_taskset_task_exited(j->taskset_ea, j->taskid);
+         }
+         /* Persistent LS is retained in its taskset slot for the next task; a
+          * per-dispatch LS is freed. */
+@@ -864,6 +882,7 @@
+         pthread_mutex_unlock(&ts_slot->lock);
+ #endif
+     }
++    current_taskset = current_task = 0;
+     free(j);
+ }
+ 
+@@ -980,7 +999,7 @@
+  *     the guest bit is set under the same lock the waiter checks it).
+  * The bitset is guest state (SPU-visible); the host lock/condvar exist only
+  * to block and wake the task's host thread. */
+-#include "../../libs/spurs/spurs_taskset.h"
++
+ 
+ #ifdef _WIN32
+ static SRWLOCK            s_sig_lock = SRWLOCK_INIT;
+@@ -1265,7 +1284,8 @@
+     spu_serial_release();
+ #ifdef _WIN32
+     AcquireSRWLockExclusive(&s_sig_lock);
+-    while (!spurs_bitset_test(taskset_ea + CSTS_SIGNALLED, taskId)) {
++    while (!spurs_taskset_is_shutting_down(taskset_ea) &&
++           !spurs_bitset_test(taskset_ea + CSTS_SIGNALLED, taskId)) {
+         if (!SleepConditionVariableSRW(&s_sig_cv, &s_sig_lock, 1000, 0)) {
+             static int _n = 0;
+             if (++secs && _n < 16) { _n++;
+@@ -1278,7 +1298,8 @@
+     ReleaseSRWLockExclusive(&s_sig_lock);
+ #else
+     pthread_mutex_lock(&s_sig_lock);
+-    while (!spurs_bitset_test(taskset_ea + CSTS_SIGNALLED, taskId)) {
++    while (!spurs_taskset_is_shutting_down(taskset_ea) &&
++           !spurs_bitset_test(taskset_ea + CSTS_SIGNALLED, taskId)) {
+         struct timespec ts; clock_gettime(CLOCK_REALTIME, &ts); ts.tv_sec += 1;
+         if (pthread_cond_timedwait(&s_sig_cv, &s_sig_lock, &ts) != 0) {
+             static int _n = 0;
+@@ -1297,7 +1318,7 @@
+     spu_serial_acquire();       /* resume: re-take the serial lock */
+     { extern unsigned long long ps3_ms_now(void);
+       s_wait_exit_ms = ps3_ms_now(); }   /* stamp for the next entry's ran= */
+-    return 0;
++    return spurs_taskset_is_shutting_down(taskset_ea);
+ }
+ 
+ int spu_workload_dispatch_async(const uint8_t* image, uint32_t image_size,

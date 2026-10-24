@@ -1,0 +1,59 @@
+name: Bug report
+description: Something renders wrong, crashes, or the game stops advancing
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before filling this in: the project needs **your own disc dump** and
+        builds everything locally. See [README](../README.md#build-it) and
+        [docs/STATUS.md](../docs/STATUS.md) for what is already known to be
+        broken (3D models, gameplay, sound effects).
+
+  - type: textarea
+    id: what
+    attributes:
+      label: What happens
+      description: Where in the game, and what you see or hear instead.
+      placeholder: After the save-data warning, the loading screen stays black instead of showing the gate.
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. tools\run.ps1
+        2. Wait for the warning, press X
+        3. ...
+    validations:
+      required: true
+
+  - type: input
+    id: gpu
+    attributes:
+      label: GPU and driver
+      placeholder: RTX 3060, driver 560.94
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: |
+        Attach `run.log`, and if it is a rendering problem, a frame capture
+        (`RSX_CAP=<start>:<count>:<stride>` plus `RSX_CAP_DIR`, which writes a
+        `manifest.txt` next to each frame). Drag the files into this box.
+      render: text
+    validations:
+      required: false
+
+  - type: input
+    id: commit
+    attributes:
+      label: Commit
+      description: Output of `git rev-parse --short HEAD`.
+    validations:
+      required: false
