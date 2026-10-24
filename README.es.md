@@ -42,17 +42,19 @@ Aquí no hay emulación: el código máquina se traduce una vez y después se co
 | Apertura e intro narrativa — H.264/AAC con Media Foundation | ✅ |
 | Pantalla de título, todos los menús, selector de modo, texturas 2D | ✅ |
 | Teclado del juego (nombre) y pad de teclado/XInput | ✅ |
+| Música — partituras PCM `SNDP` mezcladas en el SPU, más el AAC de los vídeos | ✅ |
+| Battle Arena — tarda en cargar, luego inicia el combate | ⚠️ |
 | *Defecto conocido:* el "gate" del selector de modo — las capas 2D tras el retrato se solapan | ⚠️ |
-| **Modelos 3D** (la escena que va al target MSAA de 1120×584) | ❌ |
-| **Gameplay** — tutorial, combates | ❌ |
+| **Modelos 3D y escenario** — la geometría se envía, la escena no aparece | ❌ |
+| **Gameplay** — tutorial, combates de la historia | ❌ |
 | **Efectos de sonido** — ATRAC3 en `SOUND/*.PAST` | ❌ |
 
-En una línea: **el juego arranca, reproduce sus vídeos y muestra todos los menús; se detiene cuando empieza la escena 3D.**
+En una línea: **el juego arranca, reproduce sus vídeos, muestra todos los menús e inicia un duelo de Battle Arena con música; lo que falta es la escena 3D.**
 
 ## Se busca ayuda
 
-1. **Geometría 3D de RSX.** El invitado limpia y resuelve cada frame un render target MSAA de 1120×584 (`0xEAB0000`) pero nunca le manda geometría, así que el compuesto sale negro. Si conoces el flujo de métodos `NV4097`, empieza en `libs/video/rsx_commands.c`, `libs/video/rsx_vertex_fetch.c` y `libs/video/rsx_d3d12_backend.c`.
-2. **Efectos de sonido.** Los contenedores `.PAST` llevan ATRAC3; hoy solo funciona el audio de los vídeos. `libs/audio/`.
+1. **La escena 3D.** Battle Arena envía 438–600 dibujos por frame al target MSAA de 1120×584 (`0xEAB0000`) y el target sí recibe contenido, pero personajes y escenario no se ven bien. Eso descarta la lectura anterior de "no llega geometría", que describía el menú. Ahora los sospechosos son viewport/clip, profundidad y traducción de programas: `libs/video/rsx_commands.c`, `libs/video/rsx_vertex_fetch.c` y `libs/video/rsx_d3d12_backend.c`.
+2. **Lo que queda de audio.** Las partituras de menú y el mezclador SPU funcionan; los efectos `.PAST` son ATRAC3 y siguen en silencio, y quedan cortes por revisar. `libs/audio/`.
 3. **Testers.** ¿Arranca en tu GPU/driver? Con un `run.log` y una frase basta para abrir un issue.
 
 Se aceptan intentos a medias, hipótesis equivocadas y "esto lo hace RPCS3 así". Para algo grande, abre primero un issue.

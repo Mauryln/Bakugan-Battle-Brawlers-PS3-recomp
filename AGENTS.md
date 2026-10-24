@@ -33,7 +33,7 @@ Toolkit tests use CMake/CTest and standalone Python checks named `test_*.py`; na
 
 ## Commit & Pull Request Guidelines
 
-The workspace root has no Git history; the nested toolkit history available locally contains a merge commit, insufficient to establish a commit-message convention. Use concise imperative subjects. Keep PRs focused, describe behavior changes, link relevant issues, and report validation commands. Include before/after screenshots for rendering changes.
+The official repository is `https://github.com/Mauryln/Bakugan-Battle-Brawlers-PS3-recomp`. Its initial history is insufficient to establish a commit-message convention; use concise imperative subjects. Keep PRs focused, describe behavior changes, link relevant issues, and report validation commands. Include before/after screenshots for rendering changes. Read `docs/NEXT_SESSION.md` before resuming the current audio/rendering investigation.
 
 ## Game Data & Secrets
 

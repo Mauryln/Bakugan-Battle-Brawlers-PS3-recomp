@@ -42,19 +42,21 @@ Nothing runs in an emulator: the machine code is translated once, then compiled 
 | Opening + narrative intro — H.264/AAC through Media Foundation | ✅ |
 | Title screen, all menus, mode select, 2D textures | ✅ |
 | In-game keyboard (name entry) and keyboard/XInput pad | ✅ |
+| Music — `SNDP` PCM scores mixed by the SPU, plus FMV AAC | ✅ |
+| Battle Arena — slow to load, then starts a duel | ⚠️ |
 | *Known defect:* mode-select "gate" — 2D layers behind the portrait overlap | ⚠️ |
-| **3D models** (charge into the 1120×584 MSAA target) | ❌ |
-| **Gameplay** — tutorial, battles | ❌ |
+| **3D models and stage** — geometry is submitted, the scene does not appear | ❌ |
+| **Gameplay** — tutorial, story battles | ❌ |
 | **Sound effects** — ATRAC3 in `SOUND/*.PAST` | ❌ |
 
-If you only read one line: **the game boots, plays its videos and shows every menu; it stops when the 3D scene starts.**
+If you only read one line: **the game boots, plays its videos, shows every menu and starts a Battle Arena duel with music; what is still missing is the 3D scene.**
 
 ## Help wanted
 
-These are the walls we are stuck on. Each one is a self-contained problem with a measurement already done — the details are in [`docs/STATUS.md`](docs/STATUS.md).
+These are the walls we are stuck on. Each one is a self-contained problem with a measurement already done — the details are in [`docs/STATUS.md`](docs/STATUS.md) and [`docs/NEXT_SESSION.md`](docs/NEXT_SESSION.md).
 
-1. **RSX 3D geometry.** The guest clears and resolves a 1120×584 2× MSAA render target (`0xEAB0000`) every frame but never issues geometry into it, so the composite is black. If you know the RSX/`NV4097` method stream, start in `libs/video/rsx_commands.c`, `libs/video/rsx_vertex_fetch.c` and `libs/video/rsx_d3d12_backend.c`.
-2. **Sound effects.** The `.PAST` containers carry ATRAC3; only the FMV audio path (Media Foundation) works today. `libs/audio/`.
+1. **The 3D scene.** Battle Arena submits 438–600 draws per frame into the 1120×584 2× MSAA target (`0xEAB0000`) and the target does receive content, but characters and stage do not appear correctly. That rules out the earlier "no geometry at all" reading, which described the menu. The suspects are now viewport/clip state, depth, and program translation: `libs/video/rsx_commands.c`, `libs/video/rsx_vertex_fetch.c`, `libs/video/rsx_d3d12_backend.c`.
+2. **Audio leftovers.** Menu scores and the SPU mixer work; the `.PAST` effects are ATRAC3 and still silent, and a few cuts are under review. `libs/audio/`.
 3. **Testers.** Does it boot on your GPU/driver? A `run.log` and one sentence is enough to open an issue.
 
 Partial work, wrong guesses and "this is how RPCS3 does it" are all welcome — open an issue first if you plan something large.
