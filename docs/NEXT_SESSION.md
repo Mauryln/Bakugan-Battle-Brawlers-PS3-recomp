@@ -1,168 +1,90 @@
-# Informe de traspaso — 24 de octubre de 2026 (cierre)
+# Informe de traspaso — 26 de octubre de 2026 (sesión larga)
 
-Documento para retomar el trabajo (o para que el usuario pruebe a mano). Al final
-está la lista de comprobaciones manuales con los comandos exactos y qué significa
-cada resultado.
+Documento para retomar el trabajo mañana. Estado real, qué se arregló, qué
+falta y cómo seguir.
 
-## Dónde estamos
+## Lo que quedó arreglado (commiteado, parches 0009 y 0010)
 
-| Área | Estado |
-|---|---|
-| Arranque, logos, vídeos, intro narrativa | Funciona |
-| Menús y texturas 2D | Funcionan |
-| Audio (pistas SNDP, colas SPU, overlays) | Confirmado bueno por el usuario |
-| Teclado / XInput / guardado | Funciona |
-| Battle Arena: carga y geometría | Emite 400–600 dibujos por frame; el combate arranca |
-| Escena 3D dentro del RT `0xEAB0000` | Se dibuja (hay imagen) pero **deformada** |
-| Pase de presentación del invitado (composite + HUD) | **No deja píxeles en pantalla** |
-| Efectos `SOUND/*.PAST` (ATRAC3) | Sin sonido |
+| Parche | Problema | Arreglo |
+|---|---|---|
+| `0009-rsx-strip-restart` | Escena 3D deformada (estelas/triángulos gigantes) | Los strips indexados de la arena cortan con el sentinel **`0x7FFF`** (`NV4097_SET_RESTART_INDEX`). `upload_strip_vp_indexed` trataba ese valor como un vértice. Ahora respeta el corte y la continuidad entre paquetes. |
+| `0010-rsx-display-rebind-and-shader-cache` | Cinemáticas negras + congelamientos | (1) `RT_REBIND` va **por defecto activo**: reemite `OMSetRenderTargets` antes de cada draw; el binding del backbuffer se perdía en el batch largo offscreen. (2) **Caché de shaders** en `shadercache/`: guarda el bytecode del fragment program compilado, eliminando el `D3DCompile` (~1s) por shader nuevo. |
 
-Consecuencia visible: en batalla la ventana queda **negra**. Con `RX_PASTE=1` se ve
-la escena 3D a 1:1 en la esquina superior izquierda, deformada, y sin HUD (el pegado
-tapa el 2D: eso explica la regresión "antes se veía el HUD y ahora no").
+Build verde, pipeline reconoce los 10 parches (0001–0010). Test `tools\test_rsx_strip_restart.py` pasa.
 
-## Lo que se demostró en esta sesión
+## Lo que se descartó / revertí
 
-Todo con una captura de frames real (`RX_DISPDBG`, `RTT_STAT`) en batalla.
+- **`0011` alias de resolves 1:1**: intenté que el alias del RT se actualizara también en resolves 1:1 (no solo escalados 2:1). **Rompía el HUD** (los buffers de staging de UI caen dentro del rango del RT y se aliasaban mal). Revertido y eliminado del historial.
 
-1. **El combate dibuja mucho.** `[RTTSTAT] frame=1800 ops=418 clear=4 offtarget=404
-   display=13` — 400+ dibujos fuera de pantalla y 13 en el target de display.
+## Diagnósticos que dejé (sin commitear, en `ps3recomp-src`, inofensivos)
 
-2. **El quad de composición existe y muestrea el RT vivo.** Del pase de display,
-   el primer op:
-   ```
-   [DISPDRAW] d=1 verts=6 pso=guest-fp vp=1280x720 bl=1/122118B at=602  dp=4 texrt=0 tex0=0xDF60000
-   ```
-   `texrt=0` significa que la textura `0xDF60000` está enlazada como SRV **del RT
-   `0xEAB0000` en vivo**, es decir el alias del parche 0007 funciona. `pso=guest-fp`
-   dice que se usa el fragment program del invitado, no el fallback.
+- `VTX_COL=<n>` en `read_vp_vertex`: vuelca el color/alpha (atributo 3) de los primeros vértices. Útil para el negro del gameplay.
+- Conteo de superficie en `DRAW_INDEX_ARRAY` (además de `DRAW_ARRAYS`): hace que `RTT_STAT` (`surfEAB`/`surfOther`) cuente también los draws indexados de la escena 3D.
 
-3. **El estado del dibujo es razonable.** `bl=1/0x122118B` = blend activo con
-   `SRC_ALPHA`/`INV_SRC_ALPHA`. `dp=4` y `dp=1C` decodifican **sin test de
-   profundidad** (`depth_key`: bit0 = enable). `at=602` = alpha test desactivado;
-   `at=10602` = activado con `GEQUAL 2/255`.
+Estos NO están en ningún parche; si quieres, se pueden meter en un `0011` de diagnóstico.
 
-4. **El menú usa exactamente el mismo estado y sí se ve.** Mismos FPs
-   (`0xD8FFF01`/`0xD8FFF81`), mismo viewport 1280x720, mismo blend, mismo `tex0`.
-   La diferencia es el contenido del batch (400+ dibujos offscreen) o el origen de
-   la textura.
+## Lo que FALTA (el negro del gameplay — turno del jugador)
 
-## Teorías descartadas (no repetirlas)
+Estado actual, confirmado por el usuario:
+- **Cinemáticas**: se ven (escena 3D visible, texturas granuladas, caras invisibles).
+- **Turno del jugador**: **todo negro, solo se ve el HUD 2D**. El sonido funciona.
 
-- **Alias/resolve ausente**: falso, `texrt=0` prueba que el RT vivo está enlazado.
-- **Canal alfa del RT**: se forzó el mapeo de componentes del SRV a `alpha=1` para
-  los draws a display; la pantalla siguió negra. Revertido.
-- **Test de profundidad**: `depth_key` sale desactivado en los ops de display.
-- **Canal alfa global / `PS3_FORCE_ALPHA_BLEND`**: sin efecto sobre el problema.
-- **cellResc**: importado pero nunca llamado. `cellGcm` 2D no manejado:
-  `[GCM2D-UNH]` vacío. No hay blits ocultos ni segundo buffer de display.
-- **PSO de fallback**: `pso=guest-fp` en todos los ops de display.
-- **Profundidad `depth_key=4`/`0x1C`**: sin test, descartado.
+### Evidencia recogida
 
-Queda una duda honesta: el pase de display **completo** (quad de composición *y*
-sprites del HUD) desaparece, aunque los sprites del HUD tienen su propia textura y
-su propio alfa. Eso apunta a algo global del batch o del target, no al contenido
-del RT.
+1. La escena 3D **sí** dibuja a `0xEAB0000` durante el gameplay: `surfEAB` crece hasta 721k (con el conteo indexado). El RT `rt_0EAB0000.bmp` capturado tiene **62% de píxeles no-negros**.
+2. El quad de composición **sí** se dibuja: `[VTXCOL] a3=(0 0 0 1) fp=0xD8FFF01` (alpha del color de vértice = 1, no 0).
+3. El `backbuffer` sale **negro** (0% no-negro).
+4. El fallback de proyección **`VPFB` no se dispara** (0 veces).
+5. Las constantes del VP del draw 3D son un **cámara + proyección válidas** (p. ej. `c[3]=(-1.5,-4.4,-54.9,1)`, proyección en `c[4..7]`).
+6. El resolve NV3089 es **siempre** `0xEAB0000 → 0xDF60000` escalado 2:1 (no cambia en gameplay).
+7. En la captura RSX_CAP (`frame 2400`), los draws a display son solo el **pre-pase de profundidad del HUD** (`cmask=0`, `t0=0x0C489D80`) y **NO aparece el quad de composición** (`t0=0xDF60000`). Puede que `frame 2400` fuera un frame de carga/transición, no el gameplay real.
 
-## Hipótesis abiertas, en orden de coste
+### Hipótesis abiertas (en orden de coste)
 
-1. **El estado de blend/alpha test esconde el pase.** `RX_OPAQUE=1` dibuja los ops
-   de display con blend y alpha test forzados a off (ya está en el binario). Si la
-   imagen aparece: el canal alfa de salida del FP (o el alfa del color de vértice)
-   llega a 0 y con `SRC_ALPHA` no pinta nada. Si sigue negra: los draws no llegan
-   al target.
-2. **El alfa del color de vértice del quad es 0.** Los dos quads de display leen un
-   atributo de color; si el VP entrega `(r,g,b,0)`, el blend los borra. Mirar el
-   buffer de vértices del draw (`vb_byte_offset / 256`) y el `vs_idx` del op.
-3. **El binding del backbuffer se pierde en un batch largo.** `RT_REBIND=1`
-   reemite `OMSetRenderTargets` antes de cada draw; es una prueba de una línea.
-4. **El export del FP pierde el alfa.** Probar `RSX_FP_CTRL_AUTO=1` y comparar el
-   HLSL generado para `fp=0xD8FFF01` con y sin la opción.
-5. **El present enseña otro buffer.** `GCM_FLIPCOUNT=1` y `FLIP_PC=1` para ver si el
-   flip y el `Present` coinciden.
+1. **El quad de composición no llega a dibujarse en el frame de gameplay** (o se dibuja con otro `tex0`). El punto 7 apunta aquí, pero la captura pudo ser un frame equivocado. **Siguiente paso: capturar con `RSX_CAP` en un frame LATERAL (más tarde) del turno del jugador y ver si el manifest tiene el quad `t0=0xDF60000` y con qué `cmask`/`blend`/`texrt`.** Si falta, es "el juego no emite el composite en ese estado".
+2. **El alpha de salida del fragment program del composite es 0** (el RT se limpia con `cc=(0,0,0,0)` y la escena no escribe alpha). Aunque el alpha del color de vértice es 1, el FP puede muestrear el RT (alpha=0) y con blend `SRC_ALPHA` no pinta. La sesión anterior probó forzar alpha=1 vía mapeo SRV y "no tuvo efecto", pero conviene **reprobar forzando alpha=1 en el SRV del composite SOLO en el turno del jugador** (con `RX_DISPDBG` para ver `texrt`).
+3. **Proyección del VP del gameplay** distinta a la de la cinemática (cámara de juego) y mal descompilada/posicionada (escena fuera de pantalla). El RT tiene 62% no-negro, así que no parece vacío, pero podría ser la cinemática congelada. **`VP_DUMP=1` + `RSX_DRAW_DUMP`** para comparar el VP de gameplay vs cinemática.
 
-## El otro fallo: vértices deformados dentro del RT
-
-La captura `battle-arena-picture/Screenshot 2026-10-24 175208.png` muestra estelas
-radiales desde un punto, bandas verdes y una zona blanca grande: la geometría se
-estira, así que el problema está en **posición/constantes del vertex program**, no
-en las texturas.
-
-Siguientes pasos, en este orden:
-
-1. `VP_DUMP=1` / `VP_SUBMIT=<n>`: comprobar que el `vp_vs` del draw del combate es
-   el esperado y que recibe sus constantes.
-2. Revisar el fallback de `vp_fill_cb_slot`: sustituye `c0..c3` según el valor de
-   `c00`. Si el juego manda la matriz de otro modo, la proyección sale mal y los
-   triángulos se estiran exactamente así.
-3. Comparar `c0..c3` de un draw de la arena con la matriz que espera la cámara
-   (el manifest de `diagnostics/arena/manual2/frames/*/manifest.txt` ya vuelca los
-   slots no nulos de cada op).
-
-## Comprobaciones manuales (para el usuario)
-
-Lanzar desde la raíz del repo, en PowerShell. Cada bloque deja log en
-`diagnostics/arena/<carpeta>/`.
+### Prueba concreta para mañana
 
 ```powershell
-# 0) Cerrar el proceso antes de reconstruir (si no, lld-link falla)
-Get-Process BakuganRecomp -ErrorAction SilentlyContinue | Stop-Process -Force
-
-# 1) (Re)construir
-.\.venv\Scripts\python.exe tools\build.py
-
-# 2) Lanzar con una prueba concreta
+Remove-Item Env:RX_OPAQUE, Env:RT_REBIND, Env:RSX_FP_CTRL_AUTO, Env:GCM_FLIPCOUNT, Env:RX_PASTE, Env:RSX_CAP, Env:RTT_STAT, Env:VTX_COL, Env:VP_DUMP -ErrorAction SilentlyContinue
 $env:PS3_VFS_ROOT="$PWD\game"; $env:PS3_TITLE="Bakugan: Battle Brawlers"
 $env:PAD_ALWAYS_CHANGE="1"; $env:PS3_NO_SAIL="1"
-$env:RX_OPAQUE="1"          # la prueba de esta lista
-$env:RX_DISPDBG="8"         # imprime el estado de los 8 primeros ops de display
-New-Item -ItemType Directory -Force diagnostics\arena\t1 | Out-Null
+$env:RSX_CAP="3000:8:60"; $env:RSX_CAP_DIR="$PWD\diagnostics\arena\manual-next"
+$env:RX_DISPDBG="32"; $env:VP_DUMP="1"
+New-Item -ItemType Directory -Force diagnostics\arena\manual-next | Out-Null
 Start-Process "$PWD\bakugan-recomp\build\BakuganRecomp.exe" `
   -ArgumentList "$PWD\game\PS3_GAME\USRDIR\EBOOT.elf" `
-  -RedirectStandardOutput "$PWD\diagnostics\arena\t1\run.out" `
-  -RedirectStandardError  "$PWD\diagnostics\arena\t1\run.err"
+  -RedirectStandardOutput "$PWD\diagnostics\arena\manual-next\run.out" `
+  -RedirectStandardError  "$PWD\diagnostics\arena\manual-next\run.err"
 ```
 
-Llegar a la batalla (unos 2 minutos: **X** o Espacio = Cross, flechas = D-pad,
-**Enter** = Start). Después, leer el log:
+Llegar al turno del jugador, moverse 4-5 s, cerrar. Luego mirar en
+`manual-next/frames/*/manifest.txt` si el quad de composición (`t0=0xDF60000`)
+está, con qué `cmask`/`blend`, y en `run.err` el `[DISPDRAW]` (`texrt`) y el
+`vp_dump.hlsl`.
+
+## Otros pendientes (visuales, después del negro)
+
+- **Texturas granuladas** en los modelos: probablemente mipmaps/sampling (el RT/atlas no genera mips, o el filtro es puntual). Mirar `vp_upload_tex_slot` y el control de mip/filtro.
+- **Caras invisibles**: probablemente alpha/transparencia (la textura de cara tiene alpha=0 o el blend la descarta). Relacionado con el alpha del punto 2.
+
+## Cómo se reproduce el build
 
 ```powershell
-Select-String -Path diagnostics\arena\t1\run.err -Pattern 'DISPDRAW' | ForEach-Object Line
-Select-String -Path diagnostics\arena\t1\run.err -Pattern 'RTTSTAT' | Select-Object -Last 3 | ForEach-Object Line
+.\.venv\Scripts\python.exe tools\pipeline.py   # aplica parches 0001-0010
+.\.venv\Scripts\python.exe tools\build.py
+.\tools\run.ps1
 ```
 
-**Qué significa cada resultado**
-
-| Resultado en pantalla | Conclusión | Siguiente paso |
-|---|---|---|
-| Escena + HUD a tamaño completo con `RX_OPAQUE=1` | Es el blend/alfa (hipótesis 1–2) | Medir el alfa de salida del FP del op de display |
-| Sigue negra con `RX_OPAQUE=1` | Los draws no llegan al target | Probar `RT_REBIND=1` y `GCM_FLIPCOUNT=1` |
-| Se ve sólo con `RX_PASTE=1` | Estado actual del repo | Trabajar la deformación del RT, que es independiente |
-
-## Variables de entorno útiles
-
-| Variable | Efecto |
-|---|---|
-| `RX_PASTE=1` | Pega 1:1 el último RT dibujado (ver la escena 3D; tapa el HUD) |
-| `RX_OPAQUE=1` | Dibuja los ops a display con blend y alpha test a off (A/B) |
-| `RX_DISPDBG=<n>` | Log `[DISPDRAW]` de los n primeros ops a display |
-| `RTT_STAT=1` | Log `[RTTSTAT]` por frame (offscreen/display/`texDF60000`) |
-| `RT_REBIND=1` | Reemite el render target antes de cada draw |
-| `VP_SUBMIT=<n>` | Log de los n primeros draws enviados |
-| `VP_DUMP=1` | Vuelca constantes y vertex programs |
-| `FP_LIST=1` / `FP_OFF=1` | Lista los FPs compilados / fuerza el fallback |
-| `PS3_FORCE_ALPHA_BLEND=1` | Sustituye los factores de blend por alfa estándar |
-| `NV3089_GATE=<archivo>` | Registra los blits que tocan display |
+Navegación a Battle Arena: X (aviso guardado) → X (título) → New Game X →
+flecha abajo (Battle Arena) → X (confirmar PJ) → X (confirmar escenario).
 
 ## Estado del árbol
 
-- `patches/0008-d3d12-display-target-diagnostics.patch` añade `RX_PASTE`,
-  `RX_OPAQUE` y `RX_DISPDBG`. Es diagnóstico, no un arreglo: el pipeline lo
-  reconoce como ya aplicado.
-- Sin cambios pendientes en `bakugan-recomp/`.
-- Evidencia local (ignorada por Git): `diagnostics/arena/manual12` (estado de los
-  ops de display en batalla), `manual13` (prueba del mapeo alfa, sin efecto) y
-  `manual14` (sin pegado: todo negro).
-- El repositorio oficial es <https://github.com/Mauryln/Bakugan-Battle-Brawlers-PS3-recomp>.
-  No se distribuyen binarios, lifts ni assets: todo se regenera desde el disco del
-  usuario con `tools/pipeline.py`.
+- `patches/0009`, `0010` commiteados (los arreglos). `0001`–`0008` ya existían.
+- `shadercache/` gitignoreado.
+- `diagnostics/arena/manual-*` contienen la evidencia de esta sesión (ignorados por Git).
+- En `ps3recomp-src` quedan sin commitear: los patches aplicados (normal) + los
+  diagnósticos `VTX_COL` y el conteo de superficie indexada.
