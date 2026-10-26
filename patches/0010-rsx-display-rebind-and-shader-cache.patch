@@ -1,0 +1,94 @@
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index 6ad65ff..82bc77d 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -2345,17 +2345,48 @@ static ID3D12PipelineState* vp_get_fp_pso(int vs_idx, u32 fp_addr, u32 blend, in
+         char* rp = strstr(hlsl, "return r[0];");
+         if (rp) memcpy(rp, "return float4(1,0,1,1)", 23);
+     }
++    /* Disk cache for the compiled PS bytecode. D3DCompile on the decompiled HLSL
++     * costs ~1s per fragment program and stalls the frame; the battle compiles a
++     * new FP on nearly every action. Keyed by the FP code hash + export-bit +
++     * alpha-test state -- the only non-diagnostic inputs that shape the HLSL. */
++    void* ps_disk = NULL; SIZE_T ps_disk_size = 0;
++    char ps_cache_path[520];
++    snprintf(ps_cache_path, sizeof ps_cache_path, "shadercache/fp_%08X_%d_%08X.dxbc",
++             uhash, exp32, alpha_ctl);
++    { FILE* cf = fopen(ps_cache_path, "rb");
++      if (cf) {
++          fseek(cf, 0, SEEK_END); long sz = ftell(cf); fseek(cf, 0, SEEK_SET);
++          if (sz > 0 && sz < (1 << 24)) {
++              ps_disk = malloc((size_t)sz);
++              if (ps_disk && fread(ps_disk, 1, (size_t)sz, cf) == (size_t)sz)
++                  ps_disk_size = (SIZE_T)sz;
++              else { free(ps_disk); ps_disk = NULL; }
++          }
++          fclose(cf);
++      } }
+     ID3DBlob* pb = NULL; ID3DBlob* e = NULL;
+-    HRESULT hr = D3DCompile(hlsl, strlen(hlsl), "guest_fp", NULL, NULL,
+-                            "main", "ps_5_0", 0, 0, &pb, &e);
+-    if (FAILED(hr) || !pb) {
+-        static int _e2=0; if (PS3_LOG_FIRST(_e2, 16))
+-            printf("[FP] PS compile FAIL (fp=0x%08X): %s\n", fp_addr,
+-                   e ? (const char*)e->lpVtbl->GetBufferPointer(e) : "?");
++    const void* ps_code; SIZE_T ps_len; HRESULT hr;
++    if (ps_disk) {
++        ps_code = ps_disk; ps_len = ps_disk_size; hr = S_OK;
++    } else {
++        hr = D3DCompile(hlsl, strlen(hlsl), "guest_fp", NULL, NULL,
++                        "main", "ps_5_0", 0, 0, &pb, &e);
++        if (FAILED(hr) || !pb) {
++            static int _e2=0; if (PS3_LOG_FIRST(_e2, 16))
++                printf("[FP] PS compile FAIL (fp=0x%08X): %s\n", fp_addr,
++                       e ? (const char*)e->lpVtbl->GetBufferPointer(e) : "?");
++            if (e) e->lpVtbl->Release(e);
++            free(ps_disk);
++            return NULL;
++        }
+         if (e) e->lpVtbl->Release(e);
+-        return NULL;
++        ps_code = pb->lpVtbl->GetBufferPointer(pb);
++        ps_len  = pb->lpVtbl->GetBufferSize(pb);
++        { static int _mkdir = -1;
++          if (_mkdir < 0) { CreateDirectoryA("shadercache", NULL); _mkdir = 1; } }
++        FILE* cf = fopen(ps_cache_path, "wb");
++        if (cf) { fwrite(ps_code, 1, ps_len, cf); fclose(cf); }
+     }
+-    if (e) e->lpVtbl->Release(e);
+ 
+     D3D12_INPUT_ELEMENT_DESC il[16];
+     for (int _i = 0; _i < 16; _i++) {
+@@ -2369,8 +2400,8 @@ static ID3D12PipelineState* vp_get_fp_pso(int vs_idx, u32 fp_addr, u32 blend, in
+     pd.pRootSignature = s_d3d.vp_root_sig;
+     pd.VS.pShaderBytecode = vsb->lpVtbl->GetBufferPointer(vsb);
+     pd.VS.BytecodeLength  = vsb->lpVtbl->GetBufferSize(vsb);
+-    pd.PS.pShaderBytecode = pb->lpVtbl->GetBufferPointer(pb);
+-    pd.PS.BytecodeLength  = pb->lpVtbl->GetBufferSize(pb);
++    pd.PS.pShaderBytecode = ps_code;
++    pd.PS.BytecodeLength  = ps_len;
+     pd.InputLayout.pInputElementDescs = il; pd.InputLayout.NumElements = 16;
+     pd.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+     /* Guest face culling. CULL_OFF=1 forces double-sided, the old
+@@ -2440,7 +2471,8 @@ static ID3D12PipelineState* vp_get_fp_pso(int vs_idx, u32 fp_addr, u32 blend, in
+     ID3D12PipelineState* pso = NULL;
+     hr = s_d3d.device->lpVtbl->CreateGraphicsPipelineState(
+         s_d3d.device, &pd, &IID_ID3D12PipelineState, (void**)&pso);
+-    pb->lpVtbl->Release(pb);
++    if (pb) pb->lpVtbl->Release(pb);
++    free(ps_disk);
+     if (FAILED(hr)) {
+         static int _e3=0; if (PS3_LOG_FIRST(_e3, 16)) printf("[FP] PSO FAIL (fp=0x%08X, 0x%08lX)\n", fp_addr, hr);
+         ID3D12InfoQueue* iq = NULL;
+@@ -4976,7 +5008,10 @@ static void render_frame(void)
+                  * between the retarget and here drops the binding, this restores
+                  * it. */
+                 { static int rb = -1;
+-                  if (rb < 0) { const char* e = getenv("RT_REBIND"); rb = e ? atoi(e) : 0; }
++                  /* default ON: the guest's long offscreen batch desyncs the
++                   * tracked target from the one D3D12 actually has bound, so the
++                   * composite/HUD pass draws into the wrong (or no) target. */
++                  if (rb < 0) { const char* e = getenv("RT_REBIND"); rb = e ? atoi(e) : 1; }
+                   if (rb) {
+                       D3D12_CPU_DESCRIPTOR_HANDLE brh[4];
+                       UINT bn = 1;
