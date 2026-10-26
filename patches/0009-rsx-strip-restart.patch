@@ -1,0 +1,146 @@
+diff --git a/libs/video/rsx_commands.c b/libs/video/rsx_commands.c
+index 8d4c694..c404eed 100644
+--- a/libs/video/rsx_commands.c
++++ b/libs/video/rsx_commands.c
+@@ -872,6 +872,14 @@ int rsx_process_method(rsx_state* state, u32 method, u32 data)
+         state->shader_dirty = 1;
+         return 0;
+     }
++    if (method == NV4097_SET_RESTART_INDEX_ENABLE) {
++        state->restart_index_enable = data;
++        return 0;
++    }
++    if (method == NV4097_SET_RESTART_INDEX) {
++        state->restart_index = data;
++        return 0;
++    }
+     if (method == NV4097_SET_INDEX_ARRAY_ADDRESS) {
+         state->index_array_offset = data;
+         return 0;
+diff --git a/libs/video/rsx_commands.h b/libs/video/rsx_commands.h
+index 5d4276e..74cb5d1 100644
+--- a/libs/video/rsx_commands.h
++++ b/libs/video/rsx_commands.h
+@@ -105,6 +105,8 @@ extern "C" {
+ #define NV4097_SET_INDEX_ARRAY_ADDRESS         0x0000181C
+ #define NV4097_SET_INDEX_ARRAY_DMA             0x00001820
+ #define NV4097_DRAW_INDEX_ARRAY                0x00001824
++#define NV4097_SET_RESTART_INDEX_ENABLE        0x00001DAC
++#define NV4097_SET_RESTART_INDEX               0x00001DB0
+ 
+ /* Vertex attributes */
+ #define NV4097_SET_VERTEX_DATA_ARRAY_FORMAT     0x00001740
+@@ -378,6 +380,8 @@ typedef struct rsx_state {
+     int stencil_dirty;
+     int texture_dirty;
+     int vertex_dirty;
++    u32 restart_index_enable;
++    u32 restart_index;
+ } rsx_state;
+ 
+ /* ---------------------------------------------------------------------------
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index 2864c33..6ad65ff 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -3311,6 +3311,43 @@ static void vp_record_cb(u32 slot, int vs_idx, const D3D12DrawRecord* dr)
+         c[10]=1.0f/99.0f; c[14]=-1.0f/99.0f;
+         vpx[2] = 1.0f; vpx[6] = 0.0f;
+     }
++    /* Opt-in, bounded snapshots of the exact shader input for 3D diagnosis. */
++    {
++        const char* dir = getenv("RSX_DRAW_DUMP");
++        static unsigned char seen[VP_VS_CACHE];
++        if (dir && dr && dr->rt_off && dr->vertex_count && vs_idx >= 0 &&
++            vs_idx < VP_VS_CACHE && !seen[vs_idx]) {
++            char path[1024];
++            FILE* f;
++            seen[vs_idx] = 1;
++            snprintf(path, sizeof(path), "%s/vs_%d.constants.bin", dir, vs_idx);
++            f = fopen(path, "wb");
++            if (f) { fwrite(dst, 1, VP_CB_STRIDE, f); fclose(f); }
++            snprintf(path, sizeof(path), "%s/vs_%d.vertices.bin", dir, vs_idx);
++            f = fopen(path, "wb");
++            if (f) {
++                const char* vertices = (const char*)s_d3d.vp_vb_mapped +
++                    (u64)s_d3d.vp_parity * MAX_VERTICES * 256 + dr->vb_byte_offset;
++                fwrite(vertices, 256, dr->vertex_count, f); fclose(f);
++            }
++            snprintf(path, sizeof(path), "%s/vs_%d.state.bin", dir, vs_idx);
++            f = fopen(path, "wb");
++            if (f) { fwrite(st, 1, sizeof(*st), f); fclose(f); }
++            snprintf(path, sizeof(path), "%s/vs_%d.hlsl", dir, vs_idx);
++            f = fopen(path, "wb");
++            if (f) {
++                extern int rsx_vp_decompile(const uint8_t*, u32, char*, u32);
++                static char hlsl[262144];
++                u32 start = getenv("VP_START_OFF") ? 0 : st->transform_program_start * 16u;
++                if (start >= st->vp_ucode_bytes) start = 0;
++                rsx_vp_decompile(st->vp_ucode + start, st->vp_ucode_bytes - start, hlsl, sizeof(hlsl));
++                fwrite(hlsl, 1, strlen(hlsl), f); fclose(f);
++            }
++            fprintf(stderr, "[DRAWDUMP] vs=%d fp=0x%X rt=0x%X vertices=%u\n",
++                    vs_idx, dr->fp_addr, dr->rt_off, dr->vertex_count);
++        }
++    }
++
+ }
+ 
+ /* Which offscreen surface (if any) does the current RSX state render to?
+@@ -6293,20 +6330,46 @@ static u32 upload_strip_vp_indexed(const rsx_state* state, u32 first, u32 count,
+     extern uint8_t* vm_base;
+     if (!state || !vm_base || !s_d3d.vp_vb_mapped) return 0;
+     if (!state->vertex_attribs[0].enabled) return 0;
+-    if (count < 3) return 0;
+-    u32 tris = count - 2;
++    /* DRAW_INDEX_ARRAY packets are pieces of one BEGIN/END stream. Keep
++     * the last two references (or fan anchor) across packet boundaries.
++     * Restart markers cut the stream; they are never vertex addresses. */
++    static struct {
++        int valid, fan;
++        u32 epoch, next, length, anchor, previous[2];
++    } strip;
++    if (!strip.valid || strip.epoch != state->begin_epoch ||
++        strip.next != first || strip.fan != fan) {
++        strip.valid = 1;
++        strip.epoch = state->begin_epoch;
++        strip.fan = fan;
++        strip.length = 0;
++    }
++    strip.next = first + count;
++    const int is_u16 = ((state->index_array_dma >> 4) & 0xF) == 1;
++    const int restart = state->restart_index_enable &&
++        (!is_u16 || state->restart_index <= 0xFFFFu);
+     u32 maxv = (MAX_VERTICES * VP_VERT_STRIDE - s_d3d.vp_vb_offset) / VP_VERT_STRIDE;
+-    if (tris * 3 > maxv) tris = maxv / 3;
+     VPSlot* out = (VPSlot*)((u8*)s_d3d.vp_vb_mapped
+         + (u64)s_d3d.vp_parity * MAX_VERTICES * VP_VERT_STRIDE + s_d3d.vp_vb_offset);
+     u32 o = 0;
+-    for (u32 t = 0; t < tris; t++) {
+-        u32 i0 = fan ? 0 : t;
+-        u32 i1 = t + 1, i2 = t + 2;
+-        if (!fan && (t & 1)) { u32 tmp = i1; i1 = i2; i2 = tmp; }
+-        read_vp_vertex(state, read_guest_index(state, first + i0), &out[o*16]); o++;
+-        read_vp_vertex(state, read_guest_index(state, first + i1), &out[o*16]); o++;
+-        read_vp_vertex(state, read_guest_index(state, first + i2), &out[o*16]); o++;
++    for (u32 k = 0; k < count; k++) {
++        u32 index = read_guest_index(state, first + k);
++        if (restart && index == state->restart_index) {
++            strip.length = 0;
++            continue;
++        }
++        if (strip.length == 0) strip.anchor = index;
++        if (strip.length >= 2 && o + 3 <= maxv) {
++            u32 i0 = fan ? strip.anchor : strip.previous[0];
++            u32 i1 = strip.previous[1], i2 = index;
++            if (!fan && (strip.length & 1)) { u32 tmp = i1; i1 = i2; i2 = tmp; }
++            read_vp_vertex(state, i0, &out[o*16]); o++;
++            read_vp_vertex(state, i1, &out[o*16]); o++;
++            read_vp_vertex(state, i2, &out[o*16]); o++;
++        }
++        strip.previous[0] = strip.previous[1];
++        strip.previous[1] = index;
++        strip.length++;
+     }
+     s_d3d.vp_vb_offset += o * VP_VERT_STRIDE;
+     return o;
