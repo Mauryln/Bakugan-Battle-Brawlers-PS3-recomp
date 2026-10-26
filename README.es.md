@@ -45,15 +45,15 @@ Aquí no hay emulación: el código máquina se traduce una vez y después se co
 | Música — partituras PCM `SNDP` mezcladas en el SPU, más el AAC de los vídeos | ✅ |
 | Battle Arena — tarda en cargar, luego inicia el combate | ⚠️ |
 | *Defecto conocido:* el "gate" del selector de modo — las capas 2D tras el retrato se solapan | ⚠️ |
-| **Escena 3D** — el target resuelto llega a pantalla, la escena sale deformada | ❌ |
+| **Escena 3D** — las cinemáticas se ven (texturas aún granuladas); el turno del jugador se va a negro | ⚠️ |
 | **Gameplay** — tutorial, combates de la historia | ❌ |
 | **Efectos de sonido** — ATRAC3 en `SOUND/*.PAST` | ❌ |
 
-En una línea: **el juego arranca, reproduce sus vídeos, muestra todos los menús, inicia un duelo de Battle Arena con música y la escena 3D ya llega a pantalla, aunque deformada.**
+En una línea: **el juego arranca, reproduce sus vídeos (con música), muestra todos los menús, inicia un duelo de Battle Arena y la escena 3D se ve en las cinemáticas — pero el turno del jugador sigue en negro.**
 
 ## Se busca ayuda
 
-1. **La escena 3D.** Battle Arena envía 438–600 dibujos por frame al target MSAA de 1120×584 (`0xEAB0000`) y el target sí recibe contenido, pero personajes y escenario salen deformados. El parche 0007 hizo que ese contenido llegue a pantalla (el resolve `NV3089` del invitado se aliasa al target vivo); queda la deformación en sí: viewport/clip, profundidad y traducción de programas en `libs/video/rsx_commands.c`, `libs/video/rsx_vertex_fetch.c` y `libs/video/rsx_d3d12_backend.c`.
+1. **La escena 3D.** Battle Arena envía 438–600 dibujos por frame al target MSAA de 1120×584 (`0xEAB0000`) y el target sí recibe contenido. El fix de strip-restart (`patches/0009`) quitó la deformación, y el rebind del render target + caché de shaders (`patches/0010`) arregló el negro de las cinemáticas y los congelamientos de compilación. Falta el **negro del turno del jugador** (el composite muestrea el target de la escena pero no deja píxeles), más las texturas granuladas y las caras invisibles. Ver [`docs/NEXT_SESSION.md`](docs/NEXT_SESSION.md) para la prueba exacta.
 2. **Lo que queda de audio.** Las partituras de menú y el mezclador SPU funcionan; los efectos `.PAST` son ATRAC3 y siguen en silencio, y quedan cortes por revisar. `libs/audio/`.
 3. **Testers.** ¿Arranca en tu GPU/driver? Con un `run.log` y una frase basta para abrir un issue.
 

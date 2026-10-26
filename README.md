@@ -45,32 +45,22 @@ Nothing runs in an emulator: the machine code is translated once, then compiled 
 | Music — `SNDP` PCM scores mixed by the SPU, plus FMV AAC | ✅ |
 | Battle Arena — slow to load, then starts a duel | ⚠️ |
 | *Known defect:* mode-select "gate" — 2D layers behind the portrait overlap | ⚠️ |
-| **3D scene** — the resolved target reaches the screen, the scene is deformed | ❌ |
+| **3D scene** — cinematics render (textures still grainy); the player's turn goes black | ⚠️ |
 | **Gameplay** — tutorial, story battles | ❌ |
 | **Sound effects** — ATRAC3 in `SOUND/*.PAST` | ❌ |
 
-If you only read one line: **the game boots, plays its videos, shows every menu, starts a Battle Arena duel with music, and the 3D scene now reaches the screen — deformed.**
+If you only read one line: **the game boots, plays its videos (with music), shows every menu, starts a Battle Arena duel, and the 3D scene renders in cinematics — but the player's turn is still black.**
 
 ## Help wanted
 
 These are the walls we are stuck on. Each one is a self-contained problem with a measurement already done — the details are in [`docs/STATUS.md`](docs/STATUS.md) and [`docs/NEXT_SESSION.md`](docs/NEXT_SESSION.md).
 
-1. **The 3D scene.** Battle Arena submits 438–600 draws per frame into the 1120×584 2× MSAA target (`0xEAB0000`) and the target does receive content, but characters and stage are deformed. Patch 0007 made that content reach the screen (the guest's `NV3089` resolve is aliased to the live target); what remains is the deformation itself: viewport/clip state, depth, and program translation in `libs/video/rsx_commands.c`, `libs/video/rsx_vertex_fetch.c`, `libs/video/rsx_d3d12_backend.c`.
+1. **The 3D scene.** Battle Arena submits 438–600 draws per frame into the 1120×584 2× MSAA target (`0xEAB0000`) and the target does receive content. The strip-restart fix (`patches/0009`) removed the deformation, and the render-target rebind + shader cache (`patches/0010`) fixed the cinematic black screen and the shader-compile freezes. What remains is the **player's turn going black** (the composite samples the scene target but leaves no pixels), plus grainy textures and invisible faces. See [`docs/NEXT_SESSION.md`](docs/NEXT_SESSION.md) for the exact next test.
 2. **Audio leftovers.** Menu scores and the SPU mixer work; the `.PAST` effects are ATRAC3 and still silent, and a few cuts are under review. `libs/audio/`.
 3. **Testers.** Does it boot on your GPU/driver? A `run.log` and one sentence is enough to open an issue.
 
 Partial work, wrong guesses and "this is how RPCS3 does it" are all welcome — open an issue first if you plan something large.
 
-## Why another Bakugan recompilation?
-
-There is already an effort to recompile the **Xbox 360** release for **Linux**. This one targets the **PlayStation 3** release on **Windows**, so the two share the game but not a single line of machine code, not the same graphics API, and not the same runtime problems. Different disc, different compiler, different bugs.
-
-| | This project | Xbox 360 / Linux effort |
-|---|---|---|
-| Source release | PS3 `BLES00758` (Europe, 7 languages) | Xbox 360 |
-| Host | Windows 10/11 x64 | Linux |
-| Graphics | Direct3D 12 | (its own) |
-| Recompiled units | PPU **and** SPU | — |
 
 ## How it works
 
