@@ -1,0 +1,133 @@
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -2017,6 +2017,41 @@
+     return (st->depth_test_enable ? 1u : 0u)
+          | ((st->depth_test_enable && st->depth_mask) ? 2u : 0u)
+          | ((st->depth_func & 7u) << 2);
++}
++
++/* The backend snapshots constants after the four texscale vectors and alpha
++ * state. Use buffered translation so the instruction-only PSO key is valid. */
++static int fp_decompile_for_draw(const u8* ucode, u32 max_bytes, u32 ctrl,
++                                 u32 cube_mask, char* hlsl, u32 out_size)
++{
++    u32 count = 0;
++    int n = rsx_fp_decompile_buffered_ex(ucode, max_bytes, ctrl, cube_mask,
++                                        hlsl, out_size, &count);
++    if (n <= 0 || count > 64) return -1;
++    char declaration[192];
++    snprintf(declaration, sizeof declaration,
++             "cbuffer PSConstants : register(b1) {\n"
++             "    float4 fp_constants[%u];\n"
++             "    float4 fp_alpha;\n};\n", count ? count : 1u);
++    hlsl_replace_all(hlsl, out_size, declaration,
++        "cbuffer PSConstants : register(b1) {\n"
++        "    float4 rsx_texscale[4];\n"
++        "    float4 rsx_alphatest;\n"
++        "    float4 fp_constants[64];\n};\n");
++    return n;
++}
++
++/* Include every translation input by hashing the final compiler source. This
++ * also isolates diagnostic shader rewrites from normal cached bytecode. */
++static void fp_shader_cache_path(char* path, size_t size, const char* hlsl)
++{
++    u64 hash = 14695981039346656037ull;
++    for (const unsigned char* p = (const unsigned char*)hlsl; *p; p++) {
++        hash ^= *p;
++        hash *= 1099511628211ull;
++    }
++    snprintf(path, size, "shadercache/fp_hlsl_v1_%016llX.dxbc",
++             (unsigned long long)hash);
+ }
+
+ static ID3D12PipelineState* vp_get_fp_pso(int vs_idx, u32 fp_addr, u32 blend, int nrt,
+@@ -2141,7 +2176,8 @@
+     if (ctrl_auto < 0) ctrl_auto = getenv("RSX_FP_CTRL_AUTO") ? 1 : 0;
+     u32 fp_ctrl = ctrl_auto ? RSX_FP_CTRL_AUTO
+                             : (exp32 ? CELL_GCM_SHADER_CONTROL_32_BITS_EXPORTS : 0u);
+-    int n = rsx_fp_decompile(vm_base + off, 4096, fp_ctrl, hlsl, sizeof(hlsl));
++    int n = fp_decompile_for_draw(vm_base + off, 4096, fp_ctrl, cube_mask,
++                                  hlsl, sizeof(hlsl));
+     if (n <= 0) { static int _e=0; if(PS3_LOG_FIRST(_e, 16)) printf("[FP] decompile fail (fp=0x%08X)\n", fp_addr); return NULL; }
+     /* Alpha-masked depth passes must discard transparent fragments before
+      * writing depth. The reference is part of the PSO key, so each compiled
+@@ -2248,28 +2284,6 @@
+                 }
+             } }
+       } }
+-    /* Retarget the samplers the guest bound as CUBE textures. The decompiler
+-     * always emits 2D samplers; a cube is sampled with a 3-component direction
+-     * and no texel-scale, and the emitted coordinate always ends in the fixed
+-     * tail ".xy * rsx_texscale[N].xy", so both edits are exact replacements. */
+-    if (cube_mask) {
+-        for (int _u = 0; _u < RSX_MAX_TEXTURES; _u++) {
+-            if (!(cube_mask & (1u << _u))) continue;
+-            char f1[64], r1[64], f2[64], r2[64];
+-            snprintf(f1, sizeof f1, "Texture2D    rsx_tex%d", _u);
+-            snprintf(r1, sizeof r1, "TextureCube  rsx_tex%d", _u);
+-            hlsl_replace_all(hlsl, sizeof hlsl, f1, r1);
+-            snprintf(f1, sizeof f1, "Texture2D rsx_tex%d", _u);
+-            snprintf(r1, sizeof r1, "TextureCube rsx_tex%d", _u);
+-            hlsl_replace_all(hlsl, sizeof hlsl, f1, r1);
+-            snprintf(f2, sizeof f2, ".xy * rsx_texscale[%d].xy", _u);
+-            snprintf(r2, sizeof r2, ".xyz");
+-            hlsl_replace_all(hlsl, sizeof hlsl, f2, r2);
+-        }
+-        { static int _n = 0; if (PS3_LOG_FIRST(_n, 4))
+-            fprintf(stderr, "[CUBE] fp=0x%X compiled with cube units mask 0x%X%c",
+-                    fp_addr, cube_mask, 10); }
+-    }
+     /* FP_IDCOLOR=1: give every fragment program a distinct flat colour derived
+      * from its address. One frame then shows which program paints which surface,
+      * instead of one run per candidate to test them by elimination. */
+@@ -2347,12 +2361,11 @@
+     }
+     /* Disk cache for the compiled PS bytecode. D3DCompile on the decompiled HLSL
+      * costs ~1s per fragment program and stalls the frame; the battle compiles a
+-     * new FP on nearly every action. Keyed by the FP code hash + export-bit +
+-     * alpha-test state -- the only non-diagnostic inputs that shape the HLSL. */
++     * new FP on nearly every action. Final HLSL includes cube declarations,
++     * export selection, alpha tests and any diagnostic replacements. */
+     void* ps_disk = NULL; SIZE_T ps_disk_size = 0;
+     char ps_cache_path[520];
+-    snprintf(ps_cache_path, sizeof ps_cache_path, "shadercache/fp_%08X_%d_%08X.dxbc",
+-             uhash, exp32, alpha_ctl);
++    fp_shader_cache_path(ps_cache_path, sizeof ps_cache_path, hlsl);
+     { FILE* cf = fopen(ps_cache_path, "rb");
+       if (cf) {
+           fseek(cf, 0, SEEK_END); long sz = ftell(cf); fseek(cf, 0, SEEK_SET);
+@@ -4497,6 +4510,18 @@
+         for (int _u = 0; _u < RSX_MAX_TEXTURES; _u++) {
+             u32 wslot = DRAW_SRV_BASE + _d * RSX_MAX_TEXTURES + (u32)_u;
+             dr->tex_rt[_u] = -1;
++            /* Exact surface identities and resolve aliases take precedence
++             * over size-based screen/reflection fallbacks. */
++            if (dr->tex[_u].set) {
++                int rt = off_rt_find(dr->tex[_u].raw);
++                if (rt < 0) rt = off_rt_alias_find(dr->tex[_u].raw);
++                if (rt >= 0) {
++                    dr->tex_rt[_u] = rt;
++                    srv_write(wslot, s_d3d.off_rt[rt].res, (DXGI_FORMAT)s_d3d.off_rt[rt].dxgi,
++                              D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING);
++                    continue;
++                }
++            }
+             /* Display-sized sampler source -> the rendered frame. */
+             if (dr->tex[_u].set && s_screen_copy &&
+                 dr->tex[_u].w == s_d3d.width && dr->tex[_u].h == s_d3d.height) {
+@@ -4535,14 +4560,6 @@
+                 }
+             }
+             if (dr->tex[_u].set) {
+-                int rt = off_rt_find(dr->tex[_u].raw);
+-                if (rt < 0) rt = off_rt_alias_find(dr->tex[_u].raw);
+-                if (rt >= 0) {
+-                    dr->tex_rt[_u] = rt;
+-                    srv_write(wslot, s_d3d.off_rt[rt].res, (DXGI_FORMAT)s_d3d.off_rt[rt].dxgi,
+-                              D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING);
+-                    continue;
+-                }
+                 u32 _bf = dr->tex[_u].fmt & 0x9F;
+                 if (dr->tex[_u].off &&
+                     (_bf == 0x81 || _bf == 0x85 || _bf == 0x8B ||
