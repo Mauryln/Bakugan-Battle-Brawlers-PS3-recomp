@@ -1,0 +1,182 @@
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -341,4 +341,5 @@
+     void*                 vp_vb_mapped;
+     u32                   vp_vb_offset;
++    u32                   vp_vertex_capacity;
+     ID3D12Resource*       vp_cb;                /* per-draw VP constant slots    */
+     void*                 vp_cb_mapped;
+@@ -1233,4 +1234,5 @@
+         D3D12_RANGE nr = {0,0};
+
++        s_d3d.vp_vertex_capacity = MAX_VERTICES;
+         bd.Width = (u64)MAX_VERTICES * 256 * 2;  /* generic VP vertex: 16 float4 slots,
+                                           * DOUBLE-buffered by frame parity so a
+@@ -3457,5 +3459,5 @@
+             if (f) {
+                 const char* vertices = (const char*)s_d3d.vp_vb_mapped +
+-                    (u64)s_d3d.vp_parity * MAX_VERTICES * 256 + dr->vb_byte_offset;
++                    (u64)s_d3d.vp_parity * s_d3d.vp_vertex_capacity * 256 + dr->vb_byte_offset;
+                 fwrite(vertices, 256, dr->vertex_count, f); fclose(f);
+             }
+@@ -4879,6 +4881,6 @@
+             D3D12_VERTEX_BUFFER_VIEW vbv;
+             vbv.BufferLocation = s_d3d.vp_vb->lpVtbl->GetGPUVirtualAddress(s_d3d.vp_vb)
+-                               + (u64)s_d3d.vp_parity * MAX_VERTICES * 256;
+-            vbv.SizeInBytes    = MAX_VERTICES * 256;
++                               + (u64)s_d3d.vp_parity * s_d3d.vp_vertex_capacity * 256;
++            vbv.SizeInBytes    = s_d3d.vp_vertex_capacity * 256u;
+             vbv.StrideInBytes  = 256;   /* 16 float4 attrib slots */
+             s_d3d.cmd_list->lpVtbl->IASetVertexBuffers(s_d3d.cmd_list, 0, 1, &vbv);
+@@ -4970,5 +4972,5 @@
+                       if (tt && want >= 0 && s_d3d.vp_vb_mapped) {
+                           float* vtx = (float*)((char*)s_d3d.vp_vb_mapped
+-                              + (u64)s_d3d.vp_parity * MAX_VERTICES * 256u
++                              + (u64)s_d3d.vp_parity * s_d3d.vp_vertex_capacity * 256u
+                               + (u64)1000 * 256u);
+                           static const float tri[3][4] = {
+@@ -5214,5 +5216,5 @@
+                         "buffer holds %u verts, %llu draws truncated%c",
+                 (unsigned long long)s_req_verts, (unsigned long long)s_req_draws,
+-                MAX_VERTICES, (unsigned long long)s_drop_draws, 10); }
++                s_d3d.vp_vertex_capacity, (unsigned long long)s_drop_draws, 10); }
+       s_req_verts = 0; s_req_draws = 0; s_drop_draws = 0; }
+     if (perf_on()) {
+@@ -6100,8 +6102,8 @@
+     vp_attrs_dbg(state);
+     u32 quads = count / 4;
+-    u32 maxv = (MAX_VERTICES * VP_VERT_STRIDE - s_d3d.vp_vb_offset) / VP_VERT_STRIDE;
++    u32 maxv = (s_d3d.vp_vertex_capacity * VP_VERT_STRIDE - s_d3d.vp_vb_offset) / VP_VERT_STRIDE;
+     if (quads * 6 > maxv) quads = maxv / 6;
+     VPSlot* out = (VPSlot*)((u8*)s_d3d.vp_vb_mapped
+-        + (u64)s_d3d.vp_parity * MAX_VERTICES * VP_VERT_STRIDE + s_d3d.vp_vb_offset);
++        + (u64)s_d3d.vp_parity * s_d3d.vp_vertex_capacity * VP_VERT_STRIDE + s_d3d.vp_vb_offset);
+     u32 o = 0;
+     for (u32 q = 0; q < quads; q++) {
+@@ -6133,5 +6135,5 @@
+     if (!state->vertex_attribs[0].enabled) return 0;
+     vp_attrs_dbg(state);
+-    u32 maxv = (MAX_VERTICES * VP_VERT_STRIDE - s_d3d.vp_vb_offset) / VP_VERT_STRIDE;
++    u32 maxv = (s_d3d.vp_vertex_capacity * VP_VERT_STRIDE - s_d3d.vp_vb_offset) / VP_VERT_STRIDE;
+     if (count > maxv) { s_drop_draws++;
+         { static int _n = 0; if (getenv("VBFULL") && PS3_LOG_FIRST(_n, 12))
+@@ -6140,5 +6142,5 @@
+         count = maxv - (maxv % 3); }
+     VPSlot* out = (VPSlot*)((u8*)s_d3d.vp_vb_mapped
+-        + (u64)s_d3d.vp_parity * MAX_VERTICES * VP_VERT_STRIDE + s_d3d.vp_vb_offset);
++        + (u64)s_d3d.vp_parity * s_d3d.vp_vertex_capacity * VP_VERT_STRIDE + s_d3d.vp_vb_offset);
+     { double _tv = perf_on() ? perf_now() : 0.0;
+       for (u32 k = 0; k < count; k++)
+@@ -6200,8 +6202,8 @@
+     if (count < 3) return 0;
+     u32 tris = count - 2;
+-    u32 maxv = (MAX_VERTICES * VP_VERT_STRIDE - s_d3d.vp_vb_offset) / VP_VERT_STRIDE;
++    u32 maxv = (s_d3d.vp_vertex_capacity * VP_VERT_STRIDE - s_d3d.vp_vb_offset) / VP_VERT_STRIDE;
+     if (tris * 3 > maxv) tris = maxv / 3;
+     VPSlot* out = (VPSlot*)((u8*)s_d3d.vp_vb_mapped
+-        + (u64)s_d3d.vp_parity * MAX_VERTICES * VP_VERT_STRIDE + s_d3d.vp_vb_offset);
++        + (u64)s_d3d.vp_parity * s_d3d.vp_vertex_capacity * VP_VERT_STRIDE + s_d3d.vp_vb_offset);
+     u32 o = 0;
+     for (u32 t = 0; t < tris; t++) {
+@@ -6243,8 +6245,8 @@
+     if (!state->vertex_attribs[0].enabled) return 0;
+     u32 quads = count / 4;
+-    u32 maxv = (MAX_VERTICES * VP_VERT_STRIDE - s_d3d.vp_vb_offset) / VP_VERT_STRIDE;
++    u32 maxv = (s_d3d.vp_vertex_capacity * VP_VERT_STRIDE - s_d3d.vp_vb_offset) / VP_VERT_STRIDE;
+     if (quads * 6 > maxv) quads = maxv / 6;
+     VPSlot* out = (VPSlot*)((u8*)s_d3d.vp_vb_mapped
+-        + (u64)s_d3d.vp_parity * MAX_VERTICES * VP_VERT_STRIDE + s_d3d.vp_vb_offset);
++        + (u64)s_d3d.vp_parity * s_d3d.vp_vertex_capacity * VP_VERT_STRIDE + s_d3d.vp_vb_offset);
+     u32 o = 0;
+     for (u32 q = 0; q < quads; q++) {
+@@ -6284,5 +6286,5 @@
+     if (!state->vertex_attribs[0].enabled) return 0;
+     vp_attrs_dbg(state);
+-    u32 maxv = (MAX_VERTICES * VP_VERT_STRIDE - s_d3d.vp_vb_offset) / VP_VERT_STRIDE;
++    u32 maxv = (s_d3d.vp_vertex_capacity * VP_VERT_STRIDE - s_d3d.vp_vb_offset) / VP_VERT_STRIDE;
+     if (count > maxv) { s_drop_draws++;
+         { static int _n = 0; if (getenv("VBFULL") && PS3_LOG_FIRST(_n, 12))
+@@ -6291,5 +6293,5 @@
+         count = maxv - (maxv % 3); }
+     VPSlot* out = (VPSlot*)((u8*)s_d3d.vp_vb_mapped
+-        + (u64)s_d3d.vp_parity * MAX_VERTICES * VP_VERT_STRIDE + s_d3d.vp_vb_offset);
++        + (u64)s_d3d.vp_parity * s_d3d.vp_vertex_capacity * VP_VERT_STRIDE + s_d3d.vp_vb_offset);
+     { double _tv = perf_on() ? perf_now() : 0.0;
+       for (u32 k = 0; k < count; k++)
+@@ -6519,7 +6521,7 @@
+     const int restart = state->restart_index_enable &&
+         (!is_u16 || state->restart_index <= 0xFFFFu);
+-    u32 maxv = (MAX_VERTICES * VP_VERT_STRIDE - s_d3d.vp_vb_offset) / VP_VERT_STRIDE;
++    u32 maxv = (s_d3d.vp_vertex_capacity * VP_VERT_STRIDE - s_d3d.vp_vb_offset) / VP_VERT_STRIDE;
+     VPSlot* out = (VPSlot*)((u8*)s_d3d.vp_vb_mapped
+-        + (u64)s_d3d.vp_parity * MAX_VERTICES * VP_VERT_STRIDE + s_d3d.vp_vb_offset);
++        + (u64)s_d3d.vp_parity * s_d3d.vp_vertex_capacity * VP_VERT_STRIDE + s_d3d.vp_vb_offset);
+     u32 o = 0;
+     for (u32 k = 0; k < count; k++) {
+@@ -6544,4 +6546,55 @@
+     s_d3d.vp_vb_offset += o * VP_VERT_STRIDE;
+     return o;
++}
++
++static u32 vp_capacity_for(u32 capacity, u32 required)
++{
++    if (!capacity) capacity = 1;
++    if (required > 4194304u) return 0;
++    while (capacity < required) capacity *= 2u;
++    return capacity;
++}
++
++static void vp_copy_vertex_frames(void* dst, u32 new_capacity, const void* src, u32 old_capacity)
++{
++    for (u32 parity = 0; parity < 2; ++parity)
++        memcpy((char*)dst + (u64)parity * new_capacity * 256u,
++               (const char*)src + (u64)parity * old_capacity * 256u,
++               (u64)old_capacity * 256u);
++}
++
++static int vp_reserve_vertices(u32 extra)
++{
++    u32 required = s_d3d.vp_vb_offset / 256u + extra;
++    if (required <= s_d3d.vp_vertex_capacity) return 1;
++    u32 capacity = vp_capacity_for(s_d3d.vp_vertex_capacity, required);
++    if (!capacity) { fprintf(stderr, "[VPVB] frame exceeds supported upload size\n"); return 0; }
++    D3D12_HEAP_PROPERTIES hp = {0}; hp.Type = D3D12_HEAP_TYPE_UPLOAD;
++    D3D12_RESOURCE_DESC bd = {0};
++    bd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
++    bd.Width = (u64)capacity * 256u * 2u;
++    bd.Height = 1; bd.DepthOrArraySize = 1; bd.MipLevels = 1;
++    bd.SampleDesc.Count = 1; bd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
++    ID3D12Resource* resource = NULL; void* mapped = NULL;
++    D3D12_RANGE empty = {0,0};
++    HRESULT hr = s_d3d.device->lpVtbl->CreateCommittedResource(s_d3d.device, &hp,
++        D3D12_HEAP_FLAG_NONE, &bd, D3D12_RESOURCE_STATE_GENERIC_READ, NULL,
++        &IID_ID3D12Resource, (void**)&resource);
++    if (SUCCEEDED(hr)) hr = resource->lpVtbl->Map(resource, 0, &empty, &mapped);
++    if (FAILED(hr) || !mapped) {
++        if (resource) resource->lpVtbl->Release(resource);
++        fprintf(stderr, "[VPVB] cannot grow upload buffer to %u vertices (hr=%08X)\n", capacity, (unsigned)hr);
++        return 0;
++    }
++    /* Previous frames still reference the old upload buffer. Preserve both
++     * parity regions and release it only after their GPU work completes. */
++    wait_for_gpu();
++    vp_copy_vertex_frames(mapped, capacity, s_d3d.vp_vb_mapped, s_d3d.vp_vertex_capacity);
++    s_d3d.vp_vb->lpVtbl->Unmap(s_d3d.vp_vb, 0, NULL);
++    s_d3d.vp_vb->lpVtbl->Release(s_d3d.vp_vb);
++    s_d3d.vp_vb = resource; s_d3d.vp_vb_mapped = mapped;
++    s_d3d.vp_vertex_capacity = capacity;
++    fprintf(stderr, "[VPVB] grew to %u vertices per frame (%llu MB)\n", capacity, (unsigned long long)(bd.Width >> 20));
++    return 1;
+ }
+
+@@ -6568,4 +6621,5 @@
+     if (!s_d3d.pipeline_ready || !s_d3d.vb_mapped) return;
+     if (count == 0 || count > MAX_VERTICES) return;
++    if (s_d3d.vp_vb_mapped && !vp_reserve_vertices(count * 3u)) return;
+
+     /* VTXALLF=<frame>: bounds of every draw's attribute-0 for one frame. The
+@@ -6883,3 +6937,4 @@
+     if (!s_d3d.pipeline_ready) return;
+     if (count == 0 || count > MAX_VERTICES) return;
++    if (s_d3d.vp_vb_mapped && !vp_reserve_vertices(count * 3u)) return;
+     if (!s_d3d.vp_vb_mapped || !s_d3d.vp_root_sig) return;

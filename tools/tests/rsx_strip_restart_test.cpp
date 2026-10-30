@@ -14,7 +14,7 @@ struct rsx_state {
     u32 begin_epoch, index_array_dma, restart_index_enable, restart_index;
 };
 static VPSlot buffer[MAX_VERTICES * 16];
-static struct { void* vp_vb_mapped = buffer; u32 vp_vb_offset = 0; int vp_parity = 0; } s_d3d;
+static struct { void* vp_vb_mapped = buffer; u32 vp_vb_offset = 0; int vp_parity = 0; u32 vp_vertex_capacity = MAX_VERTICES; } s_d3d;
 uint8_t* vm_base = reinterpret_cast<uint8_t*>(buffer);
 static std::vector<u32> indices;
 static u32 read_guest_index(const rsx_state*, u32 i) { return indices.at(i); }
