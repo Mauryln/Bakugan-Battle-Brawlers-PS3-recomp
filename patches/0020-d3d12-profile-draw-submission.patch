@@ -1,0 +1,47 @@
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -493,4 +493,5 @@
+ static double s_perf_gpu = 0.0, s_perf_pre = 0.0, s_perf_srv = 0.0, s_perf_pso = 0.0;
+ static int s_perf_pso_calls = 0, s_perf_pso_miss = 0, s_perf_pso_hashbytes = 0;
++static double s_perf_submit = 0.0;
+ static u64    s_perf_nverts = 0;
+ static u64    s_perf_texbytes = 0;
+@@ -5208,4 +5209,6 @@
+                     s_perf_pso_calls, s_perf_pso_miss, s_perf_pso_hashbytes / 1024,
+                     fr - s_perf_rf, 100.0 * (fr - s_perf_rf) / fr, 10);
++            fprintf(stderr, "[PERF submit] %.3fs (%.0f%%) in vertex packing and draw snapshots\n", s_perf_submit, 100.0 * s_perf_submit / fr);
++            s_perf_submit = 0.0;
+             s_perf_frame = 0.0; s_perf_tex = 0.0; s_perf_vtx = 0.0; s_perf_rf = 0.0;
+             s_perf_gpu = 0.0; s_perf_pre = 0.0; s_perf_srv = 0.0; s_perf_pso = 0.0;
+@@ -6569,5 +6572,5 @@
+ }
+
+-static void d3d12_draw_arrays(void* ud, u32 primitive, u32 first, u32 count)
++static void d3d12_draw_arrays_impl(void* ud, u32 primitive, u32 first, u32 count)
+ {
+     /* RSX_LIVE_FEED_DBG=1: pair with the [feed] method counts so "the FIFO
+@@ -6889,5 +6892,12 @@
+ }
+
+-static void d3d12_draw_indexed(void* ud, u32 primitive, u32 first, u32 count)
++static void d3d12_draw_arrays(void* ud, u32 primitive, u32 first, u32 count)
++{
++    double started = perf_on() ? perf_now() : 0.0;
++    d3d12_draw_arrays_impl(ud, primitive, first, count);
++    if (perf_on()) s_perf_submit += perf_now() - started;
++}
++
++static void d3d12_draw_indexed_impl(void* ud, u32 primitive, u32 first, u32 count)
+ {
+     /* RSX_LIVE_FEED_DBG=1: pair with the [feed] method counts so "the FIFO
+@@ -7003,3 +7013,10 @@
+         s_d3d.merge_first_end = first + count;
+     }
++}
++
++static void d3d12_draw_indexed(void* ud, u32 primitive, u32 first, u32 count)
++{
++    double started = perf_on() ? perf_now() : 0.0;
++    d3d12_draw_indexed_impl(ud, primitive, first, count);
++    if (perf_on()) s_perf_submit += perf_now() - started;
+ }
