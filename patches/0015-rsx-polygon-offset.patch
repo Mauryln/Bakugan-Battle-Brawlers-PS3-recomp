@@ -1,0 +1,175 @@
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -27,6 +27,7 @@
+ #include <string.h>
+ #include <stdlib.h>
+ #include <math.h>
++#include <limits.h>
+
+ #ifndef WIN32_LEAN_AND_MEAN
+ #define WIN32_LEAN_AND_MEAN
+@@ -114,6 +115,8 @@
+     int blend;          /* guest blend enable at draw time */
+     u32 blend_key;      /* packed guest blend state (factors+equation), PSO key */
+     u32 depth_key;     /* snapshot: enable, write mask, comparison (PSO key) */
++    int depth_bias;
++    float slope_bias;
+     /* Render-to-texture: which colour surface this op targets. 0 = a display
+      * buffer (the swap-chain backbuffer); else the resolved vm offset of an
+      * offscreen surface (demosaic chains its effect passes through local-
+@@ -218,6 +221,8 @@
+     u32 cull;               /* packed face culling (PSO key) */
+     u32 alpha_ctl;           /* alpha enable/function/reference (PSO key) */
+     u32 depth_key;           /* guest depth comparison/write/enable (PSO key) */
++    int depth_bias;
++    float slope_bias;
+     u32 cube_mask;          /* which units are cube textures (PSO key): the HLSL
+                              * declares those samplers as TextureCube, so a cube
+                              * and a 2D variant of the same program are different
+@@ -2054,9 +2059,22 @@
+              (unsigned long long)hash);
+ }
+
++static void rsx_polygon_offset(const rsx_state* st, int* bias, float* slope)
++{
++    *bias = 0; *slope = 0.0f;
++    if (!st || !st->polygon_offset_fill_enable) return;
++    double units = st->polygon_offset_bias;
++    if (isfinite(units)) {
++        *bias = units >= INT_MAX ? INT_MAX : units <= INT_MIN ? INT_MIN
++            : (int)round(units);
++    }
++    if (isfinite(st->polygon_offset_scale)) *slope = st->polygon_offset_scale;
++}
++
+ static ID3D12PipelineState* vp_get_fp_pso(int vs_idx, u32 fp_addr, u32 blend, int nrt,
+                                           DXGI_FORMAT rtfmt, int exp32, u32 cmask, u32 cull,
+-                                          u32 cube_mask, u32 depth_key, u32 alpha_ctl)
++                                          u32 cube_mask, u32 depth_key, u32 alpha_ctl,
++                                          int depth_bias, float slope_bias)
+ {
+     if (nrt < 1) nrt = 1; if (nrt > 4) nrt = 4;
+     if (rtfmt == 0) rtfmt = DXGI_FORMAT_R8G8B8A8_UNORM;
+@@ -2114,7 +2132,9 @@
+             s_d3d.vp_fp[i].cull == cull &&
+             s_d3d.vp_fp[i].cube_mask == cube_mask &&
+             s_d3d.vp_fp[i].depth_key == depth_key &&
+-            s_d3d.vp_fp[i].alpha_ctl == alpha_ctl)
++            s_d3d.vp_fp[i].alpha_ctl == alpha_ctl &&
++            s_d3d.vp_fp[i].depth_bias == depth_bias &&
++            s_d3d.vp_fp[i].slope_bias == slope_bias)
+             return s_d3d.vp_fp[i].pso;
+     s_perf_pso_miss++;      /* falls through to a full decompile + D3DCompile */
+     /* PSOMISSDBG=1: on a miss, name the key field that differs from an existing
+@@ -2417,6 +2437,8 @@
+     pd.PS.BytecodeLength  = ps_len;
+     pd.InputLayout.pInputElementDescs = il; pd.InputLayout.NumElements = 16;
+     pd.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
++    pd.RasterizerState.DepthBias = depth_bias;
++    pd.RasterizerState.SlopeScaledDepthBias = slope_bias;
+     /* Guest face culling. CULL_OFF=1 forces double-sided, the old
+      * unconditional behaviour -- geometry that vanishes under culling is a
+      * winding/front-face problem, not a missing draw. */
+@@ -2530,6 +2552,8 @@
+     s_d3d.vp_fp[s_d3d.vp_fp_n].cull    = cull;
+     s_d3d.vp_fp[s_d3d.vp_fp_n].cube_mask = cube_mask;
+     s_d3d.vp_fp[s_d3d.vp_fp_n].depth_key = depth_key;
++    s_d3d.vp_fp[s_d3d.vp_fp_n].depth_bias = depth_bias;
++    s_d3d.vp_fp[s_d3d.vp_fp_n].slope_bias = slope_bias;
+     s_d3d.vp_fp[s_d3d.vp_fp_n].alpha_ctl = alpha_ctl;
+     s_d3d.vp_fp[s_d3d.vp_fp_n].pso     = pso;
+     s_d3d.vp_fp_n++;
+@@ -4618,7 +4642,7 @@
+                                        dr->rt_off ? rsx_surface_dxgi(dr->rt_fmt)
+                                                   : DXGI_FORMAT_R8G8B8A8_UNORM,
+                                        dr->fp_exp32, dr->cmask, dr->cull, dr_cube_mask(dr),
+-                                       dr->depth_key, dr->alpha_ctl);
++                                       dr->depth_key, dr->alpha_ctl, dr->depth_bias, dr->slope_bias);
+         if (perf_on()) s_perf_pso += perf_now() - _ps0;
+     }
+
+@@ -4963,7 +4987,8 @@
+                                                 dr->rt_off ? rsx_surface_dxgi(dr->rt_fmt)
+                                                            : DXGI_FORMAT_R8G8B8A8_UNORM,
+                                                 dr->fp_exp32, dr->cmask, dr->cull,
+-                                                dr_cube_mask(dr), dr->depth_key, _actl) : NULL;
++                                                dr_cube_mask(dr), dr->depth_key, _actl,
++                                                dr->depth_bias, dr->slope_bias) : NULL;
+                 s_d3d.cmd_list->lpVtbl->SetPipelineState(s_d3d.cmd_list,
+                                                          dpso ? dpso : vpso);
+                 /* Per-draw viewport: the guest rect when sane, else the
+@@ -6590,6 +6615,8 @@
+                 dr->blend = s_d3d.current_rsx_state ? s_d3d.current_rsx_state->blend_enable : 1;
+                 dr->blend_key = rsx_blend_key(s_d3d.current_rsx_state, dr->blend);
+                 dr->depth_key = rsx_depth_key(s_d3d.current_rsx_state);
++                rsx_polygon_offset(primitive >= RSX_PRIMITIVE_TRIANGLES
++                    ? s_d3d.current_rsx_state : NULL, &dr->depth_bias, &dr->slope_bias);
+                 if (getenv("BLENDDBG")) { static u32 seen[32]; static int ns=0;
+                     u32 k = (dr->blend ? 0x80000000u : 0u) | dr->blend_key;
+                     int f=0; for (int i=0;i<ns;i++) if (seen[i]==k) f=1;
+@@ -6713,6 +6740,8 @@
+             dr->blend = s_d3d.current_rsx_state ? s_d3d.current_rsx_state->blend_enable : 1;
+             dr->blend_key = rsx_blend_key(s_d3d.current_rsx_state, dr->blend);
+             dr->depth_key = rsx_depth_key(s_d3d.current_rsx_state);
++            rsx_polygon_offset(primitive >= RSX_PRIMITIVE_TRIANGLES
++                ? s_d3d.current_rsx_state : NULL, &dr->depth_bias, &dr->slope_bias);
+             dr->rt_off = current_rt_off(&dr->rt_w, &dr->rt_h, dr->rt_mrt);
+             dr->rt_fmt = s_d3d.current_rsx_state ? s_d3d.current_rsx_state->surface_format : 0;
+             if (s_d3d.current_rsx_state) {
+@@ -6857,6 +6886,8 @@
+         dr->blend = s_d3d.current_rsx_state ? s_d3d.current_rsx_state->blend_enable : 1;
+         dr->blend_key = rsx_blend_key(s_d3d.current_rsx_state, dr->blend);
+         dr->depth_key = rsx_depth_key(s_d3d.current_rsx_state);
++        rsx_polygon_offset(primitive >= RSX_PRIMITIVE_TRIANGLES
++            ? s_d3d.current_rsx_state : NULL, &dr->depth_bias, &dr->slope_bias);
+         dr->rt_off = current_rt_off(&dr->rt_w, &dr->rt_h, dr->rt_mrt);
+         dr->rt_fmt = s_d3d.current_rsx_state ? s_d3d.current_rsx_state->surface_format : 0;
+         if (s_d3d.current_rsx_state) {
+--- a/libs/video/rsx_commands.c
++++ b/libs/video/rsx_commands.c
+@@ -610,6 +610,23 @@
+     if (method == NV4097_SET_STENCIL_OP_ZPASS) {
+         state->stencil_op_zpass = data;
+         state->stencil_dirty = 1;
++        return 0;
++    }
++
++    /* Polygon offset: fill enable and two IEEE-754 register payloads. */
++    if (method == NV4097_SET_POLY_OFFSET_FILL_ENABLE) {
++        state->polygon_offset_fill_enable = data != 0;
++        state->depth_dirty = 1;
++        return 0;
++    }
++    if (method == NV4097_SET_POLYGON_OFFSET_SCALE_FACTOR) {
++        memcpy(&state->polygon_offset_scale, &data, sizeof(data));
++        state->depth_dirty = 1;
++        return 0;
++    }
++    if (method == NV4097_SET_POLYGON_OFFSET_BIAS) {
++        memcpy(&state->polygon_offset_bias, &data, sizeof(data));
++        state->depth_dirty = 1;
+         return 0;
+     }
+
+--- a/libs/video/rsx_commands.h
++++ b/libs/video/rsx_commands.h
+@@ -48,6 +48,9 @@
+  * by rsx_dispatch (rsx_dsp_surface.color_location); rsx_state has no field
+  * for it and rsx_process_method ignores it. */
+ #define NV4097_SET_CONTEXT_DMA_COLOR_A         0x00000194
++#define NV4097_SET_POLY_OFFSET_FILL_ENABLE     0x00000A68
++#define NV4097_SET_POLYGON_OFFSET_SCALE_FACTOR 0x00000A78
++#define NV4097_SET_POLYGON_OFFSET_BIAS         0x00000A7C
+ /* ...and the same for colour target B, which sits BELOW A in the register
+  * file rather than after it (C and D are at 0x1B4 and 0x1B8). An MRT set
+  * whose members disagree about which memory they live in is one the draw
+@@ -382,6 +385,9 @@
+     int vertex_dirty;
+     u32 restart_index_enable;
+     u32 restart_index;
++    int polygon_offset_fill_enable;
++    float polygon_offset_scale;
++    float polygon_offset_bias;
+ } rsx_state;
+
+ /* ---------------------------------------------------------------------------
