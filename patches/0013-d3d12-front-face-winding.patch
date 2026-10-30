@@ -1,0 +1,21 @@
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -2424,12 +2424,14 @@
+       pd.RasterizerState.CullMode = (!_co && (cull & 1u))
+           ? ((cull & 2u) ? D3D12_CULL_MODE_FRONT : D3D12_CULL_MODE_BACK)
+           : D3D12_CULL_MODE_NONE;
+-      /* CULL_FLIP=1: invert the front-face convention. Our VP path may hand
+-       * D3D the opposite winding from the guest's, in which case honouring
+-       * CULL_FACE culls exactly the faces it should keep. */
++      /* The D3D viewport reflects Y relative to RSX window coordinates, so
++       * front-face winding must be reversed. Keeping the guest convention
++       * exposes interior/outline faces: they occlude textured surfaces and
++       * produce depth speckling. CULL_FLIP=1 restores the old convention for
++       * diagnostics. */
+       static int _cfl = -1; if (_cfl < 0) _cfl = getenv("CULL_FLIP") ? 1 : 0;
+       pd.RasterizerState.FrontCounterClockwise =
+-          (((cull & 4u) ? 1 : 0) ^ _cfl) ? TRUE : FALSE; }
++          (((cull & 4u) ? 0 : 1) ^ _cfl) ? TRUE : FALSE; }
+     /* Blend per the guest's packed key (see rsx_blend_key): dbgfont text needs
+      * straight alpha; demosaic's effect passes blend OFF; DeferredShading's
+      * light accumulation is additive ONE,ONE. */
