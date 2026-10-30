@@ -1,0 +1,246 @@
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index 3730b22..ec4affa 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -108,6 +108,9 @@ typedef struct {
+                          * with a 3-component direction, not a 2D uv -- treating
+                          * one as 2D is what makes an environment-mapped chrome
+                          * surface come out with black patches and banding. */
++        u32 filter;     /* NV4097_SET_TEXTURE_FILTER: min/mag, depth-compare path */
++        u32 address;    /* NV4097_SET_TEXTURE_ADDRESS: wrap + depth-compare func */
++        u32 control0;   /* NV4097_SET_TEXTURE_CONTROL0: enable / alpha-kill */
+         int set;
+     } tex[RSX_MAX_TEXTURES];
+     int tex_rt[RSX_MAX_TEXTURES];      /* pre-pass: OffRT index sampled by unit, -1 = none */
+@@ -225,6 +228,9 @@ typedef struct {
+                              * declares those samplers as TextureCube, so a cube
+                              * and a 2D variant of the same program are different
+                              * pipelines and must not share a cache entry. */
++    u32 shadow_mask;        /* depth-compare units (PSO key): the shadow helper
++                             * rewrites those units' sampling to compare against
++                             * stored depth, so it is a different pipeline. */
+     ID3D12PipelineState* pso;
+ } VPFPEntry;
+ /* Guest-FP PSO cache. 16 entries thrashed badly: this title needs far more
+@@ -326,7 +332,7 @@ typedef struct {
+     int                   vp_fp_n;
+     u32                   srv_inc;              /* CBV_SRV_UAV descriptor size   */
+     /* VP path: latest texture bound per unit (t0-t3). */
+-    struct { u32 off, raw, w, h, fmt, ctrl1, mips; int cube; int set; } cur_texs[RSX_MAX_TEXTURES];
++    struct { u32 off, raw, w, h, fmt, ctrl1, mips, filter, address, control0; int cube; int set; } cur_texs[RSX_MAX_TEXTURES];
+ 
+     /* Render-to-texture: offscreen RT pool + their RTV heap. */
+     OffRT                 off_rt[MAX_OFF_RTS];
+@@ -2038,6 +2044,30 @@ static u32 dr_cube_mask(const D3D12DrawRecord* dr)
+     return m;
+ }
+ 
++/* Depth-compare (shadow) units for a draw: fill `shadow` descriptors from the
++ * bound textures and return the mask of units whose comparison layout the
++ * decompiler supports. Any sampled depth texture with an unsupported layout
++ * (float depth, cube, mips, out-of-range compare func) clears the mask so the
++ * draw falls back to the ordinary sample path it used before this support. */
++static u32 dr_shadow_mask(const D3D12DrawRecord* dr, rsx_fp_shadow_desc shadow[16])
++{
++    memset(shadow, 0, 16 * sizeof *shadow);
++    /* The shadow helper only emits the 2D t-array spelling; a program mixing a
++     * cube unit with a depth-compare unit would mis-declare its sampler, so
++     * disable comparison for that draw rather than risk a bad compile. */
++    if (dr_cube_mask(dr)) return 0;
++    u32 mask = 0;
++    for (int u = 0; u < RSX_MAX_TEXTURES; u++) {
++        if (!(dr->sampled_units & (1u << u)) || !dr->tex[u].set) continue;
++        rsx_fp_shadow_desc_from_texture(&shadow[u], dr->tex[u].fmt, 2,
++            (u32)dr->tex[u].cube, dr->tex[u].mips, dr->tex[u].filter,
++            dr->tex[u].address, dr->tex[u].control0);
++        if (shadow[u].enabled == 1) mask |= 1u << u;
++        else if (shadow[u].enabled == 2) return 0;   /* unsupported: fall back */
++    }
++    return mask;
++}
++
+ /* GL comparison enums 0x200..0x207 map to D3D comparisons 1..8.
+  * Snapshot the write mask too: a read-only portrait pass must not change the
+  * depth mask prepared by an earlier colour-disabled draw. */
+@@ -2074,11 +2104,15 @@ static int fp_override_rgb(char* hlsl, u32 capacity)
+ }
+ 
+ static int fp_decompile_for_draw(const u8* ucode, u32 max_bytes, u32 ctrl,
+-                                 u32 cube_mask, char* hlsl, u32 out_size)
++                                 u32 cube_mask, const rsx_fp_shadow_desc shadow[16],
++                                 u32 shadow_mask, char* hlsl, u32 out_size)
+ {
+     u32 count = 0;
+-    int n = rsx_fp_decompile_buffered_ex(ucode, max_bytes, ctrl, cube_mask,
+-                                        hlsl, out_size, &count);
++    int n = shadow_mask
++        ? rsx_fp_decompile_buffered_shadow_ex(ucode, max_bytes, ctrl, cube_mask,
++                                              shadow, hlsl, out_size, &count)
++        : rsx_fp_decompile_buffered_ex(ucode, max_bytes, ctrl, cube_mask,
++                                       hlsl, out_size, &count);
+     if (n <= 0 || count > 64) return -1;
+     char declaration[192];
+     snprintf(declaration, sizeof declaration,
+@@ -2120,7 +2154,8 @@ static void rsx_polygon_offset(const rsx_state* st, int* bias, float* slope)
+ 
+ static ID3D12PipelineState* vp_get_fp_pso(int vs_idx, u32 fp_addr, u32 blend, int nrt,
+                                           DXGI_FORMAT rtfmt, int exp32, u32 cmask, u32 cull,
+-                                          u32 cube_mask, u32 depth_key, u32 alpha_ctl,
++                                          u32 cube_mask, const rsx_fp_shadow_desc shadow[16],
++                                          u32 shadow_mask, u32 depth_key, u32 alpha_ctl,
+                                           int depth_bias, float slope_bias)
+ {
+     if (nrt < 1) nrt = 1; if (nrt > 4) nrt = 4;
+@@ -2178,6 +2213,7 @@ static ID3D12PipelineState* vp_get_fp_pso(int vs_idx, u32 fp_addr, u32 blend, in
+             s_d3d.vp_fp[i].ucode_hash == uhash && s_d3d.vp_fp[i].cmask == cmask &&
+             s_d3d.vp_fp[i].cull == cull &&
+             s_d3d.vp_fp[i].cube_mask == cube_mask &&
++            s_d3d.vp_fp[i].shadow_mask == shadow_mask &&
+             s_d3d.vp_fp[i].depth_key == depth_key &&
+             s_d3d.vp_fp[i].alpha_ctl == alpha_ctl &&
+             s_d3d.vp_fp[i].depth_bias == depth_bias &&
+@@ -2207,7 +2243,7 @@ static ID3D12PipelineState* vp_get_fp_pso(int vs_idx, u32 fp_addr, u32 blend, in
+             VPFPEntry* q = &s_d3d.vp_fp[i];
+             if (q->fp_addr != fp_addr) continue;
+             n++;
+-            fprintf(stderr, "[PSOMISS] fp=0x%X differs:%s%s%s%s%s%s%s%s%c", fp_addr,
++            fprintf(stderr, "[PSOMISS] fp=0x%X differs:%s%s%s%s%s%s%s%s%s%c", fp_addr,
+                     q->vs_idx != vs_idx        ? " vs_idx"     : "",
+                     q->vs_hash != vs_hash      ? " vs_hash"    : "",
+                     q->gen != s_d3d.vp_gen     ? " gen"        : "",
+@@ -2215,7 +2251,8 @@ static ID3D12PipelineState* vp_get_fp_pso(int vs_idx, u32 fp_addr, u32 blend, in
+                     q->nrt != nrt              ? " nrt"        : "",
+                     q->rtfmt != (u32)rtfmt     ? " rtfmt"      : "",
+                     q->ucode_hash != uhash     ? " ucode_hash" : "",
+-                    q->cube_mask != cube_mask  ? " cube_mask"  : "", 10);
++                    q->cube_mask != cube_mask  ? " cube_mask"  : "",
++                    q->shadow_mask != shadow_mask ? " shadow_mask" : "", 10);
+             break;
+         } } }
+     /* CUBEKEYDBG=1: which (program, cube mask) pairs are being compiled. If one
+@@ -2244,7 +2281,7 @@ static ID3D12PipelineState* vp_get_fp_pso(int vs_idx, u32 fp_addr, u32 blend, in
+     u32 fp_ctrl = ctrl_auto ? RSX_FP_CTRL_AUTO
+                             : (exp32 ? CELL_GCM_SHADER_CONTROL_32_BITS_EXPORTS : 0u);
+     int n = fp_decompile_for_draw(vm_base + off, 4096, fp_ctrl, cube_mask,
+-                                  hlsl, sizeof(hlsl));
++                                  shadow, shadow_mask, hlsl, sizeof(hlsl));
+     if (n <= 0) { static int _e=0; if(PS3_LOG_FIRST(_e, 16)) printf("[FP] decompile fail (fp=0x%08X)\n", fp_addr); return NULL; }
+     /* Alpha-masked depth passes must discard transparent fragments before
+      * writing depth. The reference is part of the PSO key, so each compiled
+@@ -2596,6 +2633,7 @@ static ID3D12PipelineState* vp_get_fp_pso(int vs_idx, u32 fp_addr, u32 blend, in
+     s_d3d.vp_fp[s_d3d.vp_fp_n].cmask   = cmask;
+     s_d3d.vp_fp[s_d3d.vp_fp_n].cull    = cull;
+     s_d3d.vp_fp[s_d3d.vp_fp_n].cube_mask = cube_mask;
++    s_d3d.vp_fp[s_d3d.vp_fp_n].shadow_mask = shadow_mask;
+     s_d3d.vp_fp[s_d3d.vp_fp_n].depth_key = depth_key;
+     s_d3d.vp_fp[s_d3d.vp_fp_n].depth_bias = depth_bias;
+     s_d3d.vp_fp[s_d3d.vp_fp_n].slope_bias = slope_bias;
+@@ -4640,7 +4678,8 @@ static void render_frame(void)
+                 u32 _bf = dr->tex[_u].fmt & 0x9F;
+                 if (dr->tex[_u].off &&
+                     (_bf == 0x81 || _bf == 0x85 || _bf == 0x8B ||
+-                     (_bf >= 0x86 && _bf <= 0x88))) {
++                     (_bf >= 0x86 && _bf <= 0x88) ||
++                     _bf == 0x90 || _bf == 0x92)) {
+                     double _tt = perf_on() ? perf_now() : 0.0;
+                     int _cube = dr->tex[_u].cube && (dr_cube_mask(dr) & (1u << _u));
+                     int ts = vp_upload_tex_slot(dr->tex[_u].off, dr->tex[_u].w,
+@@ -4659,6 +4698,8 @@ static void render_frame(void)
+                             (_bf == 0x86) ? DXGI_FORMAT_BC1_UNORM :
+                             (_bf == 0x87) ? DXGI_FORMAT_BC2_UNORM :
+                             (_bf == 0x88) ? DXGI_FORMAT_BC3_UNORM :
++                            (_bf == 0x90) ? DXGI_FORMAT_R32_FLOAT :
++                            (_bf == 0x92) ? DXGI_FORMAT_R16_UNORM :
+                                             DXGI_FORMAT_R8_UNORM;
+                         srv_write_ex(wslot, s_d3d.vp_tex[ts].res, sf,
+                                   (_bf == 0x81) ? 0x1000
+@@ -4682,12 +4723,17 @@ static void render_frame(void)
+         }
+         if (perf_on()) s_perf_srv += perf_now() - _sv0;
+         double _ps0 = perf_on() ? perf_now() : 0.0;
+-        if (dr->fp_addr) vp_get_fp_pso(dr->vs_idx, dr->fp_addr, dr->blend_key,
+-                                       dr_num_rts(dr),
+-                                       dr->rt_off ? rsx_surface_dxgi(dr->rt_fmt)
+-                                                  : DXGI_FORMAT_R8G8B8A8_UNORM,
+-                                       dr->fp_exp32, dr->cmask, dr->cull, dr_cube_mask(dr),
+-                                       dr->depth_key, dr->alpha_ctl, dr->depth_bias, dr->slope_bias);
++        if (dr->fp_addr) {
++            rsx_fp_shadow_desc _shadow[16];
++            u32 _smask = dr_shadow_mask(dr, _shadow);
++            vp_get_fp_pso(dr->vs_idx, dr->fp_addr, dr->blend_key,
++                          dr_num_rts(dr),
++                          dr->rt_off ? rsx_surface_dxgi(dr->rt_fmt)
++                                     : DXGI_FORMAT_R8G8B8A8_UNORM,
++                          dr->fp_exp32, dr->cmask, dr->cull, dr_cube_mask(dr),
++                          _shadow, _smask,
++                          dr->depth_key, dr->alpha_ctl, dr->depth_bias, dr->slope_bias);
++        }
+         if (perf_on()) s_perf_pso += perf_now() - _ps0;
+     }
+ 
+@@ -5026,13 +5072,16 @@ static void render_frame(void)
+                 { static int op = -1;
+                   if (op < 0) { const char* e = getenv("RX_OPAQUE"); op = e ? atoi(e) : 0; }
+                   if (op && dr->rt_off == 0) { _bkey = 0; _actl = 0; } }
++                rsx_fp_shadow_desc _shadow[16];
++                u32 _smask = dr_shadow_mask(dr, _shadow);
+                 ID3D12PipelineState* dpso =
+                     dr->fp_addr ? vp_get_fp_pso(dr->vs_idx, dr->fp_addr, _bkey,
+                                                 dr_num_rts(dr),
+                                                 dr->rt_off ? rsx_surface_dxgi(dr->rt_fmt)
+                                                            : DXGI_FORMAT_R8G8B8A8_UNORM,
+                                                 dr->fp_exp32, dr->cmask, dr->cull,
+-                                                dr_cube_mask(dr), dr->depth_key, _actl,
++                                                dr_cube_mask(dr), _shadow, _smask,
++                                                dr->depth_key, _actl,
+                                                 dr->depth_bias, dr->slope_bias) : NULL;
+                 s_d3d.cmd_list->lpVtbl->SetPipelineState(s_d3d.cmd_list,
+                                                          dpso ? dpso : vpso);
+@@ -6757,6 +6806,9 @@ static void d3d12_draw_arrays_impl(void* ud, u32 primitive, u32 first, u32 count
+                     dr->tex[_u].ctrl1 = s_d3d.cur_texs[_u].ctrl1;
+                     dr->tex[_u].cube  = s_d3d.cur_texs[_u].cube;
+                     dr->tex[_u].mips  = s_d3d.cur_texs[_u].mips;
++                    dr->tex[_u].filter   = s_d3d.cur_texs[_u].filter;
++                    dr->tex[_u].address  = s_d3d.cur_texs[_u].address;
++                    dr->tex[_u].control0 = s_d3d.cur_texs[_u].control0;
+                     dr->tex[_u].set = s_d3d.cur_texs[_u].set;
+                     dr->tex_rt[_u]  = -1;
+                 }
+@@ -6882,6 +6934,9 @@ static void d3d12_draw_arrays_impl(void* ud, u32 primitive, u32 first, u32 count
+                     dr->tex[_u].ctrl1 = s_d3d.cur_texs[_u].ctrl1;
+                     dr->tex[_u].cube  = s_d3d.cur_texs[_u].cube;
+                     dr->tex[_u].mips  = s_d3d.cur_texs[_u].mips;
++                    dr->tex[_u].filter   = s_d3d.cur_texs[_u].filter;
++                    dr->tex[_u].address  = s_d3d.cur_texs[_u].address;
++                    dr->tex[_u].control0 = s_d3d.cur_texs[_u].control0;
+                 dr->tex[_u].set = s_d3d.cur_texs[_u].set;
+                 dr->tex_rt[_u]  = -1;
+             }
+@@ -7037,6 +7092,9 @@ static void d3d12_draw_indexed_impl(void* ud, u32 primitive, u32 first, u32 coun
+                     dr->tex[_u].ctrl1 = s_d3d.cur_texs[_u].ctrl1;
+                     dr->tex[_u].cube  = s_d3d.cur_texs[_u].cube;
+                     dr->tex[_u].mips  = s_d3d.cur_texs[_u].mips;
++                    dr->tex[_u].filter   = s_d3d.cur_texs[_u].filter;
++                    dr->tex[_u].address  = s_d3d.cur_texs[_u].address;
++                    dr->tex[_u].control0 = s_d3d.cur_texs[_u].control0;
+             dr->tex[_u].set = s_d3d.cur_texs[_u].set;
+             dr->tex_rt[_u]  = -1;
+         }
+@@ -7166,6 +7224,7 @@ static void d3d12_bind_texture(void* ud, u32 unit, const rsx_texture_state* tex)
+         (base_fmt == 0x81 /* B8 */ || base_fmt == 0x85 /* A8R8G8B8 */ ||
+          base_fmt == 0x8B /* G8B8: LBP's font atlas */ ||
+          (base_fmt >= 0x86 && base_fmt <= 0x88) /* DXT1/23/45 */ ||
++         base_fmt == 0x90 || base_fmt == 0x92 /* DEPTH24_D8 / DEPTH16 shadow maps */ ||
+          base_fmt == 0x9A /* W16Z16Y16X16 half-float: RTT intermediates */)) {
+         /* TEX_RESOLVE_AUTO=1: resolve through the page tables (local-page map
+          * then IO table) instead of trusting the format's location bits. A
+@@ -7214,6 +7273,9 @@ static void d3d12_bind_texture(void* ud, u32 unit, const rsx_texture_state* tex)
+         s_d3d.cur_texs[unit].ctrl1 = tex->control1;
+         s_d3d.cur_texs[unit].cube  = (tex->format & 4) ? 1 : 0;
+         s_d3d.cur_texs[unit].mips  = (tex->format >> 16) & 0xFFFFu;
++        s_d3d.cur_texs[unit].filter   = tex->filter;
++        s_d3d.cur_texs[unit].address  = tex->address;
++        s_d3d.cur_texs[unit].control0 = tex->control0;
+         if (getenv("TEXFMTDBG")) { static u32 seen[64]; static int ns=0;
+             u32 k = (unit<<24) | (((tex->format>>8) & 0xFFu)<<16) | (width & 0xFFFFu);
+             int f=0; for (int i=0;i<ns;i++) if (seen[i]==k) f=1;
