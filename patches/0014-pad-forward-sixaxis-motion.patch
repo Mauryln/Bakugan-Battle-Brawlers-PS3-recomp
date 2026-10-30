@@ -1,0 +1,87 @@
+--- a/libs/input/cellPad.c
++++ b/libs/input/cellPad.c
+@@ -31,6 +31,40 @@
+     if (flips < 0) { const char* e = getenv("PAD_CLOCK"); flips = e && !strcmp(e, "flips"); }
+     return flips ? (double)cellGcm_flip_request_count()
+                  : (double)(GetTickCount64() - t0_ms) / 1000.0;
++}
++
++/* A button-driven Sixaxis forward impulse, followed by the braking impulse.
++ * Use elapsed time so the gesture is independent of guest polling frequency. */
++typedef struct {
++    u64 start_ms;
++    int held;
++    int active;
++} PadMotionPulse;
++
++static PadMotionPulse s_motion_pulse[4];
++
++static void pad_forward_motion(u16* sensors, int pressed, u64 now_ms,
++                                PadMotionPulse* pulse)
++{
++    sensors[0] = 512; sensors[1] = 399;
++    sensors[2] = 512; sensors[3] = 512;
++    if (pressed && !pulse->held) {
++        pulse->start_ms = now_ms;
++        pulse->active = 1;
++    }
++    pulse->held = pressed;
++    if (!pulse->active) return;
++    u64 elapsed = now_ms - pulse->start_ms;
++    if (elapsed < 100) sensors[2] = 1023;
++    else if (elapsed < 200) sensors[2] = 0;
++    else pulse->active = 0;
++}
++
++/* I/K: vertical acceleration; J/L: lateral acceleration. Opposites cancel. */
++static void pad_direction_motion(u16* sensors, int up, int down, int left, int right)
++{
++    sensors[1] = up == down ? 399 : (up ? 0 : 1023);
++    sensors[0] = left == right ? 512 : (left ? 0 : 1023);
+ }
+
+ /* ---------------------------------------------------------------------------
+@@ -535,6 +569,7 @@
+     s_max_connect = max_connect > CELL_PAD_MAX_PORT_NUM ? CELL_PAD_MAX_PORT_NUM : max_connect;
+     memset(s_port_setting, 0, sizeof(s_port_setting));
+     memset(s_host_state, 0, sizeof(s_host_state));
++    memset(s_motion_pulse, 0, sizeof(s_motion_pulse));
+
+     pad_init_backend();
+
+@@ -858,11 +893,30 @@
+
+     /* Sensor data (only meaningful if SENSOR_ON) */
+     if (setting & CELL_PAD_SETTING_SENSOR_ON) {
+-        /* Default sensor values: accelerometer at rest (512 = 1g center) */
+-        data->button[CELL_PAD_BTN_OFFSET_SENSOR_X] = 512;
+-        data->button[CELL_PAD_BTN_OFFSET_SENSOR_Y] = 399; /* gravity */
+-        data->button[CELL_PAD_BTN_OFFSET_SENSOR_Z] = 512;
+-        data->button[CELL_PAD_BTN_OFFSET_SENSOR_G] = 512;
++        int up = 0, down = 0, left = 0, right = 0;
++        int forward = (data->button[CELL_PAD_BTN_OFFSET_DIGITAL1] & CELL_PAD_CTRL_R3) != 0;
++#ifdef _WIN32
++        /* Available with a connected XInput pad as well as keyboard fallback. */
++        if (port_no == 0 && pad_host_window_focused() &&
++            !getenv("PAD_NO_KEYBOARD")) {
++            forward |= (GetAsyncKeyState('F') & 0x8000) != 0;
++            up = (GetAsyncKeyState('I') & 0x8000) != 0;
++            down = (GetAsyncKeyState('K') & 0x8000) != 0;
++            left = (GetAsyncKeyState('J') & 0x8000) != 0;
++            right = (GetAsyncKeyState('L') & 0x8000) != 0;
++        }
++#endif
++        pad_forward_motion(&data->button[CELL_PAD_BTN_OFFSET_SENSOR_X],
++            forward, GetTickCount64(), &s_motion_pulse[port_no]);
++        /* Hold L3 to use the right stick as a virtual Sixaxis tilt. */
++        if (data->button[CELL_PAD_BTN_OFFSET_DIGITAL1] & CELL_PAD_CTRL_L3) {
++            int rx = data->button[CELL_PAD_BTN_OFFSET_ANALOG_RIGHT_X];
++            int ry = data->button[CELL_PAD_BTN_OFFSET_ANALOG_RIGHT_Y];
++            up |= ry < 64; down |= ry > 192;
++            left |= rx < 64; right |= rx > 192;
++        }
++        pad_direction_motion(&data->button[CELL_PAD_BTN_OFFSET_SENSOR_X],
++            up, down, left, right);
+     }
+     }  /* end connected block */
+
