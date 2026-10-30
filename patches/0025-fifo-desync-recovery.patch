@@ -1,0 +1,32 @@
+diff --git a/libs/video/cellGcmSys.c b/libs/video/cellGcmSys.c
+index ab82790..449e23d 100644
+--- a/libs/video/cellGcmSys.c
++++ b/libs/video/cellGcmSys.c
+@@ -2081,7 +2081,7 @@ static void gcm_rsx_process_fifo_unlocked(void)
+         }
+         if ((w & 3) == 2) {                    /* CALL: offset | 2 */
+             { u32 tgt = w & 0x1FFFFFFCu;
+-              if (!gcm_io2ea(tgt)) { gcm_fifo_bad_branch("CALL", tgt, w); gcm_fifo_resync_why("unmapped-CALL", &s_fifo_getoff, put); break; }
++              if (!gcm_io2ea(tgt)) { gcm_fifo_bad_branch("CALL", tgt, w); gcm_fifo_dump_around(s_fifo_getoff); gcm_fifo_resync_why("unmapped-CALL", &s_fifo_getoff, put); break; }
+               s_fifo_calloff = s_fifo_getoff + 4;
+               s_fifo_getoff  = tgt; }
+             continue;
+@@ -2382,7 +2382,17 @@ static void gcm_rsx_process_fifo_unlocked(void)
+         }
+         { static int _uw = 0; if (PS3_LOG_FIRST(_uw, 16) && getenv("RTT_DUMP"))
+             fprintf(stderr, "[FIFOUW] unknown word 0x%08X at getoff 0x%X\n", w, s_fifo_getoff); }
+-        s_fifo_getoff += 4;                    /* unknown word: skip */
++        /* Packet types 3..7 are not valid RSX commands: the walker has drifted
++         * off a command boundary (a method mis-count, or the title recycled its
++         * ring over commands still unread) and is now decoding raw data. The old
++         * +4 skip ground through that data one word at a time, each float a
++         * fresh mis-decode, until one (e.g. 0x3F800000, a float 1.0f) happened to
++         * look like a JUMP and wedged the FIFO. Resync to `put` instead -- the
++         * same recovery the unmapped-branch paths make: one frame's tail is
++         * dropped, the next frame starts on a clean boundary. */
++        gcm_fifo_dump_around(s_fifo_getoff);
++        gcm_fifo_resync_why("unknown-word", &s_fifo_getoff, put);
++        break;
+     }
+ 
+     /* Walker watchdog. Everything above recovers from a *recognised* stall --
