@@ -1,0 +1,36 @@
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -5607,4 +5607,12 @@
+ }
+
++/* Depth-only shadow passes can target the display address while writing no
++ * colour. They do not complete a visible frame or permit an early present. */
++static int rsx_draw_has_display_color(const D3D12DrawRecord* draw)
++{
++    return !draw->is_clear && draw->rt_off == 0 &&
++           (!draw->is_vp || draw->cmask != 0);
++}
++
+ static void d3d12_present(void* ud, u32 buffer_id)
+ {
+@@ -5624,5 +5632,5 @@
+     int flip_has_display = (s_d3d.draw_count == 0);
+     for (u32 _i = 0; _i < s_d3d.draw_count && _i < MAX_DRAWS; _i++)
+-        if (!s_d3d.draws[_i].is_clear && s_d3d.draws[_i].rt_off == 0) {
++        if (rsx_draw_has_display_color(&s_d3d.draws[_i])) {
+             flip_has_display = 1;
+             break;
+@@ -5696,5 +5704,5 @@
+     int have_display_draws = 0;
+     for (u32 i = 0; i < s_d3d.draw_count && i < MAX_DRAWS; i++)
+-        if (!s_d3d.draws[i].is_clear && s_d3d.draws[i].rt_off == 0) {
++        if (rsx_draw_has_display_color(&s_d3d.draws[i])) {
+             have_display_draws = 1;
+             break;
+@@ -7329,5 +7337,5 @@
+     int has_display = (s_d3d.draw_count == 0 && !s_seen_content);
+     for (u32 _i = 0; _i < s_d3d.draw_count && _i < MAX_DRAWS; _i++)
+-        if (!s_d3d.draws[_i].is_clear && s_d3d.draws[_i].rt_off == 0) {
++        if (rsx_draw_has_display_color(&s_d3d.draws[_i])) {
+             has_display = 1;
+             break;
