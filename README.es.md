@@ -59,16 +59,6 @@ En una línea: **el juego arranca, reproduce sus vídeos (con música), muestra 
 
 Se aceptan intentos a medias, hipótesis equivocadas y "esto lo hace RPCS3 así". Para algo grande, abre primero un issue.
 
-## ¿Por qué otra recompilación de Bakugan?
-
-Ya existe un proyecto que recompila la versión de **Xbox 360** para **Linux**. Este apunta a la versión de **PlayStation 3** en **Windows**: mismo juego, pero ni una línea de código máquina en común, otra API gráfica y otros problemas de runtime.
-
-| | Este proyecto | Proyecto Xbox 360 / Linux |
-|---|---|---|
-| Versión de origen | PS3 `BLES00758` (Europa, 7 idiomas) | Xbox 360 |
-| Anfitrión | Windows 10/11 x64 | Linux |
-| Gráficos | Direct3D 12 | (los suyos) |
-| Unidades recompiladas | PPU **y** SPU | — |
 
 ## Cómo funciona
 
