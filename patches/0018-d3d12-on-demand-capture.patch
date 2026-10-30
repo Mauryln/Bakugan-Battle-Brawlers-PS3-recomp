@@ -1,0 +1,55 @@
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -1539,4 +1539,7 @@
+                         r->fp_addr, r->vs_idx, r->vertex_count, r->cmask, r->blend, r->blend_key,
+                         r->tex[0].raw, r->tex[1].raw, r->tex[2].raw, r->tex[3].raw);
++                fprintf(mf, "      depth=%X bias=%d/%g cull=%X actl=%X texrt=%d,%d,%d,%d\n",
++                    r->depth_key, r->depth_bias, r->slope_bias, r->cull, r->alpha_ctl,
++                    r->tex_rt[0],r->tex_rt[1],r->tex_rt[2],r->tex_rt[3]);
+                 for (int u = 0; u < RSX_MAX_TEXTURES; u++)
+                     if (r->tex[u].set)
+@@ -1594,4 +1597,25 @@
+         cap_readback_write(r->res, r->w, r->h, r->dxgi, r->st, fi, path);
+     }
++    /* Exact inputs for small display draws: diagnose HUD coordinates, colour
++     * and constants without altering the game's screen. Count-delimited blocks:
++     * draw index/count/CB stride/FP stride, vertices, VP constants, FP constants. */
++    snprintf(path, sizeof path, "%s/display_inputs.bin", dir);
++    FILE* inputs = fopen(path, "wb");
++    if (inputs && s_d3d.vp_vb_mapped && s_d3d.vp_cb_mapped && s_d3d.vp_fpcb_mapped) {
++        u32 parity = (u32)(s_d3d.vp_parity ^ 1);
++        for (u32 d = 0; d < ndraws && d < MAX_DRAWS; ++d) {
++            const D3D12DrawRecord* r = &s_d3d.draws[d];
++            if (!r->is_vp || r->is_clear || r->rt_off || !r->vertex_count || r->vertex_count > 128) continue;
++            u32 header[4] = {d, r->vertex_count, VP_CB_STRIDE, VP_FPCB_STRIDE};
++            fwrite(header, sizeof(header), 1, inputs);
++            fwrite((char*)s_d3d.vp_vb_mapped + (u64)parity * s_d3d.vp_vertex_capacity * 256u + r->vb_byte_offset,
++                   256u, r->vertex_count, inputs);
++            fwrite((char*)s_d3d.vp_cb_mapped + ((u64)parity * MAX_DRAWS + r->cb_slot) * VP_CB_STRIDE,
++                   1, VP_CB_STRIDE, inputs);
++            fwrite((char*)s_d3d.vp_fpcb_mapped + ((u64)parity * MAX_DRAWS + r->cb_slot) * VP_FPCB_STRIDE,
++                   1, VP_FPCB_STRIDE, inputs);
++        }
++    }
++    if (inputs) fclose(inputs);
+     printf("[RSXCAP] frame %llu -> %s (%u ops)\n",
+            (unsigned long long)s_d3d.frame_count, dir, ndraws);
+@@ -5506,4 +5530,18 @@
+       } }
+
++    /* On-demand local capture, without guessing the gameplay frame number. */
++    {
++        const char* trigger = getenv("RSX_CAP_TRIGGER");
++        if (trigger && s_dbg_last_draws) {
++            FILE* f = fopen(trigger, "rb");
++            if (f) {
++                static u32 capture_index = 100;
++                fclose(f);
++                remove(trigger);
++                rsx_capture_frame(fi, s_dbg_last_draws, capture_index++);
++            }
++        }
++    }
++
+     /* Present */
+     if (s_present_this_frame)
