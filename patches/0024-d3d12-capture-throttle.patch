@@ -1,0 +1,27 @@
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index ec4affa..9846354 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -5608,9 +5608,21 @@ skip_dump_consider: ;
+             FILE* f = fopen(trigger, "rb");
+             if (f) {
+                 static u32 capture_index = 100;
++                /* Throttle: a capture readbacks the whole frame synchronously,
++                 * stalling this (render) thread. A burst of triggers stalls it
++                 * long enough for the guest to recycle its pushbuffer ring while
++                 * the FIFO drain is parked, which desyncs the walker and hangs
++                 * the title. Drop triggers inside the recovery window. */
++                static ULONGLONG last_cap_ms = 0;
++                ULONGLONG now_ms = GetTickCount64();
+                 fclose(f);
+                 remove(trigger);
+-                rsx_capture_frame(fi, s_dbg_last_draws, capture_index++);
++                if (now_ms - last_cap_ms >= 500) {
++                    last_cap_ms = now_ms;
++                    rsx_capture_frame(fi, s_dbg_last_draws, capture_index++);
++                } else {
++                    fprintf(stderr, "[RSXCAP] trigger dropped (throttle 500ms)%c", 10);
++                }
+             }
+         }
+     }
