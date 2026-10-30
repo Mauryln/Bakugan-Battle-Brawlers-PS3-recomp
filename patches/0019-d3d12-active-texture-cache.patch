@@ -1,0 +1,119 @@
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -84,4 +84,5 @@
+     u32 fp_addr;        /* SET_SHADER_PROGRAM value (guest FP ucode location)   */
+     int fp_exp32;       /* SET_SHADER_CONTROL 32-bit-exports bit at draw time   */
++    u32 sampled_units;  /* fragment program texture-use mask at submit time */
+     u32 alpha_ctl;      /* alpha test: enable<<16 | (func&0xFF)<<8 | ref */
+     u32 begin_epoch;    /* SET_BEGIN_END generation, for batch concatenation */
+@@ -167,5 +168,5 @@
+ /* Per-frame VP texture slot: a guest texture uploaded for this frame's VP
+  * draws (re-uploaded every frame -- gcm/cube's plasma animates in guest
+- * memory). SRV lives at heap index 1+slot. */
++ * memory). Descriptors belong to per-draw windows. */
+ typedef struct {
+     ID3D12Resource* res;
+@@ -180,10 +181,7 @@
+     int used;           /* referenced this frame */
+ } VPTexSlot;
+-/* Distinct textures uploadable per frame. Four was enough for a UI/atlas-style
+- * frame but not for a scene: this title binds ~20 distinct textures per frame,
+- * so every draw past the fourth got slot -1 from vp_upload_tex_slot ("out of
+- * slots") and drew UNTEXTURED. That reads as a correctly-lit but solid black
+- * object, which is indistinguishable from a missing texture upload. */
+-#define VP_TEX_SLOTS 96
++/* Lazy texture resources: complex arenas bind over 120 unique textures per
++ * frame. The old 96-slot limit silently dropped the late HUD atlases. */
++#define VP_TEX_SLOTS 512
+
+ /* Decompiled-VS cache: one entry per distinct vertex-program ucode seen at
+@@ -2036,5 +2034,5 @@
+     if (!en) return 0;
+     u32 m = 0;
+-    for (int u = 0; u < RSX_MAX_TEXTURES; u++) if (dr->tex[u].set && dr->tex[u].cube) m |= 1u << u;
++    for (int u = 0; u < RSX_MAX_TEXTURES; u++) if ((dr->sampled_units & (1u << u)) && dr->tex[u].set && dr->tex[u].cube) m |= 1u << u;
+     return m;
+ }
+@@ -2589,5 +2587,5 @@
+ /* Upload the guest texture for a VP draw into a per-frame texture slot
+  * (re-uploaded every frame: gcm/cube's plasma animates in guest memory).
+- * Returns the slot index (SRV at heap 1+slot) or -1. Must run while the
++ * Returns the resource-cache index or -1. Must run while the
+  * command list is open, before the draw passes. */
+ /* NV4097 TEXTURE_CONTROL1 component remap -> D3D12 Shader4ComponentMapping.
+@@ -2796,5 +2794,9 @@
+      * free one. Without this the stale path fell through to freeslot and either
+      * duplicated the texture into a second slot or bailed when none was free. */
+-    if (slot < 0 && freeslot < 0) return -1;      /* out of slots this frame */
++    if (slot < 0 && freeslot < 0) {
++        static int reported = 0;
++        if (!reported++) fprintf(stderr, "[VP texture] frame exceeds %u active texture slots\n", VP_TEX_SLOTS);
++        return -1;
++    }
+     /* TEX_SRCDBG=<N>: is the guest memory this slot uploads FROM actually
+      * populated? An empty source and a broken sampler both render flat. */
+@@ -3217,25 +3219,6 @@
+         s_d3d.cmd_list->lpVtbl->ResourceBarrier(s_d3d.cmd_list, 1, &b);
+     }
+-    /* SRV at heap slot 1+slot */
+-    D3D12_SHADER_RESOURCE_VIEW_DESC sv = {0};
+-    sv.Format = dxfmt;
+-    sv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+-    /* RSX B8 replicates the byte into all four channels (dbgfont's FP reads
+-     * coverage from .w); DXGI R8 defaults to (r,0,0,1), so swizzle (R,R,R,R)
+-     * = encoded 0x1000 (component 0 in all lanes + always-set bit). ARGB8
+-     * keeps the identity mapping. */
+-    sv.Shader4ComponentMapping = (basef == 0x81) ? 0x1000 : D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+-    sv.Texture2D.MipLevels = level_count;
+-    D3D12_CPU_DESCRIPTOR_HANDLE sh;
+-    s_d3d.srv_heap->lpVtbl->GetCPUDescriptorHandleForHeapStart(s_d3d.srv_heap, &sh);
+-    sh.ptr += (u64)(1 + slot) * s_d3d.srv_inc;
+-    if (cube) {
+-        sv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURECUBE;
+-        sv.TextureCube.MipLevels = level_count;
+-        sv.TextureCube.MostDetailedMip = 0;
+-        sv.TextureCube.ResourceMinLODClamp = 0.0f;
+-    }
+-    s_d3d.device->lpVtbl->CreateShaderResourceView(s_d3d.device, t->res, &sv, sh);
+-
++    /* Only the per-draw SRV window owns bindings. Legacy heap[1+slot]
++     * cache descriptors overlapped DRAW_SRV_BASE once slot reached 31. */
+     t->off = off; t->key = key_off; t->w = w; t->h = h; t->fmt = fmt;
+     t->cube = cube; t->mips = level_count; t->used = 1;
+@@ -3259,8 +3242,18 @@
+  * vp_cb slot. Runs at record time so every draw keeps the constants that
+  * were live when the guest issued it. */
+-static void vp_record_cb(u32 slot, int vs_idx, const D3D12DrawRecord* dr)
++static void vp_record_cb(u32 slot, int vs_idx, D3D12DrawRecord* dr)
+ {
+     const rsx_state* st = s_d3d.current_rsx_state;
+     if (!s_d3d.vp_cb_mapped || !st || slot >= MAX_DRAWS) return;
++    if (dr) {
++        extern uint8_t* vm_base;
++        extern u32 cellGcmResolveLocated(int, u32);
++        dr->sampled_units = 1u; /* legacy atlas fallback uses t0 */
++        if (dr->fp_addr && vm_base) {
++            u32 off = cellGcmResolveLocated((dr->fp_addr & 3u) == 1u, dr->fp_addr & ~3u);
++            dr->sampled_units = off != 0xFFFFFFFFu && rsx_fp_program_size(vm_base + off, 4096)
++                ? rsx_fp_texture_units(vm_base + off, 4096) : 0xFFFFu;
++        }
++    }
+     /* FP texcoord scale (b1): 1/size for UNnormalized textures (fmt bit
+      * 0x40 -- wave samples everything in texel space), 1.0 otherwise. */
+@@ -4477,5 +4470,5 @@
+
+     /* Per-frame VP textures + guest-FP pipelines: for each VP draw, upload the
+-     * texture it had bound at submit time into a slot (SRV heap 1+slot; plasma
++     * texture it had bound at submit time into a resource-cache slot (plasma
+      * animates so contents re-upload every frame) and pre-build its FP PSO.
+      * A texture whose offset matches an offscreen RT samples the RT directly
+@@ -4569,4 +4562,9 @@
+             u32 wslot = DRAW_SRV_BASE + _d * RSX_MAX_TEXTURES + (u32)_u;
+             dr->tex_rt[_u] = -1;
++            if (!(dr->sampled_units & (1u << _u))) {
++                srv_write(wslot, NULL, DXGI_FORMAT_R8G8B8A8_UNORM,
++                          D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING);
++                continue;
++            }
+             /* Exact surface identities and resolve aliases take precedence
+              * over size-based screen/reflection fallbacks. */

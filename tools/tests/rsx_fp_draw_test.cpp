@@ -59,6 +59,8 @@ int main()
     u8 tex[16] = {};
     put_word(tex, (0x17u << 24) | (15u << 9) | (4u << 13) | (3u << 17) | 1u);
     put_word(tex + 4, 1u | swizzle | execute);
+    require(rsx_fp_texture_units(tex, sizeof(tex)) == (1u << 3), "only the referenced texture unit is active");
+    require(rsx_fp_texture_units(prog, sizeof(prog)) == 0, "constant-only shaders consume no texture slots");
     require(fp_decompile_for_draw(tex, sizeof(tex), 0x40, 1u << 3, first, sizeof(first)) > 0,
             "cube program translates");
     require(strstr(first, "TextureCube rsx_tex3"), "unit3 is declared as a cube");

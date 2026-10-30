@@ -10,7 +10,7 @@ typedef int DXGI_FORMAT;
 #define D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING 5768
 #define PS3_LOG_FIRST(counter, limit) ((counter)++ < (limit))
 struct Texture { u32 set, w, h, raw, off; };
-struct Draw { Texture tex[1]; int tex_rt[1]; u32 fp_addr; };
+struct Draw { Texture tex[1]; int tex_rt[1]; u32 fp_addr; u32 sampled_units = 1; };
 static int rt_resource, screen_resource, sub_resource;
 static struct { u32 width, height; struct { void* res; u32 dxgi; } off_rt[1]; }
     s_d3d = {1280, 720, {{&rt_resource, 28}}};
@@ -52,5 +52,10 @@ int main()
     select(&draw);
     require(chosen == &screen_resource && draw.tex_rt[0] == -1,
             "unknown screen-sized source retains previous-screen fallback");
+    draw.sampled_units = 0;
+    draw.tex[0].raw = 0x02B50000;
+    select(&draw);
+    require(chosen == nullptr && draw.tex_rt[0] == -1,
+            "unused texture bindings do not consume cache resources or feedback targets");
     puts("PASS: explicit RT and resolve producers precede heuristic texture sources");
 }
