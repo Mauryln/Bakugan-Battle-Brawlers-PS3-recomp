@@ -1,3 +1,5 @@
+> **Estado vigente al 30/10/2026:** continuar con [NEXT_SESSION_BATTLE_ARENA.md](NEXT_SESSION_BATTLE_ARENA.md). Gameplay, HUD y Sixaxis corregidos; efectos/ruido/FPS siguen pendientes. Las notas anteriores se conservan debajo.
+
 # Informe de traspaso — 26 de octubre de 2026 (sesión larga)
 
 Documento para retomar el trabajo mañana. Estado real, qué se arregló, qué

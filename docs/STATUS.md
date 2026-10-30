@@ -1,6 +1,8 @@
 # Estado del port — Bakugan: Battle Brawlers (BLES00758)
 
-Última actualización: **audio casi perfecto; Battle Arena inicia; 3D pendiente**.
+Última actualización (30/10/2026): **gameplay y HUD visibles en arenas complejas; lanzamiento Sixaxis confirmado. Persisten ruido de cartas/efectos y rendimiento bajo.**
+
+Informe vigente y pasos para continuar: [NEXT_SESSION_BATTLE_ARENA.md](NEXT_SESSION_BATTLE_ARENA.md). Build y 15 pruebas correctos; 22 parches reproducibles. La última optimización de CPU necesita medición en juego. Las conclusiones sobre 3D y gameplay que siguen abajo son históricas.
 
 El cierre de la sesión del 24/10/2026 y el plan para retomarla están en
 [NEXT_SESSION.md](NEXT_SESSION.md). Ese reporte actualiza las conclusiones
