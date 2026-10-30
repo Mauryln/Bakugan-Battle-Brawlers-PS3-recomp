@@ -1,4 +1,4 @@
-> **Estado vigente al 30/10/2026:** continuar con [NEXT_SESSION_BATTLE_ARENA.md](NEXT_SESSION_BATTLE_ARENA.md). Gameplay, HUD y Sixaxis corregidos; efectos/ruido/FPS siguen pendientes. Las notas anteriores se conservan debajo.
+> **Estado vigente al 30/10/2026:** el informe de cierre de hoy (FIFO desync, cartas BC3, transparencias, sombras) está en [NEXT_SESSION_FIFO.md](NEXT_SESSION_FIFO.md). Continuar por ahí. Gameplay, HUD y Sixaxis corregidos; queda el cuelgue del FIFO y efectos visuales.
 
 Lo que quedó arreglado (commiteado)
 Parche	Fix

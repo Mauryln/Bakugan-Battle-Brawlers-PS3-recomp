@@ -1,5 +1,10 @@
 # Próxima sesión — Battle Arena (30/10/2026)
 
+> **ACTUALIZACIÓN (cierre 30/10):** el informe vigente del trabajo de hoy está en
+> [NEXT_SESSION_FIFO.md](NEXT_SESSION_FIFO.md) — el bloqueo del FIFO (turno del jugador/CPU),
+> la corrupción de cartas BC3, las transparencias y el estado de las sombras. Este documento
+> conserva el contexto de la arena.
+
 ## Leer esto primero
 
 Rama: `codex/battle-arena-rendering`. Port Windows nativo BLES00758. El usuario pidió cerrar con código e informe porque se quedó sin límite de uso. No interpretar este cierre como renderer terminado.
