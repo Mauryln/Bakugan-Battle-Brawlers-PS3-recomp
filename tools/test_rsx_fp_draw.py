@@ -14,15 +14,13 @@ source = (ROOT / "ps3recomp-src/libs/video/rsx_d3d12_backend.c").read_text(encod
 
 def function(name: str) -> str:
     start = source.index(name)
-    body = source.index("{", start)
-    depth, end = 1, body + 1
-    while depth:
-        depth += (source[end] == "{") - (source[end] == "}")
-        end += 1
+    end = source.index("\n}", start) + 2
     return source[start:end]
 
 
 extracted = function("static void hlsl_replace_all(") + "\n"
+if "static int fp_override_rgb(" in source:
+    extracted += function("static int fp_override_rgb(") + "\n"
 if "static int fp_decompile_for_draw(" in source:
     extracted += function("static int fp_decompile_for_draw(")
 else:

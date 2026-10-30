@@ -1,0 +1,44 @@
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -2052,4 +2052,26 @@
+ /* The backend snapshots constants after the four texscale vectors and alpha
+  * state. Use buffered translation so the instruction-only PSO key is valid. */
++static int fp_override_rgb(char* hlsl, u32 capacity)
++{
++    char* last = NULL;
++    for (char* p = strstr(hlsl, "    return "); p; p = strstr(p + 1, "    return ")) last = p;
++    if (!last) return 0;
++    char* end = strstr(last, ";\n}\n");
++    if (!end) return 0;
++    char expression[96], replacement[256];
++    size_t length = (size_t)(end - last - 11);
++    if (length >= sizeof(expression)) return 0;
++    memcpy(expression, last + 11, length); expression[length] = 0;
++    if (strstr(hlsl, "struct PSOutput"))
++        snprintf(replacement, sizeof(replacement), "    PSOutput _forced = %s;\n    _forced.t0.rgb = float3(1,0,1);\n    return _forced", expression);
++    else
++        snprintf(replacement, sizeof(replacement), "    float4 _forced = %s;\n    _forced.rgb = float3(1,0,1);\n    return _forced", expression);
++    size_t prefix = (size_t)(last - hlsl), inserted = strlen(replacement), tail = strlen(end) + 1;
++    if (prefix + inserted + tail > capacity) return 0;
++    memmove(last + inserted, end, tail);
++    memcpy(last, replacement, inserted);
++    return 1;
++}
++
+ static int fp_decompile_for_draw(const u8* ucode, u32 max_bytes, u32 ctrl,
+                                  u32 cube_mask, char* hlsl, u32 out_size)
+@@ -2399,10 +2421,8 @@
+         }
+     }
+-    /* FP_FORCE=1: replace the translated body with solid magenta -- isolates
+-     * geometry/transform problems from texture/blend problems. */
+-    if (getenv("FP_FORCE")) {
+-        char* rp = strstr(hlsl, "return r[0];");
+-        if (rp) memcpy(rp, "return float4(1,0,1,1)", 23);
+-    }
++    /* Preserve shader alpha/discards while isolating a material's RGB. */
++    if (getenv("FP_FORCE") && (!getenv("FP_FORCE_FP") ||
++        (u32)strtoul(getenv("FP_FORCE_FP"), NULL, 16) == fp_addr))
++        fp_override_rgb(hlsl, sizeof(hlsl));
+     /* Disk cache for the compiled PS bytecode. D3DCompile on the decompiled HLSL
+      * costs ~1s per fragment program and stalls the frame; the battle compiles a

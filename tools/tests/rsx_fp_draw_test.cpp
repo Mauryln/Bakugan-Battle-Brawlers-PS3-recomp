@@ -40,6 +40,8 @@ int main()
     require(!strcmp(first, second), "changing inline constants must preserve compiled HLSL");
     require(strstr(first, "fp_constants[0]"), "shader reads per-draw constant bank");
 
+    require(fp_override_rgb(first, sizeof(first)) == 1, "unlit diagnostic wraps the real return without dropping alpha");
+    require(strstr(first, "_forced.rgb = float3(1,0,1)"), "unlit diagnostic preserves the fourth lane");
     ID3DBlob *shader = nullptr, *errors = nullptr;
     HRESULT hr = D3DCompile(first, strlen(first), nullptr, nullptr, nullptr,
         "main", "ps_5_0", 0, 0, &shader, &errors);
@@ -66,6 +68,20 @@ int main()
     require(strstr(first, "TextureCube rsx_tex3"), "unit3 is declared as a cube");
     require(strstr(first, "rsx_tex3.Sample(rsx_samp[3], ((input.tc0).xyzw).xyz)"),
             "cube sampling uses three direction components");
+    char mrt[2048] =
+        "struct PSOutput { float4 t0:SV_TARGET0; float4 t1:SV_TARGET1; };\n"
+        "PSOutput main() { PSOutput result; result.t0=float4(0.2,0.4,0.6,0.3); result.t1=(float4)0.7;\n"
+        "    return result;\n}\n";
+    char original[2048]; strcpy(original, mrt);
+    require(fp_override_rgb(mrt, (u32)strlen(mrt) + 1) == 0 && !strcmp(mrt, original),
+            "diagnostic rejects insufficient capacity without mutation");
+    require(fp_override_rgb(mrt, sizeof(mrt)) && strstr(mrt, "_forced.t0.rgb"),
+            "MRT diagnostic changes only the first target RGB");
+    shader = nullptr; errors = nullptr;
+    hr = D3DCompile(mrt, strlen(mrt), nullptr, nullptr, nullptr, "main", "ps_5_0", 0, 0, &shader, &errors);
+    if (FAILED(hr) && errors) fprintf(stderr, "%s\n", (const char*)errors->GetBufferPointer());
+    require(SUCCEEDED(hr), "MRT RGB override compiles");
+    shader->Release(); if (errors) errors->Release();
     u8 oversized[65 * 32] = {};
     for (unsigned i = 0; i < 65; ++i) {
         auto* instruction = oversized + i * 32;
