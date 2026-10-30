@@ -1,7 +1,6 @@
 --- a/libs/input/cellPad.c
 +++ b/libs/input/cellPad.c
-@@ -31,6 +31,40 @@
-     if (flips < 0) { const char* e = getenv("PAD_CLOCK"); flips = e && !strcmp(e, "flips"); }
+@@ -32,4 +32,38 @@
      return flips ? (double)cellGcm_flip_request_count()
                   : (double)(GetTickCount64() - t0_ms) / 1000.0;
 +}
@@ -40,17 +39,13 @@
 +    sensors[0] = left == right ? 512 : (left ? 0 : 1023);
  }
 
- /* ---------------------------------------------------------------------------
-@@ -535,6 +569,7 @@
-     s_max_connect = max_connect > CELL_PAD_MAX_PORT_NUM ? CELL_PAD_MAX_PORT_NUM : max_connect;
+@@ -536,4 +570,5 @@
      memset(s_port_setting, 0, sizeof(s_port_setting));
      memset(s_host_state, 0, sizeof(s_host_state));
 +    memset(s_motion_pulse, 0, sizeof(s_motion_pulse));
 
      pad_init_backend();
-
-@@ -858,11 +893,30 @@
-
+@@ -859,9 +894,28 @@
      /* Sensor data (only meaningful if SENSOR_ON) */
      if (setting & CELL_PAD_SETTING_SENSOR_ON) {
 -        /* Default sensor values: accelerometer at rest (512 = 1g center) */
@@ -84,4 +79,3 @@
 +            up, down, left, right);
      }
      }  /* end connected block */
-
