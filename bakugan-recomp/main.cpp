@@ -192,6 +192,21 @@ static void present_guest_frame(void)
     InterlockedIncrement(&g_frames_presented);
 }
 
+static unsigned frame_clock_due_ticks(unsigned long long now,
+                                      unsigned long long* next_tick)
+{
+    if (now < *next_tick) return 0;
+    unsigned long long due = (now - *next_tick) / 16 + 1;
+    /* A blocked render thread cannot replay seconds of display interrupts.
+     * Bound catch-up work and resume at real time after a long stall. */
+    if (due > 4) {
+        *next_tick = now + 16;
+        return 4;
+    }
+    *next_tick += due * 16;
+    return (unsigned)due;
+}
+
 static DWORD WINAPI frame_clock(LPVOID)
 {
     const char* title = getenv("PS3_TITLE");
@@ -208,8 +223,9 @@ static DWORD WINAPI frame_clock(LPVOID)
         Sleep(4);
         ULONGLONG now = GetTickCount64();
 
-        int fired = 0;
-        while ((long long)(now - next_tick) >= 0 && fired < 240) {
+        unsigned due = frame_clock_due_ticks(now, &next_tick);
+        for (unsigned fired = 0; fired < due; fired++) {
+            if (rsx_ok && rsx_backend_pump() != 0) rsx_ok = 0;
             cellGcmTickVBlank();
             cellGcmTickFlip();
             /* Present a pending flip BEFORE draining any further. The flip
@@ -225,10 +241,7 @@ static DWORD WINAPI frame_clock(LPVOID)
              * labels the game's per-frame logic blocks on, so it has to keep
              * advancing at 60 Hz even while present() throttles. */
             if (rsx_ok) cellGcm_rsx_process_fifo();
-            next_tick += 16;             /* ~60 Hz */
-            fired++;
         }
-        if (fired >= 240) next_tick = now;   /* fell too far behind -- resync */
 
         /* Drain at the outer cadence too, not only on the 16 ms tick: titles
          * fence every render pass on a label the drain writes, and one wave of
