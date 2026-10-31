@@ -1,0 +1,42 @@
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -2072,6 +2072,28 @@
+     memmove(last + inserted, end, tail);
+     memcpy(last, replacement, inserted);
+     return 1;
++}
++
++static int fp_apply_alpha_test_for_draw(char* hlsl, u32 capacity, u32 alpha_ctl,
++                                       DXGI_FORMAT target_format)
++{
++    if (!(alpha_ctl & 0x10000u)) return 0;
++    int result = rsx_fp_apply_alpha_test(hlsl, capacity,
++        0x200u | ((alpha_ctl >> 8) & 7u), (float)(alpha_ctl & 255u) / 255.0f);
++    if (result <= 0) return result;
++    /* The normalized color ROP compares the quantized alpha. Comparing raw
++     * interpolated float32 against 255/255 discards opaque pixels whose alpha
++     * is a few ULP below one, producing speckled terrain. Keep floating-point
++     * targets' comparisons at their original precision, and leave the exported
++     * color untouched so blending still receives the shader's actual value. */
++    if (target_format == DXGI_FORMAT_R8G8B8A8_UNORM ||
++        target_format == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB) {
++        hlsl_replace_all(hlsl, capacity, "_rsx_out.a",
++            "(floor(saturate(_rsx_out.a) * 255.0 + 0.5) / 255.0)");
++        hlsl_replace_all(hlsl, capacity, "_rsx_out.t0.a",
++            "(floor(saturate(_rsx_out.t0.a) * 255.0 + 0.5) / 255.0)");
++    }
++    return result;
+ }
+
+ static int fp_decompile_for_draw(const u8* ucode, u32 max_bytes, u32 ctrl,
+@@ -2250,9 +2272,7 @@
+     /* Alpha-masked depth passes must discard transparent fragments before
+      * writing depth. The reference is part of the PSO key, so each compiled
+      * comparison retains the state of its own draw. */
+-    if ((alpha_ctl & 0x10000u) &&
+-        rsx_fp_apply_alpha_test(hlsl, sizeof(hlsl),
+-            0x200u | ((alpha_ctl >> 8) & 7u), (float)(alpha_ctl & 255u) / 255.0f) < 0)
++    if (fp_apply_alpha_test_for_draw(hlsl, sizeof(hlsl), alpha_ctl, rtfmt) < 0)
+         return NULL;
+     /* FP_LIST=1: every program the title actually compiles, with its size. A
+      * fragment program that hangs the GPU shows up here as an implausible

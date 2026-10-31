@@ -1,16 +1,20 @@
 # Estado del port — Bakugan: Battle Brawlers (BLES00758)
 
-Última actualización (30/10/2026): **gameplay y HUD visibles en arenas complejas; lanzamiento Sixaxis confirmado. Persisten ruido de cartas/efectos y rendimiento bajo.**
+Última actualización (31/10/2026): **Fixed gameplay Battle Arena: turno del jugador y CPU, texturas del campo y cartas corregidos.** Confirmado visualmente por el usuario.
 
-Informe vigente y pasos para continuar: [NEXT_SESSION_BATTLE_ARENA.md](NEXT_SESSION_BATTLE_ARENA.md). Build y 15 pruebas correctos; 23 parches reproducibles (0023 añade iluminación/sombras por comparación de profundidad, compilado sin validación visual). La última optimización de CPU necesita medición en juego. Las conclusiones sobre 3D y gameplay que siguen abajo son históricas.
+Informe de cierre: [BATTLE_ARENA_FIXED.md](BATTLE_ARENA_FIXED.md). Próxima sesión:
+[NEXT_SESSION_EFFECTS_SHADERS.md](NEXT_SESSION_EFFECTS_SHADERS.md), dedicada a efectos y shaders.
+Build correcto, 15/15 pruebas y 27 parches reproducibles sobre un clone limpio.
+Sombras offscreen y rendimiento siguen pendientes. `0023` permanece revertido;
+`0024` y `0025` se conservan. Las conclusiones sobre 3D y gameplay que siguen son históricas.
 
 El cierre de la sesión del 24/10/2026 y el plan para retomarla están en
 [NEXT_SESSION.md](NEXT_SESSION.md). Ese reporte actualiza las conclusiones
 históricas sobre audio y geometría que aparecen más abajo.
 
 El juego arranca, reproduce sus vídeos (logos, apertura, intro narrativa),
-recorre todas las pantallas de menú y acepta teclado. **Lo que no funciona:
-modelos 3D, gameplay y efectos de sonido.** Ver §9 para el estado actual.
+recorre todas las pantallas de menú y acepta teclado. **Los estados de 3D/gameplay de §9 son históricos; el estado vigente es el del
+31/10 enlazado arriba.** Los efectos de sonido conservan su investigación previa.
 
 ## Resumen
 

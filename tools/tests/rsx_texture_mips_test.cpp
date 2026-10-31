@@ -71,6 +71,42 @@ static void verify(ID3D12Device* device, bool cube)
     }
 }
 
+static void verify_pitched_card(ID3D12Device* device, u32 width, u32 height)
+{
+    const u32 source_pitch = 1024;
+    rsx_tex_level levels[RSX_MAX_TEXTURE_LEVELS];
+    u32 count = rsx_texture_mip_chain(0xA8, width, height, 2, source_pitch, levels);
+    require(count == 2, "linear BC3 mip chain is retained");
+    for (u32 m = 0; m < count; ++m)
+        require(levels[m].tl.row_bytes == source_pitch, "linear BC3 retains the guest pitch at every mip");
+    u32 source_size = levels[1].offset + levels[1].tl.face_bytes;
+    std::vector<u8> source(source_size, 0xEE);
+    for (u32 m = 0; m < count; ++m) for (u32 y = 0; y < levels[m].tl.rows; ++y)
+        for (u32 x = 0; x < levels[m].tl.dst_row_bytes; ++x)
+            source[levels[m].offset + y * source_pitch + x] = (u8)(m * 71 + y * 13 + x);
+    D3D12_RESOURCE_DESC desc = {};
+    desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    desc.Width = width; desc.Height = height;
+    desc.DepthOrArraySize = 1; desc.MipLevels = (UINT16)count;
+    desc.Format = DXGI_FORMAT_BC3_UNORM; desc.SampleDesc.Count = 1;
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprints[2];
+    UINT64 size;
+    device->GetCopyableFootprints(&desc, 0, count, 0, footprints, nullptr, nullptr, &size);
+    std::vector<u8> upload((size_t)size + 1024, 0xCD);
+    vp_decode_texture_subresources(upload.data(), source.data(), levels, count, 1,
+                                  source_size, footprints, 0);
+    for (u32 m = 0; m < count; ++m) for (u32 y = 0; y < levels[m].tl.rows; ++y) {
+        auto* row = upload.data() + footprints[m].Offset + y * footprints[m].Footprint.RowPitch;
+        require(!memcmp(row, source.data() + levels[m].offset + y * source_pitch,
+                        levels[m].tl.dst_row_bytes), "BC3 card rows preserve their own blocks without source padding");
+        if (y + 1 < levels[m].tl.rows)
+            for (u32 x = levels[m].tl.dst_row_bytes; x < footprints[m].Footprint.RowPitch; ++x)
+                require(row[x] == 0xCD, "source row padding does not enter GPU footprint padding");
+    }
+    for (size_t i = (size_t)size; i < upload.size(); ++i)
+        require(upload[i] == 0xCD, "pitched decode does not write past the GPU upload footprint");
+}
+
 int main()
 {
     ID3D12Device* device = nullptr;
@@ -78,6 +114,8 @@ int main()
             "create D3D12 device for real upload footprints");
     verify(device, false);
     verify(device, true);
+    verify_pitched_card(device, 204, 120);
+    verify_pitched_card(device, 228, 300);
     device->Release();
     puts("PASS: actual mip decode fills aligned GPU footprints for ARGB and BC3 cube chains");
 }

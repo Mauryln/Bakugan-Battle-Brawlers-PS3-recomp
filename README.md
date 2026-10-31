@@ -12,14 +12,19 @@ No emulator. No Xbox 360 code. No Linux.</p>
 <img src="https://img.shields.io/badge/graphics-Direct3D%2012-107C10?style=flat-square" alt="Graphics: Direct3D 12">
 <img src="https://img.shields.io/badge/title-BLES00758-c0392b?style=flat-square" alt="Title: BLES00758">
 <img src="https://img.shields.io/badge/license-MIT-2ea44f?style=flat-square" alt="License: MIT">
-<img src="https://img.shields.io/badge/status-menus%20%2B%20FMVs%20working%2C%20gameplay%20WIP-orange?style=flat-square" alt="Status: menus and FMVs working, gameplay WIP">
+<img src="https://img.shields.io/badge/status-Battle%20Arena%20gameplay%20fixed-green?style=flat-square" alt="Battle Arena gameplay fixed; effects and shaders pending">
 </p>
 
 <p><a href="README.es.md">Español</a> · <a href="docs/STATUS.md">Status</a> · <a href="docs/VIDEO.md">Video pipeline</a> · <a href="docs/ARCHITECTURE.md">Architecture</a> · <a href="CONTRIBUTING.md">Contributing</a></p>
 
 </div>
 
-[Bakugan: Battle Brawlers](https://en.wikipedia.org/wiki/Bakugan:_Battle_Brawlers) (2009) was never ported to PC. This project lifts the game's **PPU (CPU) and SPU (DSP) code to C++ ahead of time** with [ps3recomp](https://github.com/sp00nznet/ps3recomp) and links it against a small HLE runtime, producing an ordinary `.exe` that renders through Direct3D 12 at 30 FPS.
+> **2026-10-31 — Battle Arena gameplay fixed.** Fixed turn-transition freezes,
+> speckled field rendering, and card textures. Player/CPU turns verified.
+> [Report and screenshots](docs/BATTLE_ARENA_FIXED.md).
+> Next: [effects and shaders](docs/NEXT_SESSION_EFFECTS_SHADERS.md).
+
+[Bakugan: Battle Brawlers](https://en.wikipedia.org/wiki/Bakugan:_Battle_Brawlers) (2009) was never ported to PC. This project lifts the game's **PPU (CPU) and SPU (DSP) code to C++ ahead of time** with [ps3recomp](https://github.com/sp00nznet/ps3recomp) and links it against a small HLE runtime, producing an ordinary `.exe` that renders through Direct3D 12. Menus reach 30 FPS; battle performance remains work in progress.
 
 Nothing runs in an emulator: the machine code is translated once, then compiled like any other program.
 
@@ -43,19 +48,19 @@ Nothing runs in an emulator: the machine code is translated once, then compiled 
 | Title screen, all menus, mode select, 2D textures | ✅ |
 | In-game keyboard (name entry) and keyboard/XInput pad | ✅ |
 | Music — `SNDP` PCM scores mixed by the SPU, plus FMV AAC | ✅ |
-| Battle Arena — slow to load, then starts a duel | ⚠️ |
+| Battle Arena — player/CPU turns, field and card textures fixed | ✅ |
 | *Known defect:* mode-select "gate" — 2D layers behind the portrait overlap | ⚠️ |
-| **3D scene** — cinematics render (textures still grainy); the player's turn goes black | ⚠️ |
-| **Gameplay** — tutorial, story battles | ❌ |
+| **3D scene** — field visible; effects, shaders and shadows pending | ⚠️ |
+| **Gameplay** — tutorial and story require validation | ⚠️ |
 | **Sound effects** — ATRAC3 in `SOUND/*.PAST` | ❌ |
 
-If you only read one line: **the game boots, plays its videos (with music), shows every menu, starts a Battle Arena duel, and the 3D scene renders in cinematics — but the player's turn is still black.**
+**Battle Arena is playable with corrected field and card textures. Effects, shaders, and performance still need work.**
 
 ## Help wanted
 
 These are the walls we are stuck on. Each one is a self-contained problem with a measurement already done — the details are in [`docs/STATUS.md`](docs/STATUS.md) and [`docs/NEXT_SESSION.md`](docs/NEXT_SESSION.md).
 
-1. **The 3D scene.** Battle Arena submits 438–600 draws per frame into the 1120×584 2× MSAA target (`0xEAB0000`) and the target does receive content. The strip-restart fix (`patches/0009`) removed the deformation, and the render-target rebind + shader cache (`patches/0010`) fixed the cinematic black screen and the shader-compile freezes. What remains is the **player's turn going black** (the composite samples the scene target but leaves no pixels), plus grainy textures and invisible faces. See [`docs/NEXT_SESSION.md`](docs/NEXT_SESSION.md) for the exact next test.
+1. **Effects and shaders.** Isolate lighting, transparency, reflection, and composition differences. Shadows require a real offscreen depth target. See [`docs/NEXT_SESSION_EFFECTS_SHADERS.md`](docs/NEXT_SESSION_EFFECTS_SHADERS.md).
 2. **Audio leftovers.** Menu scores and the SPU mixer work; the `.PAST` effects are ATRAC3 and still silent, and a few cuts are under review. `libs/audio/`.
 3. **Testers.** Does it boot on your GPU/driver? A `run.log` and one sentence is enough to open an issue.
 

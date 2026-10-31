@@ -1,0 +1,168 @@
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -100,6 +100,7 @@
+         u32 off;        /* resolved vm offset (guest upload source), 0 = none */
+         u32 raw;        /* raw RSX offset (offscreen-RT matching) */
+         u32 w, h, fmt;  /* dims + RSX base format */
++        u32 pitch;      /* CONTROL3 source row pitch */
+         u32 ctrl1;      /* NV4097 TEXTURE_CONTROL1: component remap crossbar */
+         u32 mips;       /* SET_TEXTURE_FORMAT bits 16..31: mipmap level count.
+                          * Cube faces sit one whole mip pyramid apart, so this
+@@ -171,7 +172,7 @@
+ typedef struct {
+     ID3D12Resource* res;
+     ID3D12Resource* up;
+-    u32 off, w, h, fmt, mips; /* current resource shape and guest format */
++    u32 off, w, h, fmt, mips, pitch; /* current resource shape and guest format */
+     u32 csum;           /* sparse checksum of the source bytes last uploaded */
+     int cube;           /* resource is a 6-face cube, sampled as TextureCube */
+     u32 key;            /* the ORIGINAL bound offset -- the cache lookup key.
+@@ -326,7 +327,7 @@
+     int                   vp_fp_n;
+     u32                   srv_inc;              /* CBV_SRV_UAV descriptor size   */
+     /* VP path: latest texture bound per unit (t0-t3). */
+-    struct { u32 off, raw, w, h, fmt, ctrl1, mips; int cube; int set; } cur_texs[RSX_MAX_TEXTURES];
++    struct { u32 off, raw, w, h, fmt, ctrl1, mips, pitch; int cube; int set; } cur_texs[RSX_MAX_TEXTURES];
+
+     /* Render-to-texture: offscreen RT pool + their RTV heap. */
+     OffRT                 off_rt[MAX_OFF_RTS];
+@@ -2680,7 +2681,7 @@
+     }
+ }
+
+-static int vp_upload_tex_slot(u32 off, u32 w, u32 h, u32 fmt, int cube, u32 mips)
++static int vp_upload_tex_slot(u32 off, u32 w, u32 h, u32 fmt, int cube, u32 mips, u32 source_pitch)
+ {
+     /* TEX_BUDGET=<n>: cap texture uploads per frame. Off by default -- it was
+      * tried against the TDR and does not help, because PERF shows the upload
+@@ -2705,10 +2706,10 @@
+      * re-deriving any of it. Only the DXGI mapping below is ours. */
+     rsx_tex_layout tl;
+     rsx_tex_level levels[RSX_MAX_TEXTURE_LEVELS];
+-    u32 level_count = rsx_texture_mip_chain(fmt, w, h, mips, 0, levels);
++    u32 level_count = rsx_texture_mip_chain(fmt, w, h, mips, source_pitch, levels);
+     if (!level_count) return -1;
+     tl = levels[0].tl;
+-    u32 face_stride = cube ? rsx_texture_cube_face_stride(fmt, w, h, mips, 0)
++    u32 face_stride = cube ? rsx_texture_cube_face_stride(fmt, w, h, mips, source_pitch)
+         : levels[level_count - 1].offset + levels[level_count - 1].tl.face_bytes;
+     u32 source_bytes = face_stride * (cube ? 6u : 1u);
+     u32 basef = fmt & 0x9F;              /* still needed for the SRV remap */
+@@ -2746,7 +2747,7 @@
+     for (int i = 0; i < VP_TEX_SLOTS; i++) {
+         VPTexSlot* c = &s_d3d.vp_tex[i];
+         if (c->res && c->key == key_off && c->w == w && c->h == h && c->fmt == fmt
+-            && c->cube == cube && c->mips == level_count) {
++            && c->cube == cube && c->mips == level_count && c->pitch == source_pitch) {
+             if (c->used) return i;                /* already bound this frame */
+             { static int nocache = -1;            /* TEX_NOCACHE=1: always re-upload */
+               if (nocache < 0) { const char* e = getenv("TEX_NOCACHE");
+@@ -3242,7 +3243,7 @@
+     /* Only the per-draw SRV window owns bindings. Legacy heap[1+slot]
+      * cache descriptors overlapped DRAW_SRV_BASE once slot reached 31. */
+     t->off = off; t->key = key_off; t->w = w; t->h = h; t->fmt = fmt;
+-    t->cube = cube; t->mips = level_count; t->used = 1;
++    t->cube = cube; t->mips = level_count; t->pitch = source_pitch; t->used = 1;
+     t->csum = TEX_CSUM(vm_base + off, source_bytes);
+     #undef TEX_CSUM
+     return slot;
+@@ -4645,7 +4646,7 @@
+                     int _cube = dr->tex[_u].cube && (dr_cube_mask(dr) & (1u << _u));
+                     int ts = vp_upload_tex_slot(dr->tex[_u].off, dr->tex[_u].w,
+                                                 dr->tex[_u].h, dr->tex[_u].fmt,
+-                                                _cube, dr->tex[_u].mips);
++                                                _cube, dr->tex[_u].mips, dr->tex[_u].pitch);
+                     if (perf_on()) { s_perf_tex += perf_now() - _tt; s_perf_ntex++;
+                         s_perf_texbytes += (u64)dr->tex[_u].w * dr->tex[_u].h * 4u; }
+                     /* Both forms of the offset are in hand here; the filters
+@@ -6766,6 +6767,7 @@
+                     dr->tex[_u].w   = s_d3d.cur_texs[_u].w;
+                     dr->tex[_u].h   = s_d3d.cur_texs[_u].h;
+                     dr->tex[_u].fmt = s_d3d.cur_texs[_u].fmt;
++                    dr->tex[_u].pitch = s_d3d.cur_texs[_u].pitch;
+                     dr->tex[_u].ctrl1 = s_d3d.cur_texs[_u].ctrl1;
+                     dr->tex[_u].cube  = s_d3d.cur_texs[_u].cube;
+                     dr->tex[_u].mips  = s_d3d.cur_texs[_u].mips;
+@@ -6891,6 +6893,7 @@
+                 dr->tex[_u].w   = s_d3d.cur_texs[_u].w;
+                 dr->tex[_u].h   = s_d3d.cur_texs[_u].h;
+                 dr->tex[_u].fmt = s_d3d.cur_texs[_u].fmt;
++                dr->tex[_u].pitch = s_d3d.cur_texs[_u].pitch;
+                     dr->tex[_u].ctrl1 = s_d3d.cur_texs[_u].ctrl1;
+                     dr->tex[_u].cube  = s_d3d.cur_texs[_u].cube;
+                     dr->tex[_u].mips  = s_d3d.cur_texs[_u].mips;
+@@ -7046,6 +7049,7 @@
+             dr->tex[_u].w   = s_d3d.cur_texs[_u].w;
+             dr->tex[_u].h   = s_d3d.cur_texs[_u].h;
+             dr->tex[_u].fmt = s_d3d.cur_texs[_u].fmt;
++            dr->tex[_u].pitch = s_d3d.cur_texs[_u].pitch;
+                     dr->tex[_u].ctrl1 = s_d3d.cur_texs[_u].ctrl1;
+                     dr->tex[_u].cube  = s_d3d.cur_texs[_u].cube;
+                     dr->tex[_u].mips  = s_d3d.cur_texs[_u].mips;
+@@ -7223,9 +7227,20 @@
+         s_d3d.cur_texs[unit].raw = offset;
+         s_d3d.cur_texs[unit].w = width; s_d3d.cur_texs[unit].h = height;
+         s_d3d.cur_texs[unit].fmt = format;   /* full byte: LN(0x20)/UN(0x40) kept */
++        s_d3d.cur_texs[unit].pitch = tex->control3 & 0xFFFFFu;
+         s_d3d.cur_texs[unit].ctrl1 = tex->control1;
+         s_d3d.cur_texs[unit].cube  = (tex->format & 4) ? 1 : 0;
+         s_d3d.cur_texs[unit].mips  = (tex->format >> 16) & 0xFFFFu;
++        if (getenv("TEXFMTDBG") && base_fmt == 0x88 && width < 512) {
++            static u32 seen_bc[32]; static int nb;
++            int known = 0;
++            for (int i = 0; i < nb; ++i) if (seen_bc[i] == offset) known = 1;
++            if (!known && nb < 32) {
++                seen_bc[nb++] = offset;
++                fprintf(stderr, "[BC3LAYOUT] off=%08X resolved=%08X fmt=%02X %ux%u control3=%08X\n",
++                    offset, s_d3d.cur_texs[unit].off, format, width, height, tex->control3);
++            }
++        }
+         if (getenv("TEXFMTDBG")) { static u32 seen[64]; static int ns=0;
+             u32 k = (unit<<24) | (((tex->format>>8) & 0xFFu)<<16) | (width & 0xFFFFu);
+             int f=0; for (int i=0;i<ns;i++) if (seen[i]==k) f=1;
+--- a/libs/video/rsx_texture_layout.c
++++ b/libs/video/rsx_texture_layout.c
+@@ -104,6 +104,8 @@
+         out->rows      = (h + 3u) / 4u;
+         out->dst_bytes_per_texel = 0;
+         out->dst_row_bytes       = out->row_bytes;
++        if ((rsx_fmt & 0x20u) && pitch > out->row_bytes)
++            out->row_bytes = pitch;
+     } else {
+         /* Swizzled unless the LN bit is set. The hardware requires power-of-two
+          * dimensions to swizzle, so a NPOT image is linear regardless. */
+@@ -135,9 +137,9 @@
+     while (n < levels) {
+         rsx_tex_level* lv = &out[n];
+         lv->w = mw; lv->h = mh; lv->offset = off;
+-        /* Only level 0 has a pitch register; the rest are packed at their own
+-         * width, as the live draw engine's texture_source_span walks them. */
+-        rsx_texture_layout_pitched(rsx_fmt, mw, mh, n == 0 ? pitch : 0, &lv->tl);
++        /* Linear levels share CONTROL3's row pitch. Packed (LN clear) levels
++         * continue to use their own width. */
++        rsx_texture_layout_pitched(rsx_fmt, mw, mh, pitch, &lv->tl);
+         off += lv->tl.face_bytes;
+         n++;
+         if (mw == 1 && mh == 1) break;   /* no level below 1x1 */
+@@ -281,7 +283,7 @@
+          * rather than converted -- only the row stride changes. */
+         for (u32 y = 0; y < tl->rows; y++)
+             memcpy(d + (size_t)y * dst_pitch,
+-                   src + (size_t)y * tl->row_bytes, tl->row_bytes);
++                   src + (size_t)y * tl->row_bytes, tl->dst_row_bytes);
+         return;
+     }
+
+--- a/libs/video/rsx_texture_layout.h
++++ b/libs/video/rsx_texture_layout.h
+@@ -85,8 +85,8 @@
+ /* As rsx_texture_layout(), with SET_TEXTURE_CONTROL3's row pitch.
+  *
+  * A LINEAR texture whose pitch register is set stores its rows that many bytes
+- * apart rather than w * bytes_per_texel; swizzled and compressed images have no
+- * pitch and ignore it, as the live draw engine does. A pitch narrower than one
++ * apart rather than w * bytes_per_texel. Linear compressed images apply it to
++ * block rows; packed/swizzled images ignore it. A pitch narrower than one
+  * texel row is ignored too: it cannot describe the image, and honouring it
+  * would make face_bytes too small to cover the bytes the decode then reads. */
+ void rsx_texture_layout_pitched(u32 rsx_fmt, u32 w, u32 h, u32 pitch,

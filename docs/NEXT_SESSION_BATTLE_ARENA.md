@@ -1,3 +1,8 @@
+> **ACTUALIZACIÓN 31/10/2026:** gameplay Battle Arena, campo y cartas corregidos.
+> Cierre y validación: [BATTLE_ARENA_FIXED.md](BATTLE_ARENA_FIXED.md).
+> Continuar con [NEXT_SESSION_EFFECTS_SHADERS.md](NEXT_SESSION_EFFECTS_SHADERS.md).
+> El contenido siguiente se conserva como informe histórico.
+
 # Próxima sesión — Battle Arena (30/10/2026)
 
 > **ACTUALIZACIÓN (cierre 30/10):** el informe vigente del trabajo de hoy está en

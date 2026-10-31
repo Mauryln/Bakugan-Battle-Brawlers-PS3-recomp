@@ -1,3 +1,8 @@
+> **ACTUALIZACIÓN 31/10/2026:** gameplay Battle Arena, campo y cartas corregidos.
+> Cierre y validación: [BATTLE_ARENA_FIXED.md](BATTLE_ARENA_FIXED.md).
+> Continuar con [NEXT_SESSION_EFFECTS_SHADERS.md](NEXT_SESSION_EFFECTS_SHADERS.md).
+> El contenido siguiente se conserva como informe histórico.
+
 > **Estado vigente al 30/10/2026:** el informe de cierre de hoy (FIFO desync, cartas BC3, transparencias, sombras) está en [NEXT_SESSION_FIFO.md](NEXT_SESSION_FIFO.md). Continuar por ahí. Gameplay, HUD y Sixaxis corregidos; queda el cuelgue del FIFO y efectos visuales.
 
 Lo que quedó arreglado (commiteado)

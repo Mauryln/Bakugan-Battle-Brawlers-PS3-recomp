@@ -1,0 +1,38 @@
+--- a/libs/video/cellGcmSys.c
++++ b/libs/video/cellGcmSys.c
+@@ -2858,30 +2858,11 @@
+     if (cur + 8 + GCM_RECYCLE_SLACK > end || gcm_ea2io(cur) == 0xFFFFFFFFu) return 0;
+     vm_write32(cur, GCM_FLIP_MARKER | bufferId);
+     s_fifo_flips_queued++;
+-    /* Wrap here, on the guest thread, once the ring is nearly used -- what the
+-     * SDK's buffer-full callback does. Otherwise the drain thread recycles it
+-     * (see "recycled the title's own ring"), rewriting ctx->current and put
+-     * while the guest may be between advancing current and flushing: put
+-     * then lands on begin, the guest's closing fence is never executed, and
+-     * it spins on `ref` for good. Safe when the walker has left the head of
+-     * the ring well behind, which is the region the guest writes next.
+-     *
+-     * Only for a ring the runtime owns, i.e. one whose buffer-full callback is
+-     * still the runtime's (cellGcmSetupContext installs it). A title with its
+-     * own callback manages its own buffers, and its context need not be a ring
+-     * at all: Killzone 3 flips on a 0x30000-byte draw context whose `end`
+-     * moves down as it allocates from the top, so it always looks nearly full.
+-     * Rewinding it to `begin` in mid-frame cut the frame short, dropping the
+-     * fence release in its tail, and the title then waited for it forever. */
+-    const u32 begin = vm_read32(ctx), io_begin = gcm_ea2io(begin);
+-    const u32 cb_opd = vm_read32(ctx + 0xC);
+-    const int runtime_ring = cb_opd && vm_read32(cb_opd) == GCM_FIFO_CALLBACK_SENTINEL_EA;
+-    if (runtime_ring && end - (cur + 4) < GCM_FLIP_WRAP_BYTES && io_begin != 0xFFFFFFFFu &&
+-        s_fifo_getoff >= io_begin + GCM_RECYCLE_MARGIN) {
+-        vm_write32(cur + 4, 0x20000000u | io_begin);   /* JUMP -> begin */
+-        vm_write32(ctx + 8, begin);
+-        return 1;
+-    }
++    /* Keep the producer at the tail. Only the buffer-full callback may
++     * wrap it, after submitting the tail and waiting for its jump to execute.
++     * A consumed head margin is not enough: the next frame can overtake the
++     * walker and overwrite unread headers. Wrapping here also executes the
++     * flip before gcm_flip_request has armed its completion sequence. */
+     vm_write32(ctx + 8, cur + 4);
+     return 1;
+ }

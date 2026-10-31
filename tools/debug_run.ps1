@@ -13,7 +13,8 @@
 #>
 param(
     [string]$Tag = "lighting",
-    [switch]$Capture   # activa RSX_CAP_TRIGGER on-demand (readback, más lento)
+    [switch]$Capture,   # activa RSX_CAP_TRIGGER on-demand (readback, más lento)
+    [int]$FragmentPrograms = 200
 )
 
 $root = Split-Path -Parent $PSScriptRoot
@@ -36,7 +37,7 @@ $env:PERF         = "1"    # timing por frame
 $env:BLENDDBG     = "1"    # modos de blend vistos (alpha de cartas)
 $env:TEX_BINDDBG  = "1"    # SRVs nulos (texturas que no se subieron)
 $env:FP_LIST      = "1"    # inventario de fragment programs compilados
-$env:FP_DUMP      = "30"   # HLSL de los primeros 30 FPs -> fp_dump.hlsl (cwd)
+$env:FP_DUMP      = "$FragmentPrograms" # incluye shaders 3D tras las variantes del HUD
 $env:RSX_DRAW_DUMP = $diag # vs_<idx>.* del primer draw de cada VP (geometría)
 
 if ($Capture) {
