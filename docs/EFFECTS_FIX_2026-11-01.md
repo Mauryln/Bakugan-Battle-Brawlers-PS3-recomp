@@ -38,8 +38,11 @@ presentación única por flip. Los 39 parches aplican sobre HEAD limpio del
 toolkit. Solo quedan fuera los diagnósticos históricos VTX_COL y conteo de
 draws indexados.
 
-Corrida actual: `diagnostics/arena/aquos-full-frames-20261101`. Todavía falta
-confirmar visualmente que los destellos desaparecieron con esta última build.
+Corrida actual: `diagnostics/arena/aquos-full-frames-20261101`. En los frames
+118–141 (24 capturas del turno), no hay backbuffers negros/blancos ni pases
+de reflejo duplicados; se conserva la composición. Los fades de transición
+anteriores a ese tramo no cuentan como destellos. Falta confirmar visualmente
+varios turnos sin parpadeos con esta última build.
 Pyrus, Haos, Subterra y Ventus no están validados en esta sesión; no se dan
 por cerrados todos los efectos de arenas. Sigue pendiente el rendimiento
 sostenido y la investigación de menús por inactividad.
