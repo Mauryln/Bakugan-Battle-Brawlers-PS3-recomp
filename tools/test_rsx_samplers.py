@@ -1,5 +1,6 @@
 """Render scrolling UVs using the backend's actual sampler translation."""
 from pathlib import Path
+import re
 import subprocess
 import sys
 
@@ -10,6 +11,7 @@ from msvc_env import environ
 out = ROOT / "diagnostics/arena/samplers"
 out.mkdir(parents=True, exist_ok=True)
 source = (ROOT / "ps3recomp-src/libs/video/rsx_d3d12_backend.c").read_text(encoding="utf-8")
+(out / "draw_capacity.inc").write_text(re.search(r"#define MAX_DRAWS\s+\d+", source)[0]+"\n")
 parts = []
 if "static D3D12_SAMPLER_DESC rsx_sampler_desc(" in source:
     for name in ("static D3D12_TEXTURE_ADDRESS_MODE rsx_sampler_wrap(",

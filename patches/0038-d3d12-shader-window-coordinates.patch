@@ -1,0 +1,101 @@
+--- a/libs/video/rsx_commands.h
++++ b/libs/video/rsx_commands.h
+@@ -145,6 +145,7 @@
+
+ /* Shader programs */
+ #define NV4097_SET_SHADER_PROGRAM               0x000008E4
++#define NV4097_SET_SHADER_WINDOW                0x00001D88
+ #define NV4097_SET_SHADER_CONTROL               0x00001D60
+ /* shader_control bit: fragment colour exports come from r0/r2/r3/r4 (32-bit)
+  * instead of h0/h4/h6/h8 (half). */
+@@ -345,6 +346,7 @@
+     float viewport_offset[4];
+     float viewport_scale[4];
+     u32 shader_program;       /* fragment program address (offset | location in bits [0:1]) */
++    u32 shader_window;        /* height[11:0], origin[15:12], pixel center[19:16] */
+     u32 shader_control;       /* SET_SHADER_CONTROL (0x40 = 32-bit colour exports) */
+     u32 fragment_program_addr;
+     u32 vertex_attrib_output_mask;
+--- a/libs/video/rsx_commands.c
++++ b/libs/video/rsx_commands.c
+@@ -882,6 +882,10 @@
+         return 0;
+     }
+
++    if (method == NV4097_SET_SHADER_WINDOW) {
++        state->shader_window = data;
++        return 0;
++    }
+     if (method == NV4097_SET_SHADER_CONTROL) {
+         { static int _sc=0; if (PS3_LOG_FIRST(_sc, 12) && getenv("RTT_DUMP"))
+             fprintf(stderr, "[RSXSC] shader_control=0x%X\n", data); }
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -140,6 +140,7 @@
+      * (wave's debug tiles) position quads with this, not with constants --
+      * forcing full-target viewports drew every tile window-sized. */
+     u32 vp_x, vp_y, vp_w, vp_h;
++    u32 shader_window;
+     /* Ordered clear op (offscreen surfaces only; display clears stay the
+      * frame-start backbuffer clear). is_clear records also set is_vp so the
+      * legacy replay pass skips them. */
+@@ -1684,6 +1685,7 @@
+                 fprintf(mf, "      depth=%X bias=%d/%g cull=%X actl=%X texrt=%d,%d,%d,%d\n",
+                     r->depth_key, r->depth_bias, r->slope_bias, r->cull, r->alpha_ctl,
+                     r->tex_rt[0],r->tex_rt[1],r->tex_rt[2],r->tex_rt[3]);
++                fprintf(mf, "      shader_window=%08X\n", r->shader_window);
+                 for (int u = 0; u < RSX_MAX_TEXTURES; u++)
+                     if (r->tex[u].set)
+                         fprintf(mf, "      t%d off=0x%08X fmt=0x%02X (%s%s) %ux%u remap=0x%04X address=%08X filter=%08X control=%08X border=%08X\n", u,
+@@ -2239,6 +2241,17 @@
+     return result;
+ }
+
++/* D3D raster coordinates use top origin and half-pixel centers. RSX WPOS
++ * follows SET_SHADER_WINDOW; keep this dynamic in unused b1 texscale lanes. */
++static void rsx_window_transform(u32 window, float* transform)
++{
++    int bottom = ((window >> 12) & 15u) == 1u;
++    float center = ((window >> 16) & 15u) == 1u ? -0.5f : 0.0f;
++    transform[0] = bottom ? -1.0f : 1.0f;
++    transform[1] = (bottom ? (float)(window & 0xFFFu) : 0.0f) + center;
++    transform[2] = center;
++}
++
+ static int fp_decompile_for_draw(const u8* ucode, u32 max_bytes, u32 ctrl,
+                                  u32 cube_mask, char* hlsl, u32 out_size)
+ {
+@@ -2256,6 +2269,13 @@
+         "    float4 rsx_texscale[4];\n"
+         "    float4 rsx_alphatest;\n"
+         "    float4 fp_constants[64];\n};\n");
++    /* WPOS source operands are parenthesized before their swizzle. Match only
++     * those reads, leaving _rsx_inv_w(input.position) in perspective-correct
++     * texcoord operands alone. FXC supplies clip W; RSX WPOS requires 1/W. */
++    hlsl_replace_all(hlsl, out_size, "(input.position).",
++        "(float4(input.position.x + rsx_texscale[1].z, "
++        "input.position.y * rsx_texscale[0].z + rsx_texscale[0].w, "
++        "input.position.z, 1.0 / input.position.w)).");
+     return n;
+ }
+
+@@ -3445,6 +3465,7 @@
+     const rsx_state* st = s_d3d.current_rsx_state;
+     if (!s_d3d.vp_cb_mapped || !st || slot >= MAX_DRAWS) return;
+     if (dr) {
++        dr->shader_window = st->shader_window;
+         for (u32 u = 0; u < RSX_MAX_TEXTURES; ++u) {
+             dr->tex[u].sampler_address = st->textures[u].address;
+             dr->tex[u].sampler_filter = st->textures[u].filter;
+@@ -3474,6 +3495,11 @@
+             }
+             ts[_u*4+0] = sx; ts[_u*4+1] = sy; ts[_u*4+2] = 0.0f; ts[_u*4+3] = 0.0f;
+         }
++        float window_transform[3];
++        rsx_window_transform(st->shader_window, window_transform);
++        ts[2] = window_transform[0];
++        ts[3] = window_transform[1];
++        ts[6] = window_transform[2];
+         /* rsx_alphatest (b1[4]): x=enable, y=ref/255, z=func-0x200. D3D12
+          * has no fixed alpha test; guest FPs discard on it dynamically
+          * (wave's colour wheel is a disc via alpha test -- without it the

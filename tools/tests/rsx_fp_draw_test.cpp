@@ -32,10 +32,10 @@ int main()
     put_word(prog + 4, 2u | swizzle | execute);
     for (unsigned i = 0; i < 4; ++i) put_float(prog + 16 + i * 4, 0.25f * i);
     static char first[RSX_FP_HLSL_BUFFER_SIZE], second[RSX_FP_HLSL_BUFFER_SIZE];
-    require(fp_decompile_for_draw(prog, sizeof(prog), 0x40, 0, first, sizeof(first)) > 0,
+    require(fp_decompile_for_draw(prog, sizeof(prog), 0x40, 0, first, sizeof(first), nullptr) > 0,
             "first constant program translates");
     put_float(prog + 16, 0.875f);
-    require(fp_decompile_for_draw(prog, sizeof(prog), 0x40, 0, second, sizeof(second)) > 0,
+    require(fp_decompile_for_draw(prog, sizeof(prog), 0x40, 0, second, sizeof(second), nullptr) > 0,
             "updated constant program translates");
     require(!strcmp(first, second), "changing inline constants must preserve compiled HLSL");
     require(strstr(first, "fp_constants[0]"), "shader reads per-draw constant bank");
@@ -63,11 +63,22 @@ int main()
     put_word(tex + 4, 1u | swizzle | execute);
     require(rsx_fp_texture_units(tex, sizeof(tex)) == (1u << 3), "only the referenced texture unit is active");
     require(rsx_fp_texture_units(prog, sizeof(prog)) == 0, "constant-only shaders consume no texture slots");
-    require(fp_decompile_for_draw(tex, sizeof(tex), 0x40, 1u << 3, first, sizeof(first)) > 0,
+    require(fp_decompile_for_draw(tex, sizeof(tex), 0x40, 1u << 3, first, sizeof(first), nullptr) > 0,
             "cube program translates");
     require(strstr(first, "TextureCube rsx_tex3"), "unit3 is declared as a cube");
     require(strstr(first, "rsx_tex3.Sample(rsx_samp[3], ((input.tc0).xyzw).xyz)"),
             "cube sampling uses three direction components");
+    rsx_fp_shadow_desc shadow[16] = {};
+    shadow[3] = {1, 4, 1, 0};
+    require(fp_decompile_for_draw(tex, sizeof(tex), 0x40, 0, first, sizeof(first), shadow) > 0,
+            "a live depth producer enables comparison translation");
+    require(strstr(first, "_rsx_shadow3(") && strstr(first, "depth > reference"),
+            "depth comparison uses the guest comparison function");
+    shader = nullptr; errors = nullptr;
+    hr = D3DCompile(first, strlen(first), nullptr, nullptr, nullptr, "main", "ps_5_0", 0, 0, &shader, &errors);
+    if (FAILED(hr) && errors) fprintf(stderr, "%s\n", (const char*)errors->GetBufferPointer());
+    require(SUCCEEDED(hr), "native-depth comparison shader compiles with buffered constants");
+    shader->Release(); if (errors) errors->Release();
     char mrt[2048] =
         "struct PSOutput { float4 t0:SV_TARGET0; float4 t1:SV_TARGET1; };\n"
         "PSOutput main() { PSOutput result; result.t0=float4(0.2,0.4,0.6,0.3); result.t1=(float4)0.7;\n"
@@ -89,7 +100,7 @@ int main()
         put_word(instruction + 4, 2u | swizzle | execute);
         for (unsigned c = 0; c < 4; ++c) put_float(instruction + 16 + c * 4, 1.0f);
     }
-    require(fp_decompile_for_draw(oversized, sizeof(oversized), 0x40, 0, first, sizeof(first)) < 0,
+    require(fp_decompile_for_draw(oversized, sizeof(oversized), 0x40, 0, first, sizeof(first), nullptr) < 0,
             "reject shaders exceeding the bound 64-slot constant bank");
     puts("PASS: dynamic fragment constants retain source identity, b1 layout, and cube sampling");
 }

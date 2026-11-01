@@ -7,10 +7,20 @@ typedef uint32_t u32;
 typedef uint8_t u8;
 typedef int DXGI_FORMAT;
 #define DXGI_FORMAT_R8G8B8A8_UNORM 28
+#define DXGI_FORMAT_R24_UNORM_X8_TYPELESS 46
 #define D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING 5768
 #define PS3_LOG_FIRST(counter, limit) ((counter)++ < (limit))
-struct Texture { u32 set, w, h, raw, off; };
-struct Draw { Texture tex[1]; int tex_rt[1]; u32 fp_addr; u32 sampled_units = 1; };
+struct rsx_fp_shadow_desc { u8 enabled, func, linear, unnormalized; };
+struct Texture { u32 set, w, h, raw, off, fmt, cube, mips, sampler_filter, sampler_address, sampler_control; };
+struct Draw {
+    Texture tex[1]; int tex_rt[1]; u32 fp_addr; u32 sampled_units = 1;
+    int tex_depth[1], zeta_slot = -1; u32 depth_key = 0; rsx_fp_shadow_desc shadow[1];
+};
+static int native_depth;
+static struct { struct { void* resource; } surfaces[1]; } s_depth_pool = {{{&native_depth}}};
+static int depth_pool_find(u32 raw, u32, u32) { return raw == 0x0F100000 ? 0 : -1; }
+static void rsx_fp_shadow_desc_from_texture(rsx_fp_shadow_desc* d, u32, u32, u32, u32, u32, u32, u32)
+{ d->enabled = 1; }
 static int rt_resource, screen_resource, sub_resource;
 static struct { u32 width, height; struct { void* res; u32 dxgi; } off_rt[1]; }
     s_d3d = {1280, 720, {{&rt_resource, 28}}};
@@ -57,5 +67,13 @@ int main()
     select(&draw);
     require(chosen == nullptr && draw.tex_rt[0] == -1,
             "unused texture bindings do not consume cache resources or feedback targets");
+    draw.sampled_units = 1; draw.tex[0].raw = 0x0F100000; draw.tex[0].fmt = 0x90;
+    select(&draw);
+    require(chosen == &native_depth && draw.tex_depth[0] == 0 && draw.shadow[0].enabled == 1,
+            "depth textures sample their native producer with comparison metadata");
+    draw.zeta_slot = 0; draw.depth_key = 3;
+    select(&draw);
+    require(chosen != &native_depth && draw.tex_depth[0] == -1,
+            "a depth-writing draw cannot simultaneously sample its own native depth surface");
     puts("PASS: explicit RT and resolve producers precede heuristic texture sources");
 }

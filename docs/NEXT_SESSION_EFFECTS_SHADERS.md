@@ -1,3 +1,9 @@
+> Actualización posterior 01/11/2026: reflejos y sombras oscuras de Aquos
+> confirmados por el usuario (`0038`/`0039`). `0040` corrige fronteras de
+> cuadros y capacidad tras capturar un destello negro. Ver
+> [EFFECTS_FIX_2026-11-01.md](EFFECTS_FIX_2026-11-01.md).
+> La comprobación final de parpadeos y las otras arenas siguen pendientes.
+
 > Cierre 01/11/2026: se publica en main el avance de samplers (`0036`) y
 > flujo CPU de vértices (`0037`). El experimento de profundidad por superficie
 > se retiró por sombras blancas/parpadeos y pantalla blanca durante captura.

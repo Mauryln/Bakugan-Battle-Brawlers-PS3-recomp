@@ -6,7 +6,8 @@
 #include <cstdlib>
 #include <cstring>
 using u32 = uint32_t;
-constexpr u32 MAX_DRAWS = 2048, RSX_MAX_TEXTURES = 16;
+#include "draw_capacity.inc"
+constexpr u32 RSX_MAX_TEXTURES = 16, UNIQUE_TABLES = 2048;
 struct D3D12DrawRecord {
     int is_vp, is_clear;
     u32 sampled_units, sampler_table;
@@ -28,16 +29,18 @@ int main()
 {
     require(SUCCEEDED(D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0,
         IID_ID3D12Device, (void**)&s_d3d.device)), "create D3D12 device");
+    require(MAX_DRAWS >= 4096, "arena draw capacity must retain the final composition beyond 2048 draws");
     s_d3d.draw_count = MAX_DRAWS;
     for (u32 i = 0; i < MAX_DRAWS; ++i) {
         auto& d = s_d3d.draws[i];
         d.is_vp = 1; d.sampled_units = 1u << 15;
-        d.tex[15] = {1, 0x40404, 0x02022000, 0x80000000, i};
+        d.tex[15] = {1, 0x40404, 0x02022000, 0x80000000, i % UNIQUE_TABLES};
     }
     require(rsx_prepare_samplers() != 0, "prepare a worst-case frame of unique samplers");
     for (u32 i = 0; i < MAX_DRAWS; ++i) {
         require(s_d3d.draws[i].sampler_table == i, "rollover retains every draw's descriptor identity");
-        u32 page = i / SAMPLER_TABLES_PER_PAGE, slot = i % SAMPLER_TABLES_PER_PAGE;
+        u32 table = i;
+        u32 page = table / SAMPLER_TABLES_PER_PAGE, slot = table % SAMPLER_TABLES_PER_PAGE;
         require(s_sampler_pages[page].count == SAMPLER_TABLES_PER_PAGE, "all full pages are bounded");
         auto& desc = s_sampler_pages[page].tables[slot][15];
         require(desc.AddressU == D3D12_TEXTURE_ADDRESS_MODE_BORDER &&
@@ -60,5 +63,5 @@ int main()
     for (u32 p = 0; p < SAMPLER_MAX_PAGES; ++p)
         if (s_sampler_pages[p].heap) s_sampler_pages[p].heap->lpVtbl->Release(s_sampler_pages[p].heap);
     s_d3d.device->lpVtbl->Release(s_d3d.device);
-    puts("PASS: 2048 unique draws, heap rollover, unit 15, immutable tables and deduplication");
+    puts("PASS: full-capacity frames, 2048 unique tables, heap rollover, unit 15 and immutable descriptors");
 }

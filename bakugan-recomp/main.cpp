@@ -272,6 +272,9 @@ static DWORD WINAPI frame_clock(LPVOID)
              * present freely, so the window is not blank during boot. */
             unsigned fc = cellGcm_flip_request_count();
             if (fc != last_flip) {
+                /* This drain reached the marker. Consume its pending flag here
+                 * too, or the next pre-drain check presents an empty batch. */
+                cellGcm_take_flip_pending();
                 present_guest_frame();
                 last_flip = fc;
             } else if (fc == 0) {
@@ -552,6 +555,7 @@ int main(int argc, char** argv)
      * not a reliable frame boundary: arena draw counts must not make later
      * menu frames accumulate. Preserve the game's own 30 Hz pacing. */
     if (!getenv("RSX_ACCUM_FRAME")) _putenv_s("RSX_ACCUM_FRAME", "1");
+    if (!getenv("GCM_FULL_FRAMES")) _putenv_s("GCM_FULL_FRAMES", "1");
     /* 1 ms timer resolution. The default granularity is about 15.6 ms, which
      * inflates every shorter wait the title makes and throttles the whole
      * thing. POSIX timers are already fine-grained. */

@@ -1,5 +1,10 @@
 # Estado del port — Bakugan: Battle Brawlers (BLES00758)
 
+Actualización posterior 01/11: reflejos y sombras oscuras de Aquos confirmados
+por el usuario; corrección de parpadeos en prueba tras localizar mezcla de
+cuadros y límite de draws. Release y 23/23 pruebas correctas. Detalles y
+pendientes: [EFFECTS_FIX_2026-11-01.md](EFFECTS_FIX_2026-11-01.md).
+
 Actualización 01/11/2026: samplers por draw corrigen cascadas y lluvia de Aquos;
 flujo de vértices en RAM reduce la demora de entrada y el usuario confirma
 que imagen y audio comienzan juntos. Persisten reflejos distorsionados, sombras

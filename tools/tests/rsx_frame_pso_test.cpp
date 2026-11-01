@@ -26,6 +26,7 @@ struct D3D12DrawRecord {
     u32 fp_addr, rt_off, rt_fmt, blend_key, alpha_ctl, cmask, cull, depth_key;
     int vs_idx, fp_exp32, depth_bias;
     float slope_bias;
+    unsigned char shadow[64];
 };
 static bool opaque;
 static const char* option(const char*) { return opaque ? "1" : nullptr; }
@@ -38,7 +39,7 @@ static unsigned lookups;
 static bool expect_offscreen;
 static ID3D12PipelineState* vp_get_fp_pso(int vs, u32 fp, u32 blend, int nrt,
     DXGI_FORMAT fmt, int exp, u32 cmask, u32 cull, u32 cube, u32 depth,
-    u32 alpha, int bias, float slope)
+    u32 alpha, int bias, float slope, const void* shadow)
 {
     ++lookups;
     assert(vs == 4 && fp == 5 && nrt == 2 && exp == 1 && cmask == 7);
