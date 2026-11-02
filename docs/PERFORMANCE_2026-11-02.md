@@ -97,3 +97,118 @@ cambio en el bucle de vÃ©rtices es una apuesta.
   `draws`/`verts` en `[PERF]`.
 - Los dos intentos que rompieron geometrÃ­a estÃ¡n **revertidos**.
 - Docs sin commitear.
+
+## Caché de vértices: medido y descartado
+
+Hipótesis (del usuario): reutilizar los vértices ya decodificados en el mismo
+frame. Se midió primero si la geometría se repite.
+
+- Contador `dups` en `[PERF]`: **18 700 / 42 400 callbacks por intervalo**
+  = **44 %** de los draws indexados repiten `(shader, dma, primitiva, first,
+  count)` dentro del mismo frame. La hipótesis era correcta.
+- Implementado `VP_CACHE=1`: en un acierto se reutiliza el rango canónico ya
+  escrito, sin tocar el empaquetado posterior.
+  - Ganancia real: `prim=6` 547 ? 485 ms (-11 %), FPS 14,5 ? 15,5 (-4 %).
+    Los hits cubrían sólo el 31 % de las repeticiones porque la clave incluía
+    el shader de fragmentos, que no interviene en la decodificación.
+  - Quitando el shader de la clave: FPS 16-18, pero **el render se rompe**:
+    pelo del personaje mal y parpadeos en arena y personajes, reproducido en
+    3 arenas distintas.
+- **Causa**: el juego reescribe los buffers de vértice entre pasadas sin
+  cambiar nada observable desde el estado RSX. La clave no puede detectarlo.
+
+**Conclusión:** un caché de vértices necesita una **señal de escritura del
+guest** (dirty tracking por página o contador global de escrituras) que el
+runtime hoy no expone. Sin eso, reutilizar entre pasadas dibuja datos viejos.
+Descartado hasta que exista esa señal. El código queda apagado por defecto y
+documentado como intento fallido, no borrado, para no repetirlo.
+
+## Estado del rendimiento tras el día
+
+- Baseline: **14,5-15 FPS**, gráficos correctos.
+- Único cambio aplicado y validado: `rsx_attrib_base` / `rsx_fetch_attrib_base`
+  (resolver hoisteado, byte-idéntico, +0,5 %).
+- Lo que queda, por tamaño: decodificación de 488k vértices (**33 ms**, 79 ns c/u),
+  walker FIFO (~15 ms), subida a WC (8,4 ms), SRV (4 ms), PSO (2,5 ms).
+- **No hay ninguna optimización pendiente que sea segura y grande.** El único
+  margen real es el conversor vectorizado por atributo (79 ? ~25 ns, -10 ms) y
+  el walker; ambos son trabajo de varias sesiones.
+
+## Reparto final del fetch, con contadores nuevos (02/11, tarde)
+
+`[PERF detail]` ahora imprime `vfetch` (fetch completo del strip),
+`def` (copia de los 256 B de defaults) y `attr` (bucle de atributos),
+muestreados 1/32 y 1/64 para no pagar el cronometro.
+
+Valores por intervalo de 20 frames, escena de batalla quieta:
+
+| Contador | s/intervalo | ms/frame | Que es |
+|---|---|---|---|
+| `vfetch` | 0,551 | **27,6** | todo el fetch del strip |
+| `def` | 0,212 | **10,6** | copiar 256 B de defaults por vertice |
+| `attr` | 0,373 | **18,7** | 2,65 M lecturas de atributo (7 ns cada una) |
+
+`vfetch` = `def` + `attr`: el coste del camino de vertices esta
+completamente explicado, no queda nada oculto. 531k vertices/frame.
+
+## Tecnica: el instrumento era parte del problema
+
+Tres veces medi mal antes de acertar, y conviene recordarlo:
+
+1. `perf_now()` llamaba a `QueryPerformanceFrequency` en cada invocacion,
+   dos veces por draw. Se probo muestreando 1 de 32: el numero no cambio, asi
+   que no era el coste. Pero la duda habia que quitarla.
+2. Las canarias de tamano (`PS3_CANARY_COPY64`) usaron un `memcpy` de
+   tamano **variable**, que se convierte en llamada a libreria y tapa la
+   ganancia que se queria medir. Un recorte de 3,7 % no significaba "las copias
+   no cuestan", significaba "el instrumento se comio el ahorro".
+3. `rsx_fetch_attrib_inl` se puso en el header como `static inline`, pero
+   el backend seguia llamando a `rsx_fetch_attrib_base`, que es una **funcion
+   externa**: el cuerpo estaba inlineado y la llamada no. Solo al llamar al
+   inline directamente bajo `attr` de 0,435 a 0,373 s.
+
+## Cambios aplicados y validados
+
+| Cambio | Efecto | Verificacion |
+|---|---|---|
+| `rsx_attrib_base` hoisteado | resolver 1 vez por draw en vez de 2,4 M | VPCHK 0 desviaciones |
+| `pshufb` (SSSE3) para 4 floats BE | -14 % en `attr` | VPCHK 0 desviaciones |
+| llamada al inline desde el backend | `attr` 0,435 -> 0,373 s | VPCHK 0 desviaciones |
+
+Neto del dia: **14,5 -> 14,8 FPS**. Pequeno, pero los tres son byte-identicos.
+
+## Lo que queda, con numeros
+
+1. **`def`: -10,6 ms** eliminando la copia de defaults. Es el unico trozo
+   grande y seguro que queda. Receta completa en la seccion siguiente.
+2. **`attr`: 7 ns por atributo** esta cerca del suelo escalar; bajar mas exige
+   leer menos atributos, no leerlos mas rapido.
+3. **Walker FIFO (~15 ms) y subida a WC (8,4 ms)**: sin explorar.
+
+## Techo medido: 26,76 FPS
+
+La canaria `PS3_CANARY_NOVTX=1` (elimina TODO el trabajo de strip) da
+**26,76 FPS**. Es decir: **30 FPS es imposible optimizando solo los vertices**,
+por buenos que sean esos cambios. Hacen falta el walker y la subida a WC.
+
+## Receta para eliminar `def` (intentado 2 veces, roto 2 veces)
+
+Los dos fallos fueron por decidir la mascara en dos sitios distintos: el
+relleno usaba una y `vp_upload_compact_frame` recalculaba otra.
+
+1. `vp_prepare_vertex_fetch(state, mask)`: el plan guarda `mask` y la lista
+   de atributos de la mascara, no de los arrays habilitados.
+2. `vp_fetch_vertex`: sin `memcpy` de defaults; un
+   `rsx_fetch_attrib_inl` por atributo de la mascara. Si el array esta
+   deshabilitado esa funcion ya escribe el registro constante, asi que el
+   resultado es identico.
+3. La mascara se decide **una vez, en el drain**, y
+   `vp_upload_compact_frame` usa `dr->gpu_input_mask` en vez de recalcular.
+4. Si `!dr->fp_addr` en el drain -> `mask = 0xFFFF` (el pipeline base lee
+   16 slots). Si al final `s_frame_psos[i] == NULL` con mascara compacta,
+   saltar el draw y loguear `[VPMASK]`. Medido: no ocurre (el ratio
+   upload/canonical 0,2945 lo demuestra).
+5. Verificar con `VPCHK` **extendido a todo el stream**: contar emisiones y
+   comparar cada bloque, no 200 vertices por draw.
+
+Ganancia esperada: 67 -> 57 ms (~17,5 FPS).
