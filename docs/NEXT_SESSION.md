@@ -27,8 +27,12 @@ completas de Pyrus, Haos, Subterra y Ventus, tutorial e historia.
 | 0041 | PERF separa VS lookup, snapshots de constantes, fence y copia de vértices; diagnóstico desactivado sin PERF=1 |
 | 0042 | Stream GPU compacto por inputs del VP, fallback completo y capacidad GPU independiente |
 | 0043 | Dueño único del reciclaje FIFO: corrige las esperas de 2000 ms y los pantallazos de la última prueba |
+| 0044 | Opciones de diagnóstico leídas una vez, sin escanear el entorno por bind/quad |
+| 0045 | CFLTS sin escala vectorizado, con resultados exactos de referencia y fallback escalar |
+| 0046 | Staging CPU único: crecer copia solo el prefijo usado; upload GPU conserva sus dos paridades |
+| 0047 | Caché de decodificación de índices por paquete, sin conservar datos entre submissions |
 
-Hay 42 parches en la serie 0001–0043: 0023 sigue retirado. No editar lifts.
+Hay 46 parches en la serie 0001–0047: 0023 sigue retirado. No editar lifts.
 Los dos diagnósticos históricos locales VTX_COL y conteo de draws indexados
 no están en parches. Evitar resets generales dentro de ps3recomp-src.
 
@@ -41,13 +45,18 @@ vértices consumía ~11 ms/cuadro antes de 0042, ahora ~8–9 ms. Loading a 4–
 tiempo fuera del renderizador; después aparecen crecimientos de VBO hasta
 1536 MiB antes de compactar. El upload GPU quedó en 384 MiB; CPU y GPU ya crecen por separado.
 
-1. El stream GPU compacto ya está integrado (0042). Falta optimizar la
-   preparación CPU con evidencia; conservar fallback y los atributos canónicos.
+1. El stream GPU compacto está integrado (0042–0047), pero Aquos sigue en
+   ~13–14 FPS en la vista cargada. La caché 0047 evita ~41% de las conversiones
+   de triángulos indexados; preparar geometría todavía ocupa ~39 ms/cuadro.
+   El siguiente cambio de mayor alcance es leer/convertir atributos en GPU,
+   evitando expandirlos primero a 256 bytes en CPU. No darlo por integrado.
 2. Medir idéntica cámara antes/después; conservar solo mejoras demostradas.
 3. Perfilar loading PPU/SPU y esperas; no asumir que todo es asignación GPU.
 4. Validar estabilidad prolongada tras 0043, sin recurrencias de pantallazos.
 5. Probar efectos de las otras arenas y sesiones largas de menús tras 0043.
-6. Diagnosticar ruido de audio en batalla y tirones desde loading.
+6. Ruido de audio en batalla: el usuario confirmó que desaparece cuando mira
+   una zona liviana y suben los FPS. El mixer mantiene 187,5 bloques/s sin
+   descartes, pero el PCM tiene huecos. No tapar esto cambiando su reloj.
 
 ## Reproducir / medir
 

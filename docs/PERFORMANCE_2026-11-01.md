@@ -3,8 +3,8 @@
 Objetivo pendiente: 30 FPS sostenidos (33,3 ms/cuadro), manteniendo efectos,
 cuadros completos, audio y temporización. La build actual NO alcanza ese
 objetivo: el usuario reporta gameplay <=15 FPS y el perfil de Aquos ronda
-12 FPS en la vista detallada. No se optimizó ni se validó todavía el flujo
-compacto de vértices en el juego.
+12 FPS en la vista detallada. El flujo GPU compacto ya está integrado y
+probado en Aquos; la mejora global sigue siendo pequeña.
 
 ## Reproducción y mediciones
 
@@ -73,14 +73,12 @@ perfil de sistema; se usó un muestreador local del proceso.
 las pruebas `test_rsx_compact_stream.py` / `rsx_compact_stream_test.cpp`.
 La prueba aislada pasó para las 65536 máscaras de atributos y rasterizado
 WARP idéntico con ATTR3, ATTR8 y ATTR15 dispersos, usando el decompilador real.
-NO está integrada en el backend; no se afirma mejora de FPS. Se retiró de
-los tests activos y del código final para no publicar un trabajo incompleto.
+En el cierre anterior todavía no estaba integrado: se retiró de los tests
+activos para no publicar un trabajo incompleto. 0042 completa ese trabajo.
 
-Integración pendiente: metadatos por VP, layouts de entrada por máscara,
-stride/offset GPU por draw, crecimiento GPU independiente, conservación del
-fallback completo y capturas canónicas. La CPU puede conservar inicialmente
-los 16 slots para aislar el cambio de formato GPU. Después medir y decidir
-si conviene compactar también la preparación CPU.
+0042 incorpora metadatos por VP, layouts por máscara, stride/offset GPU por
+draw, capacidad GPU independiente, fallback completo y capturas canónicas.
+La CPU conserva los 16 slots. Optimizar su preparación sigue pendiente.
 
 ## Integración del prototipo compacto (0042)
 
@@ -140,3 +138,37 @@ auxiliar y el ejecutable. El hilo de render ocupa ~7,3 s de CPU/8 s; fetch de
 atributos ~17% de muestras. Las pilas adicionales señalan también consultas
 CRT de diagnóstico dentro de `d3d12_bind_texture`. El audio/SPU sigue ocupando
 un núcleo; esto no demuestra que pueda omitirse ni que sea el único límite.
+
+## Cambios posteriores y límite actual (0044–0047)
+
+- 0044 cachea VTX_DUMP, TEXFMTDBG y MOVIE_BIND. Las pilas mostraban consultas
+  CRT repetidas en d3d12_bind_texture; las opciones conservan semántica de presencia.
+- 0045 acelera CFLTS de escala cero sin cambiar saturación ni redondeo. La
+  prueba cubre 64 millones de comprobaciones por variante (SSE2, AVX2, escalar).
+  En la prueba aislada SSE2 pasa de ~106 a ~7 ms; AVX2, que usa la build,
+  pasa de ~14 a ~7 ms. Esto no equivale a duplicar la velocidad de todo el audio.
+- 0046 elimina la segunda mitad del staging CPU y, al crecer, copia solo
+  vp_vb_offset bytes. Una guard page prueba que no lee reserva sin usar.
+  La GPU conserva su recurso independiente con dos paridades y su fence.
+- 0047 reutiliza vértices de TRIANGLES indexados solo dentro del paquete.
+  Tags completos resuelven colisiones; ningún dato sobrevive a otro paquete.
+  VP_INDEX_CACHE=0 permite comparación con el camino anterior.
+
+Validación en Aquos: efectos correctos, menú destrabado y pantallazos ausentes
+en la prueba del usuario. El tirón de carga y el desfase inicial de audio de
+~1 s persisten. La vista cargada con 0047 ronda 13,2–13,9 FPS: no se logró 30.
+PERF registra ~2,07 M decodificaciones para ~3,50 M referencias indexadas
+por 20 cuadros (~41% evitadas), submit ~0,78 s y render_frame ~0,32 s. El coste
+de preparar geometría sigue siendo dominante. No comparar cámaras distintas
+como si fueran un benchmark exacto.
+
+El usuario identificó que el ruido en batalla desaparece al mirar una zona
+menos cargada y subir los FPS. La corrida aquos-hot-diagnostics-20261101
+registró PCM final y un snapshot de solo lectura del trace; mixer ~187,5
+bloques/s, cero descartes de salida, huecos en los datos mezclados. El trace
+actual no contiene spans SPU suficientes para adjudicarles una causa exacta.
+
+Una variante manual SIMD y otra con restrict del lector de atributos no
+mostraron ganancia clara: se descartaron. Evidencia local en vertex-decode.
+La siguiente prueba es vertex pulling de datos originales en GPU, con
+equivalencia de formatos/índices antes de habilitarlo en el juego.

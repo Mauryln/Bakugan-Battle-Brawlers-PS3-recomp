@@ -39,8 +39,8 @@ Actualizado el 01/11/2026. La guía única para retomar trabajo es
 
 Los informes BATTLE_ARENA_FIXED, EFFECTS_AQUOS y PERFORMANCE_2026-10-31 se
 conservan como evidencia histórica, no como lista vigente de pendientes.
-La serie tiene 42 parches (0001–0043, sin 0023). La validación del cierre
-incluye Release, las 24 pruebas activas de render/FIFO/pipeline y aplicación
+La serie tiene 46 parches (0001–0047, sin 0023). La validación incluye Release,
+25 pruebas de render/FIFO/pipeline y dos de audio/SPU, más aplicación
 sobre toolkit limpio. El stream compacto ya forma parte de la build; conserva RAM canónica para respaldo y capturas.
 
 ## Construir y ejecutar
