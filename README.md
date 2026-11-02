@@ -22,7 +22,8 @@
 > **2026-11-01 — Aquos reflections and shadows corrected.** Falling water, rain,
 > reflections and dark shadows are confirmed by the user. Performance is the
 > current priority: Aquos gameplay is around 12–15 FPS, loading still stutters,
-> and an occasional black flash remains. The original 30 FPS cap is preserved;
+> with audio crackle under load. FIFO recycling was fixed; the user's latest
+> Aquos test had no black flashes. The original 30 FPS cap is preserved;
 > sustained 30 FPS has not been achieved.
 > [Current status and next steps](docs/NEXT_SESSION.md) · [Measurements](docs/PERFORMANCE_2026-11-01.md).
 
@@ -56,7 +57,7 @@ Lifted code is compiled ahead of time; dynamic SPU jobs without a matching recom
 | **Gameplay** — tutorial and story require validation | ⚠️ |
 | **Sound effects** — ATRAC3 in `SOUND/*.PAST` | ❌ |
 
-**Battle Arena is playable with corrected field and card textures. Performance, an occasional flash, and other-arena validation remain.**
+**Battle Arena is playable with corrected field and card textures. Performance, audio under load, prolonged stability, and other-arena validation remain.**
 
 ## Help wanted
 

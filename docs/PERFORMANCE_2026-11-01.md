@@ -172,3 +172,48 @@ Una variante manual SIMD y otra con restrict del lector de atributos no
 mostraron ganancia clara: se descartaron. Evidencia local en vertex-decode.
 La siguiente prueba es vertex pulling de datos originales en GPU, con
 equivalencia de formatos/índices antes de habilitarlo en el juego.
+
+## Prueba GPU realizada y cierre de la sesión
+
+La rama `codex/gpu-vertex-pull` guarda el experimento completo hasta `8ce9793`:
+
+- 0049 define el contrato CPU/GPU y decodifica datos big endian en HLSL.
+- 0050 copia snapshots inmutables, combina rangos que se solapan, comprueba
+  capacidad y mappings, conserva constantes y genera el VP con SV_VertexID.
+- 0051 conecta solamente QUADS de DRAW_ARRAYS. Usa SRV de bytes en t16 y
+  constantes b2, sin expandir a float4 en CPU. Los demás casos conservan CPU.
+  Fallback de FP y capturas materializan datos desde el snapshot, sin volver
+  a leer memoria guest que pudo cambiar. Las reservas GPU conservan sus fences.
+
+`test_rsx_vertex_pull.py` compila el decompilador real y el shader, y compara
+en WARP formatos, constantes, tamaño 0/>4, stride cero, frecuencias, datos
+desalineados, índices y quads. Los formatos directos coinciden bit a bit;
+solo los formatos normalizados admiten tolerancia de 1e-6. Se comprueban
+límites de copia y fallbacks para mappings discontinuos/rangos no seguros.
+`test_rsx_pull_materialize.py` cambia memoria guest y constantes después del
+snapshot: la captura/fallback conserva los datos originales, incluso al
+crecer la RAM después del present. La suite experimental completa pasó 30/30.
+
+Corrida `diagnostics/arena/aquos-gpu-pull-20261101`: menú ~30 FPS, vista cargada
+~13,3–13,8 FPS. El usuario confirmó poca mejora. PERF pull contó ~32 draws,
+1116 vértices y 63712 bytes por cuadro: la ruta no cubre el grueso de la escena.
+No se mezcló en main ni se activa en la build principal al cierre.
+
+Main añade 0048 con `[PERF primitive]`: arrays/indexed, primitiva RSX,
+llamadas, vértices de entrada y milisegundos por intervalo de 20 cuadros.
+Esto permite localizar el siguiente cambio sin inferir la primitiva a partir
+de vértices ya expandidos. RSX 5=TRIANGLES, 6=STRIP, 7=FAN, 8=QUADS;
+0 agrupa valores desconocidos. Los tiempos forman parte de submit, no sumarlos
+otra vez al total. Main pasa 28 comprobaciones: 26 render/FIFO/pipeline y dos
+audio/SPU. El prototipo compacto de 0042 está integrado; 30 FPS sigue pendiente.
+
+Primera investigación mañana: medir los tipos dominantes con 0048, comprobar
+el coste de STRIP no indexados (aún expandidos en CPU), y decidir entre strips
+nativos o ampliar vertex pulling al camino que realmente domina. Conservar
+la mezcla de paquetes, carry/winding y reinicios; no romper contigüidad de
+TRIANGLES al cambiar su representación. Loading inicial se perfila aparte:
+el desfase de ~1 segundo en las presentaciones sigue sin resolver.
+
+Los comandos para alternar las dos ramas sin resetear el toolkit están en
+NEXT_SESSION.md. Las capturas, PCM, muestras, símbolos y variantes descartadas
+quedan en diagnostics/arena y siguen ignoradas por Git. No se distribuyen assets.

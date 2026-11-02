@@ -31,8 +31,9 @@ completas de Pyrus, Haos, Subterra y Ventus, tutorial e historia.
 | 0045 | CFLTS sin escala vectorizado, con resultados exactos de referencia y fallback escalar |
 | 0046 | Staging CPU único: crecer copia solo el prefijo usado; upload GPU conserva sus dos paridades |
 | 0047 | Caché de decodificación de índices por paquete, sin conservar datos entre submissions |
+| 0048 | PERF separa tiempo, llamadas y vértices de entrada por primitiva y por arrays/indexed |
 
-Hay 46 parches en la serie 0001–0047: 0023 sigue retirado. No editar lifts.
+Main tiene 47 parches en la serie 0001–0048: 0023 sigue retirado. No editar lifts.
 Los dos diagnósticos históricos locales VTX_COL y conteo de draws indexados
 no están en parches. Evitar resets generales dentro de ps3recomp-src.
 
@@ -48,8 +49,10 @@ tiempo fuera del renderizador; después aparecen crecimientos de VBO hasta
 1. El stream GPU compacto está integrado (0042–0047), pero Aquos sigue en
    ~13–14 FPS en la vista cargada. La caché 0047 evita ~41% de las conversiones
    de triángulos indexados; preparar geometría todavía ocupa ~39 ms/cuadro.
-   El siguiente cambio de mayor alcance es leer/convertir atributos en GPU,
-   evitando expandirlos primero a 256 bytes en CPU. No darlo por integrado.
+   Primero medir `[PERF primitive]` de 0048 en la vista cargada. El prototipo
+   GPU solo cubre QUADS no indexados y no aceleró esta vista: no ampliarlo sin
+   saber qué primitiva concentra el coste. Revisar también STRIP no indexados:
+   el camino nativo actual optimiza los indexados; el otro todavía expande.
 2. Medir idéntica cámara antes/después; conservar solo mejoras demostradas.
 3. Perfilar loading PPU/SPU y esperas; no asumir que todo es asignación GPU.
 4. Validar estabilidad prolongada tras 0043, sin recurrencias de pantallazos.
@@ -57,6 +60,40 @@ tiempo fuera del renderizador; después aparecen crecimientos de VBO hasta
 6. Ruido de audio en batalla: el usuario confirmó que desaparece cuando mira
    una zona liviana y suben los FPS. El mixer mantiene 187,5 bloques/s sin
    descartes, pero el PCM tiene huecos. No tapar esto cambiando su reloj.
+
+## Experimento GPU guardado, fuera de main
+
+Rama remota `codex/gpu-vertex-pull`, commit `8ce9793`. Contiene 0049–0051:
+ABI de atributos, shader GPU, snapshots de bytes originales que combinan
+rangos solapados, materialización CPU para fallback/capturas y una ruta de
+QUADS no indexados. Release y 30 pruebas pasaron. El usuario no observó una
+mejora importante: ~13–14 FPS; la ruta solo recibió ~32 draws / 1116 vértices,
+unos 64 KiB por cuadro. No está habilitada ni mezclada en main.
+
+Para retomarla desde el toolkit que queda preparado para main:
+
+```powershell
+git switch codex/gpu-vertex-pull
+git merge main
+.\.venv\Scripts\python.exe tools\pipeline.py --only patch
+.\.venv\Scripts\python.exe tools\build.py
+$env:PERF = "1"
+$env:RSX_VERTEX_PULL = "1"
+.\tools\run.ps1
+```
+
+Antes de volver a main, revertir SOLO los tres parches experimentales, de
+atrás hacia delante, usando los archivos de esa rama; después cambiar rama:
+
+```powershell
+git -C ps3recomp-src apply --reverse ../patches/0051-d3d12-experimental-quad-vertex-pulling.patch
+git -C ps3recomp-src apply --reverse ../patches/0050-rsx-immutable-vertex-pull-snapshots.patch
+git -C ps3recomp-src apply --reverse ../patches/0049-rsx-gpu-vertex-decode-contract.patch
+git switch main
+```
+
+No resetear el toolkit entero: conserva diagnósticos locales históricos.
+Al cierre queda main, toolkit sin el experimento, y el ejecutable reconstruido.
 
 ## Reproducir / medir
 

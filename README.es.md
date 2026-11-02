@@ -22,7 +22,8 @@
 > **01/11/2026 — Reflejos y sombras de Aquos corregidos.** Cascadas, lluvia,
 > reflejos y sombras oscuras confirmados por el usuario. La prioridad es ahora
 > el rendimiento: gameplay alrededor de 12–15 FPS en Aquos, tirones desde la
-> carga y un destello negro ocasional todavía pendiente. Se mantiene el límite
+> carga y ruido de audio bajo carga. El reciclaje FIFO está corregido y la
+> última prueba de Aquos no mostró pantallazos. Se mantiene el límite
 > original de 30 FPS; no se dan por alcanzados 30 FPS sostenidos.
 > [Estado y próximo trabajo](docs/NEXT_SESSION.md) · [Mediciones](docs/PERFORMANCE_2026-11-01.md).
 
@@ -43,7 +44,7 @@ El código levantado se compila por adelantado; los trabajos SPU dinámicos sin 
 | Lift PPU — 15.682 funciones / 17 unidades de traducción | ✅ |
 | Lift SPU — 5 imágenes, 1.331 funciones | ✅ |
 | Tabla HLE — 1.204 handlers | ✅ |
-| Build — clang-cl + Ninja + Direct3D 12, 30 FPS | ✅ |
+| Build — clang-cl + Ninja + Direct3D 12 | ✅ |
 | Assets — 607 trabajos de inflate descomprimidos en los SPU | ✅ |
 | Logos de distribuidora — Activision, Nowpro, Premium Agency, Nelvana | ✅ |
 | Apertura e intro narrativa — H.264/AAC con Media Foundation | ✅ |
@@ -56,7 +57,7 @@ El código levantado se compila por adelantado; los trabajos SPU dinámicos sin 
 | **Gameplay** — tutorial e historia pendientes de validación | ⚠️ |
 | **Efectos de sonido** — ATRAC3 en `SOUND/*.PAST` | ❌ |
 
-**Battle Arena es jugable y el campo y las cartas se ven correctamente. Quedan rendimiento, un destello ocasional y validación de otras arenas.**
+**Battle Arena es jugable y el campo y las cartas se ven correctamente. Quedan rendimiento, audio bajo carga, estabilidad prolongada y validación de otras arenas.**
 
 ## Se busca ayuda
 

@@ -39,9 +39,14 @@ Actualizado el 01/11/2026. La guía única para retomar trabajo es
 
 Los informes BATTLE_ARENA_FIXED, EFFECTS_AQUOS y PERFORMANCE_2026-10-31 se
 conservan como evidencia histórica, no como lista vigente de pendientes.
-La serie tiene 46 parches (0001–0047, sin 0023). La validación incluye Release,
-25 pruebas de render/FIFO/pipeline y dos de audio/SPU, más aplicación
+La serie de main tiene 47 parches (0001–0048, sin 0023). La validación incluye Release,
+26 pruebas de render/FIFO/pipeline y dos de audio/SPU, más aplicación
 sobre toolkit limpio. El stream compacto ya forma parte de la build; conserva RAM canónica para respaldo y capturas.
+
+El experimento de vertex pulling GPU está guardado en `codex/gpu-vertex-pull`
+(0049–0051), fuera de main. Sus pruebas de equivalencia pasan, pero solo cubre
+QUADS no indexados y no mejoró significativamente el gameplay probado. Seguir
+primero el desglose por primitiva de 0048. Ver NEXT_SESSION para retomarlo.
 
 ## Construir y ejecutar
 
