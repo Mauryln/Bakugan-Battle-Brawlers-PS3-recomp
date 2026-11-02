@@ -334,3 +334,76 @@ un byte mal puesto da geometria sutilmente rota y cuesta horas encontrarlo.
   los draws con mascara distinta deben emitir jobs con su propio stride.
 - Sin `UAV barrier` correcta, el draw lee el VB antes de que el compute
   termine (sintoma: geometria de un frame anterior).
+
+## Esqueleto listo para pegar (compute decode)
+
+Todo va detras de `PS3_GPU_VTX=1`; por defecto el camino CPU actual sigue
+siendo el que se usa, asi que el build nunca se queda roto a medias.
+
+### 1. HLSL (string embebido, compilado con D3DCompile como los FP)
+
+`hlsl
+struct Job { uint src; uint stride; uint type; uint ncomp; uint dst; uint pad[3]; };
+
+StructuredBuffer<Job> jobs : register(t0);
+RWByteAddressBuffer    outv : register(u0);
+
+[numthreads(64,1,1)]
+void CSMain(uint3 id : SV_DispatchThreadID)
+{
+    Job j = jobs[id.x];
+    if (j.ncomp == 0) return;
+    uint a = j.src;
+    // float32 big-endian -> float32 little-endian
+    uint4 w = uint4(outv.Load? 0 : 0, 0, 0, 0);   // ver nota: se leen del guest,
+    // pero el guest NO es accesible desde la GPU: los 16 B hay que subirlos.
+    outv.Store4(j.dst, w);
+}
+`
+
+**Problema real que hay que resolver antes de escribir esto**: el shader **no
+puede leer memoria del guest** (no es una GPU virtual buffer). Por tanto el job
+debe incluir los **datos crudos** o hay que subir el buffer del guest.
+
+Dos variantes:
+
+- **B1 (mas simple, recomendada):** la CPU sube una copia cruda del rango de
+  cada array de atributos usada por el frame (deduplicada por direccion), y el
+  job lleva `src` = offset dentro de esa copia. El shader hace
+  `srcData.Load4` + `pshufb`-equivalente (`asuint` + `__byte_perm`) y
+  escribe el float4.
+  Coste CPU: copiar ~80 MB/frame a UPLOAD (peor que hoy). **No vale.**
+
+- **B2 (la buena):** el decode en GPU solo compensa si **el guest buffer ya esta
+  en memoria de GPU**. Hoy no lo esta. Alternativa: subir solo lo que se usa y
+  para los draws repetidos (44 %) reutilizar. Con el cache actual eso ya se hace
+  en CPU...
+
+Conclusion honesta tras escribirlo: **el compute decode no paga** mientras el
+buffer de vertices del guest viva solo en RAM del host: hay que copiarlo a la
+GPU igual, y esa copia es del mismo tamano que el decode. Lo que si paga es
+**quitar el staging + pack** (8,3 ms) haciendo que la CPU escriba directo en el
+VB de la GPU en formato compacto (una sola escritura, sin relectura).
+
+### 2. Plan reducido que SI tiene margen (hacer esto primero)
+
+1. `vp_upload_compact_frame` hoy: lee staging (cacheado) + escribe 40 MB en
+   UPLOAD. Si el relleno escribiera **directo** en el UPLOAD en formato compacto,
+   desaparece la relectura y el bucle de empaquetado: **-4 a -5 ms**.
+2. Requiere el stride compacto por draw (el intento de hoy fallo por usar una
+   global). Debe ir en `D3D12DrawRecord`: `vb_stride`, fijado en el mismo
+   sitio que `gpu_stride` y usado por los emisores.
+3. Puntos exactos: `vp_prepare_vertex_fetch` (calcular stride), las cuatro
+   funciones `upload_*_vp_indexed` (indexar por `dr->vb_stride`),
+   `vp_upload_compact_frame` (un `memcpy` contiguo o ninguno),
+   `vp_reserve_vertices` (dimensionar en bytes).
+
+### 3. Estado y siguiente accion concreta
+
+- Build actual: **18 FPS**, `backup-18fps-2026-11-02`.
+- Primera accion: reintentar el stride compacto **por draw** (no global),
+  empezando por `upload_native_strip_vp_indexed` unicamente y comprobando con
+  `VPCHK`. Si el staging queda compacto para strips, extender a las otras tres.
+- Verificacion de que el VB recibe lo mismo: comparar `[PERF vertex]
+  canonical=` y `upload=` (deben seguir iguales) y que no aparezca
+  `[VPCHK] MISMATCH`.
