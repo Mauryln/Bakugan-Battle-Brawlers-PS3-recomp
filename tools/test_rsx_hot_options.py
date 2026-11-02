@@ -12,6 +12,11 @@ name = "static int fp_constbuf_enabled("
 assert name in source, "FP_CONSTBUF is still queried in the per-draw hot path"
 start = source.index(name)
 helper = source[start:source.index("\n}", start) + 2]
+start = source.index("typedef struct VPDiagnosticOptions")
+end = source.index("} VPDiagnosticOptions;", start) + len("} VPDiagnosticOptions;")
+helper += "\n" + source[start:end]
+start = source.index("static const VPDiagnosticOptions* vp_diagnostic_options(")
+helper += "\n" + source[start:source.index("\n}", start) + 2]
 assert source.count("fp_constbuf_enabled()") == 1, "FP hashing must use the cached option"
 out = ROOT / "diagnostics/performance/hot-options"
 out.mkdir(parents=True, exist_ok=True)
