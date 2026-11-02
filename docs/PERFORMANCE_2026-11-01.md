@@ -67,7 +67,7 @@ perfil de sistema; se us√≥ un muestreador local del proceso.
    reducirla artificialmente saltando trabajos, cuadros o sincronizaci√≥n.
 6. Volver a comprobar el destello negro aislado tras sesiones largas.
 
-## Prototipo histÛrico previo a la integraciÛn
+## Prototipo hist√≥rico previo a la integraci√≥n
 
 `diagnostics/arena/compact-prototype-20261101/` guarda helpers de empaquetado y
 las pruebas `test_rsx_compact_stream.py` / `rsx_compact_stream_test.cpp`.
@@ -82,61 +82,61 @@ fallback completo y capturas can√≥nicas. La CPU puede conservar inicialmente
 los 16 slots para aislar el cambio de formato GPU. Despu√©s medir y decidir
 si conviene compactar tambi√©n la preparaci√≥n CPU.
 
-## IntegraciÛn del prototipo compacto (0042)
+## Integraci√≥n del prototipo compacto (0042)
 
-El stream GPU compacto est· activo por defecto en la build principal. El
-an·lisis exacto del VP selecciona ATTRn sin renumerar sus sem·nticas; ante
+El stream GPU compacto est√° activo por defecto en la build principal. El
+an√°lisis exacto del VP selecciona ATTRn sin renumerar sus sem√°nticas; ante
 control de flujo incierto conserva 16 atributos. Layout y stride se asocian
 al shader elegido. Los pases que usan el pipeline de respaldo mantienen el
 formato completo. `VP_COMPACT=0` permite comparar el camino de 16 atributos.
 
-La capacidad GPU se calcula por los bytes del cuadro y crece despuÈs del
-fence; crecer el staging CPU ya no crea otro UPLOAD del mismo tamaÒo. Las
-capturas y los diagnÛsticos leen RAM canÛnica, no memoria write-combined.
-La preparaciÛn CPU todavÌa conserva sus 16 slots, para poder usar el
+La capacidad GPU se calcula por los bytes del cuadro y crece despu√©s del
+fence; crecer el staging CPU ya no crea otro UPLOAD del mismo tama√±o. Las
+capturas y los diagn√≥sticos leen RAM can√≥nica, no memoria write-combined.
+La preparaci√≥n CPU todav√≠a conserva sus 16 slots, para poder usar el
 pipeline de respaldo sin perder atributos.
 
 Primera corrida: `diagnostics/arena/window/compact-run.err`. En la vista
-detallada se registraron 119948288 bytes canÛnicos frente a 35454656 de
+detallada se registraron 119948288 bytes can√≥nicos frente a 35454656 de
 upload (~70% menos). GPU: 192 MiB por paridad, 384 MiB totales, frente al
-crecimiento anterior de 1536 MiB. El empaquetado + copia ronda 0,16ñ0,18 s
-por 20 cuadros, frente a ~0,23 s antes. No confundir la reducciÛn de bytes
-con una mejora proporcional de FPS: se observaron ~12,6ñ13,2 FPS y el usuario
-confirmÛ que la mejora era pequeÒa. La c·mara no fue una reproducciÛn exacta
+crecimiento anterior de 1536 MiB. El empaquetado + copia ronda 0,16‚Äì0,18 s
+por 20 cuadros, frente a ~0,23 s antes. No confundir la reducci√≥n de bytes
+con una mejora proporcional de FPS: se observaron ~12,6‚Äì13,2 FPS y el usuario
+confirm√≥ que la mejora era peque√±a. La c√°mara no fue una reproducci√≥n exacta
 pixel a pixel del perfil anterior; estas cifras no son un benchmark A/B.
 
-El usuario confirmÛ iluminaciÛn, sombras y reflejos correctos. ReportÛ ruido
+El usuario confirm√≥ iluminaci√≥n, sombras y reflejos correctos. Report√≥ ruido
 de sonido y pantallazos negros al mover el personaje. La siguiente corrida
-mostrÛ tambiÈn las esperas FIFO de 2000 ms del men˙, investigadas en 0043.
+mostr√≥ tambi√©n las esperas FIFO de 2000 ms del men√∫, investigadas en 0043.
 
-Prueba activa: `tools/test_rsx_compact_stream.py`: las 65536 m·scaras,
-lÌmites de escritura y equivalencia de pÌxeles WARP con ATTR3/8/15, offsets
+Prueba activa: `tools/test_rsx_compact_stream.py`: las 65536 m√°scaras,
+l√≠mites de escritura y equivalencia de p√≠xeles WARP con ATTR3/8/15, offsets
 de buffer distintos de cero y el decompilador real. La suite de render pasa
-a 24 pruebas. El prototipo histÛrico de diagnostics se conserva como evidencia;
-la implementaciÛn reproducible est· en `patches/0042-d3d12-compact-vertex-upload.patch`.
+a 24 pruebas. El prototipo hist√≥rico de diagnostics se conserva como evidencia;
+la implementaci√≥n reproducible est√° en `patches/0042-d3d12-compact-vertex-upload.patch`.
 
-## Reciclaje FIFO: causa reproducida y correcciÛn 0043
+## Reciclaje FIFO: causa reproducida y correcci√≥n 0043
 
-En `aquos-compact-20261101` la pantalla principal presentÛ intervalos de
-~5,3 FPS con `guest` ~3,77 s y render ~0,01 s por 20 cuadros. CoincidÌan con
-`fifo recycle: drain stalled`, 2000 ms, y con el reciclador autom·tico del
-tÌtulo. Ese mecanismo de recuperaciÛn tambiÈn actuaba sobre nuestro callback
-HLE: podÌa llevar GET al inicio sin consumir el JUMP que el productor esperaba.
+En `aquos-compact-20261101` la pantalla principal present√≥ intervalos de
+~5,3 FPS con `guest` ~3,77 s y render ~0,01 s por 20 cuadros. Coincid√≠an con
+`fifo recycle: drain stalled`, 2000 ms, y con el reciclador autom√°tico del
+t√≠tulo. Ese mecanismo de recuperaci√≥n tambi√©n actuaba sobre nuestro callback
+HLE: pod√≠a llevar GET al inicio sin consumir el JUMP que el productor esperaba.
 
-0043 excluye del reciclador autom·tico los contextos cuyo callback es el
-sentinel HLE (directo o vÌa OPD). Mantiene la espera real de backpressure y
-la recuperaciÛn para callbacks de tÌtulos que no reciclan. Prueba ampliada:
+0043 excluye del reciclador autom√°tico los contextos cuyo callback es el
+sentinel HLE (directo o v√≠a OPD). Mantiene la espera real de backpressure y
+la recuperaci√≥n para callbacks de t√≠tulos que no reciclan. Prueba ampliada:
 `tools/test_gcm_fifo_wrap.py`.
 
 En `diagnostics/arena/aquos-recycle-owner-20261101` los reciclajes observados
-tardaron ~3ñ7 ms; no volvieron avisos de stalls ni de recuperaciÛn autom·tica.
-El usuario confirmÛ men˙ destrabado, audio de men˙s sin ruido y ausencia de
+tardaron ~3‚Äì7 ms; no volvieron avisos de stalls ni de recuperaci√≥n autom√°tica.
+El usuario confirm√≥ men√∫ destrabado, audio de men√∫s sin ruido y ausencia de
 pantallazos en la prueba de Aquos. Persisten tirones desde loading, gameplay
-reportado de 11 FPS y ruido de audio en batalla. No dar estos ˙ltimos por
+reportado de 11 FPS y ruido de audio en batalla. No dar estos √∫ltimos por
 resueltos ni la estabilidad prolongada por demostrada.
 
-Se repitiÛ muestreo CPU de gameplay, verificando idÈntica .pdata en el mapa
+Se repiti√≥ muestreo CPU de gameplay, verificando id√©ntica .pdata en el mapa
 auxiliar y el ejecutable. El hilo de render ocupa ~7,3 s de CPU/8 s; fetch de
-atributos ~17% de muestras. Las pilas adicionales seÒalan tambiÈn consultas
-CRT de diagnÛstico dentro de `d3d12_bind_texture`. El audio/SPU sigue ocupando
-un n˙cleo; esto no demuestra que pueda omitirse ni que sea el ˙nico lÌmite.
+atributos ~17% de muestras. Las pilas adicionales se√±alan tambi√©n consultas
+CRT de diagn√≥stico dentro de `d3d12_bind_texture`. El audio/SPU sigue ocupando
+un n√∫cleo; esto no demuestra que pueda omitirse ni que sea el √∫nico l√≠mite.

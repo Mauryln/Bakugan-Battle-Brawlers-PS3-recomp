@@ -13,8 +13,8 @@ Actualizado el 01/11/2026. La guía única para retomar trabajo es
 - Fronteras de cuadros, notificación de flip y capacidad corregidas tras
   capturar un cuadro truncado; no se omiten efectos ni trabajo SPU.
 - Stream GPU compacto integrado (0042), con fallback completo.
-- Reciclaje FIFO con due�o �nico (0043): el usuario confirm� men� sin atasco,
-  audio de men�s sin ruido y ausencia de pantallazos en la prueba de Aquos.
+- Reciclaje FIFO con dueño único (0043): el usuario confirmó menú sin atasco,
+  audio de menús sin ruido y ausencia de pantallazos en la prueba de Aquos.
 - Música PCM / mezclador SPU y audio de películas disponibles; no se da por
   cerrado el audio ATRAC3 / efectos .PAST.
 
@@ -22,26 +22,26 @@ Actualizado el 01/11/2026. La guía única para retomar trabajo es
 
 1. **30 FPS sostenidos.** Aquos ronda 12 FPS en el perfil de gameplay; el
    usuario reporta <=15 FPS. Hay tirones a 4–5 FPS desde loading, audio antes
-   que imagen en presentaciones y ruido de audio en batalla. El upload GPU compacto qued� en 384 MiB
+   que imagen en presentaciones y ruido de audio en batalla. El upload GPU compacto quedó en 384 MiB
    en la corrida medida, frente a 1536 MiB anteriores.
-2. **Destello negro ocasional.** Mejoraron los fallos capturados de mezcla /
-   truncamiento, pero el usuario volvió a ver uno tras jugar un rato.
+2. **Estabilidad prolongada.** El usuario ya no vio pantallazos tras 0043;
+   comprobar que no reaparezcan después de jugar más tiempo.
 3. Validar Pyrus, Haos, Subterra, Ventus, tutorial e historia y sesiones largas.
-4. Congelamiento por inactividad de menús y aviso FIFO drain stalled (2000 ms).
+4. Verificar sesiones largas de menús tras corregir el doble reciclaje FIFO (0043).
 5. Audio ATRAC3 / efectos sonoros y defectos restantes del selector de modo.
 
 ## Informes vigentes
 
-- [Rendimiento y próximo prototipo](PERFORMANCE_2026-11-01.md).
+- [Rendimiento e integración compacta](PERFORMANCE_2026-11-01.md).
 - [Correcciones de reflejos, sombras y cuadros](EFFECTS_FIX_2026-11-01.md).
 - [Comparación y herramientas RenderDoc](EFFECTS_COMPARE_2026-11-01.md).
 - [Arquitectura](ARCHITECTURE.md), [vídeo](VIDEO.md).
 
 Los informes BATTLE_ARENA_FIXED, EFFECTS_AQUOS y PERFORMANCE_2026-10-31 se
 conservan como evidencia histórica, no como lista vigente de pendientes.
-La serie tiene 40 parches (0001–0041, sin 0023). La validación del cierre
+La serie tiene 42 parches (0001–0043, sin 0023). La validación del cierre
 incluye Release, las 24 pruebas activas de render/FIFO/pipeline y aplicación
-sobre toolkit limpio. El stream compacto ya forma parte de la build; conserva RAM can�nica para respaldo y capturas.
+sobre toolkit limpio. El stream compacto ya forma parte de la build; conserva RAM canónica para respaldo y capturas.
 
 ## Construir y ejecutar
 
