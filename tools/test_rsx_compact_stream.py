@@ -11,7 +11,7 @@ out = ROOT / "diagnostics/arena/compact-stream"
 out.mkdir(parents=True, exist_ok=True)
 source = (ROOT / "ps3recomp-src/libs/video/rsx_d3d12_backend.c").read_text(encoding="utf-8")
 parts = []
-for name in ["static void vp_flush_vertex_frame(", "static u32 vp_vertex_stride(",
+for name in ["static u32 vp_vertex_stride(",
              "static void vp_pack_vertex_stream(", "static u32 vp_compact_input_layout("]:
     assert name in source, "GPU still uploads all 16 vertex slots"
     start = source.index(name)
