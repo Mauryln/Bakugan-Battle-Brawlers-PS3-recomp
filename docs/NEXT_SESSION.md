@@ -32,14 +32,14 @@ no están en parches. Evitar resets generales dentro de ps3recomp-src.
 ## Primera tarea al retomar: rendimiento
 
 Leer [PERFORMANCE_2026-11-01.md](PERFORMANCE_2026-11-01.md): contiene cifras,
-limitaciones del perfil y el prototipo compacto no integrado. Gameplay de
+limitaciones del perfil y la integraci�n compacta 0042. Gameplay de
 Aquos ronda 12 FPS; preparación de draws ~49%, render_frame ~24%, y copiar
 vértices consume ~11 ms/cuadro. Loading inicial a 4–5 FPS tiene casi todo el
 tiempo fuera del renderizador; después aparecen crecimientos de VBO hasta
 1536 MiB. Tratar ambos tramos por separado.
 
-1. Integrar/probar stream GPU compacto por inputs del VP y capacidad GPU
-   independiente del staging CPU. Conservar fallback de 16 atributos.
+1. El stream GPU compacto ya est� integrado (0042). Falta optimizar la
+   preparaci�n CPU con evidencia; conservar fallback y los atributos can�nicos.
 2. Medir idéntica cámara antes/después; conservar solo mejoras demostradas.
 3. Perfilar loading PPU/SPU y esperas; no asumir que todo es asignación GPU.
 4. Reproducir el destello negro de larga duración con la build final.
@@ -71,7 +71,7 @@ la correlación de bandas no prueba por sí sola que falte el espejo.
 - `aquos-full-frames-20261101/frame_118` a `frame_141`: 24 capturas sin ese
   patrón de duplicación / cuadro vacío; no prueba estabilidad prolongada.
 - `aquos-perf-20261101`: perfil sin capturas, CPU y fases de carga/gameplay.
-- `compact-prototype-20261101`: fuentes y prueba GPU del prototipo retirado.
+- `compact-prototype-20261101`: prototipo hist�rico; la versi�n integrada es 0042.
 - `shadow-experiment-withdrawn-20261101`: primera prueba fallida, solo histórica.
 - `battle-arena-picture/bugs`: capturas aportadas por el usuario.
 

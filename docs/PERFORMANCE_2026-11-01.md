@@ -67,7 +67,7 @@ perfil de sistema; se usÃ³ un muestreador local del proceso.
    reducirla artificialmente saltando trabajos, cuadros o sincronizaciÃ³n.
 6. Volver a comprobar el destello negro aislado tras sesiones largas.
 
-## Prototipo conservado, FUERA de la build
+## Prototipo histórico previo a la integración
 
 `diagnostics/arena/compact-prototype-20261101/` guarda helpers de empaquetado y
 las pruebas `test_rsx_compact_stream.py` / `rsx_compact_stream_test.cpp`.
@@ -81,3 +81,36 @@ stride/offset GPU por draw, crecimiento GPU independiente, conservaciÃ³n del
 fallback completo y capturas canÃ³nicas. La CPU puede conservar inicialmente
 los 16 slots para aislar el cambio de formato GPU. DespuÃ©s medir y decidir
 si conviene compactar tambiÃ©n la preparaciÃ³n CPU.
+
+## Integración del prototipo compacto (0042)
+
+El stream GPU compacto está activo por defecto en la build principal. El
+análisis exacto del VP selecciona ATTRn sin renumerar sus semánticas; ante
+control de flujo incierto conserva 16 atributos. Layout y stride se asocian
+al shader elegido. Los pases que usan el pipeline de respaldo mantienen el
+formato completo. `VP_COMPACT=0` permite comparar el camino de 16 atributos.
+
+La capacidad GPU se calcula por los bytes del cuadro y crece después del
+fence; crecer el staging CPU ya no crea otro UPLOAD del mismo tamaño. Las
+capturas y los diagnósticos leen RAM canónica, no memoria write-combined.
+La preparación CPU todavía conserva sus 16 slots, para poder usar el
+pipeline de respaldo sin perder atributos.
+
+Primera corrida: `diagnostics/arena/window/compact-run.err`. En la vista
+detallada se registraron 119948288 bytes canónicos frente a 35454656 de
+upload (~70% menos). GPU: 192 MiB por paridad, 384 MiB totales, frente al
+crecimiento anterior de 1536 MiB. El empaquetado + copia ronda 0,16–0,18 s
+por 20 cuadros, frente a ~0,23 s antes. No confundir la reducción de bytes
+con una mejora proporcional de FPS: se observaron ~12,6–13,2 FPS y el usuario
+confirmó que la mejora era pequeña. La cámara no fue una reproducción exacta
+pixel a pixel del perfil anterior; estas cifras no son un benchmark A/B.
+
+El usuario confirmó iluminación, sombras y reflejos correctos. Reportó ruido
+de sonido y pantallazos negros al mover el personaje. La siguiente corrida
+mostró también las esperas FIFO de 2000 ms del menú, investigadas en 0043.
+
+Prueba activa: `tools/test_rsx_compact_stream.py`: las 65536 máscaras,
+límites de escritura y equivalencia de píxeles WARP con ATTR3/8/15, offsets
+de buffer distintos de cero y el decompilador real. La suite de render pasa
+a 24 pruebas. El prototipo histórico de diagnostics se conserva como evidencia;
+la implementación reproducible está en `patches/0042-d3d12-compact-vertex-upload.patch`.

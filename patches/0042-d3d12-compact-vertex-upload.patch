@@ -1,0 +1,342 @@
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -22,6 +22,7 @@
+ #include "rsx_d3d12_backend.h"
+ #include "rsx_primitives.h"
+ #include "rsx_vertex_fetch.h"
++#include "rsx_vp_decompiler.h"
+ #include "rsx_texture_layout.h"
+ #include <stdio.h>
+ #include <string.h>
+@@ -75,6 +76,7 @@
+ #define VERTEX_STRIDE       36  /* bytes per host vertex: pos3 + col4 + uv2 */
+
+ typedef struct {
++    u32 gpu_byte_offset, gpu_stride, gpu_input_mask;
+     u32 vb_byte_offset; /* offset into vb_mapped where this draw's verts live */
+     u32 vertex_count;
+     u32 topology;       /* rsx_topology (NOT a D3D value; see topo_to_d3d) */
+@@ -201,6 +203,7 @@
+     u32 hash;               /* FNV-1a of the ucode */
+     ID3DBlob* vs;
+     int uses_c03;
++    u32 input_mask;
+ } VPVSEntry;
+ #define VP_VS_CACHE 128 /* wave uses 5+ distinct VPs; at 4 the cache
+                          * thrashed every frame and eviction shifted slots
+@@ -318,6 +321,7 @@
+     ID3D12PipelineState*  pipeline_state_vp_color; /* decompiled VS + colour PS (untextured 3D) */
+     ID3D12Resource*       vp_vb;                /* raw float4 attrib0, per-frame */
+     void*                 vp_vb_mapped; /* cached CPU vertex stream */
++    u32                   vp_gpu_capacity; /* bytes per GPU parity, independent of CPU */
+     void*                 vp_vb_upload; /* mapped GPU upload, write-only */
+     u32                   vp_vb_offset;
+     u32                   vp_vertex_capacity;
+@@ -375,12 +379,63 @@
+
+ static D3D12State s_d3d;
+
++static int vp_compact_enabled(void)
++{
++    static int enabled = -1;
++    if (enabled < 0) {
++        const char* value = getenv("VP_COMPACT");
++        enabled = !value || atoi(value) != 0;
++    }
++    return enabled;
++}
++
++static u32 vp_vertex_stride(u32 mask)
++{
++    u32 attributes = 0;
++    for (u32 i = 0; i < 16; ++i) attributes += (mask >> i) & 1u;
++    return attributes ? attributes * 16u : 16u;
++}
++
+ static void vp_flush_vertex_frame(void* upload, const void* cpu, u32 capacity, u32 parity, u32 bytes)
+ {
+     if (!bytes) return;
+     u64 offset = (u64)parity * capacity * 256u;
+     memcpy((char*)upload + offset, (const char*)cpu + offset, bytes);
+ }
++
++static void vp_pack_vertex_stream(void* dst, const void* src, u32 count, u32 mask)
++{
++    if (mask == 0xFFFFu) { vp_flush_vertex_frame(dst, src, 0, 0, count * 256u); return; }
++    if (!mask) { memset(dst, 0, (size_t)count * 16u); return; }
++    u32 attributes[16], used = 0;
++    for (u32 i = 0; i < 16; ++i) if (mask & (1u << i)) attributes[used++] = i;
++    u8* out = (u8*)dst;
++    const u8* input = (const u8*)src;
++    for (u32 v = 0; v < count; ++v)
++        for (u32 a = 0; a < used; ++a) {
++            memcpy(out, input + (size_t)v * 256u + attributes[a] * 16u, 16u);
++            out += 16u;
++        }
++}
++
++static u32 vp_compact_input_layout(u32 mask, D3D12_INPUT_ELEMENT_DESC* layout)
++{
++    u32 count = 0;
++    for (u32 i = 0; i < 16; ++i) {
++        if (!(mask & (1u << i))) continue;
++        D3D12_INPUT_ELEMENT_DESC* entry = &layout[count];
++        memset(entry, 0, sizeof(*entry));
++        entry->SemanticName = "ATTR";
++        entry->SemanticIndex = i;
++        entry->Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
++        entry->AlignedByteOffset = count * 16u;
++        entry->InputSlotClass = D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA;
++        ++count;
++    }
++    return count;
++}
++
++
+ /* Complete sampler tables stay immutable until the frame fence. A heap may
+  * contain at most 2048 samplers; additional pages cover even unique draws. */
+ #define SAMPLER_TABLES_PER_PAGE (2048 / RSX_MAX_TEXTURES)
+@@ -1356,6 +1411,7 @@
+         D3D12_RANGE nr = {0,0};
+
+         s_d3d.vp_vertex_capacity = MAX_VERTICES;
++        s_d3d.vp_gpu_capacity = MAX_VERTICES * 256u;
+         bd.Width = (u64)MAX_VERTICES * 256 * 2;  /* generic VP vertex: 16 float4 slots,
+                                           * DOUBLE-buffered by frame parity so a
+                                           * new frame's upload never overwrites
+@@ -1777,14 +1833,14 @@
+      * draw index/count/CB stride/FP stride, vertices, VP constants, FP constants. */
+     snprintf(path, sizeof path, "%s/display_inputs.bin", dir);
+     FILE* inputs = fopen(path, "wb");
+-    if (inputs && s_d3d.vp_vb_upload && s_d3d.vp_cb_mapped && s_d3d.vp_fpcb_mapped) {
++    if (inputs && s_d3d.vp_vb_mapped && s_d3d.vp_cb_mapped && s_d3d.vp_fpcb_mapped) {
+         u32 parity = (u32)(s_d3d.vp_parity ^ 1);
+         for (u32 d = 0; d < ndraws && d < MAX_DRAWS; ++d) {
+             const D3D12DrawRecord* r = &s_d3d.draws[d];
+             if (!r->is_vp || r->is_clear || r->rt_off || !r->vertex_count || r->vertex_count > 128) continue;
+             u32 header[4] = {d, r->vertex_count, VP_CB_STRIDE, VP_FPCB_STRIDE};
+             fwrite(header, sizeof(header), 1, inputs);
+-            fwrite((char*)s_d3d.vp_vb_upload + (u64)parity * s_d3d.vp_vertex_capacity * 256u + r->vb_byte_offset,
++            fwrite((char*)s_d3d.vp_vb_mapped + (u64)parity * s_d3d.vp_vertex_capacity * 256u + r->vb_byte_offset,
+                    256u, r->vertex_count, inputs);
+             fwrite((char*)s_d3d.vp_cb_mapped + ((u64)parity * MAX_DRAWS + r->cb_slot) * VP_CB_STRIDE,
+                    1, VP_CB_STRIDE, inputs);
+@@ -1996,7 +2052,12 @@
+         if (s_d3d.vp_vs[i].hash == hash) return i;
+
+     static char hlsl[262144];
+-    int ni = rsx_vp_decompile(vuc, vlen, hlsl, sizeof hlsl);
++    rsx_vp_input_analysis inputs = {0xFFFFu, 0};
++    rsx_vp_analyze_inputs(vuc, vlen, &inputs);
++    u32 input_mask = vp_compact_enabled() && inputs.exact ? inputs.input_mask : 0xFFFFu;
++    /* Diagnostic bypass reads ATTR0 even when the original VP does not. */
++    if (getenv("VP_BYPASS")) input_mask |= 1u;
++    int ni = rsx_vp_decompile_compact_ex(vuc, vlen, 0, input_mask, hlsl, sizeof hlsl);
+     if (ni <= 0) return -1;
+     if (getenv("VP_DUMP")) { static int _d=0; if (PS3_LOG_FIRST(_d, 4)) {
+         FILE* f = fopen("vp2_dump.hlsl", _d==1 ? "w" : "a");
+@@ -2065,6 +2126,7 @@
+         memmove(&s_d3d.vp_vs[0], &s_d3d.vp_vs[1], sizeof(VPVSEntry)*(VP_VS_CACHE-1));
+         slot = VP_VS_CACHE - 1;
+     }
++    s_d3d.vp_vs[slot].input_mask = input_mask;
+     s_d3d.vp_vs[slot].hash = hash;
+     s_d3d.vp_vs[slot].vs   = vb;
+     s_d3d.vp_vs[slot].uses_c03 =
+@@ -2699,20 +2761,15 @@
+     }
+
+     D3D12_INPUT_ELEMENT_DESC il[16];
+-    for (int _i = 0; _i < 16; _i++) {
+-        il[_i].SemanticName = "ATTR"; il[_i].SemanticIndex = _i;
+-        il[_i].Format = DXGI_FORMAT_R32G32B32A32_FLOAT; il[_i].InputSlot = 0;
+-        il[_i].AlignedByteOffset = (UINT)(_i * 16);
+-        il[_i].InputSlotClass = D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA;
+-        il[_i].InstanceDataStepRate = 0;
+-    }
++    u32 input_mask = vs_idx >= 0 ? s_d3d.vp_vs[vs_idx].input_mask : 0xFFFFu;
++    u32 input_count = vp_compact_input_layout(input_mask, il);
+     D3D12_GRAPHICS_PIPELINE_STATE_DESC pd = {0};
+     pd.pRootSignature = s_d3d.vp_root_sig;
+     pd.VS.pShaderBytecode = vsb->lpVtbl->GetBufferPointer(vsb);
+     pd.VS.BytecodeLength  = vsb->lpVtbl->GetBufferSize(vsb);
+     pd.PS.pShaderBytecode = ps_code;
+     pd.PS.BytecodeLength  = ps_len;
+-    pd.InputLayout.pInputElementDescs = il; pd.InputLayout.NumElements = 16;
++    pd.InputLayout.pInputElementDescs = il; pd.InputLayout.NumElements = input_count;
+     pd.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+     pd.RasterizerState.DepthBias = depth_bias;
+     pd.RasterizerState.SlopeScaledDepthBias = slope_bias;
+@@ -4446,6 +4503,67 @@
+ }
+
+
++/* Called after the previous GPU fence and PSO preparation. CPU snapshots keep
++ * their canonical 16-slot format; only bytes consumed by each selected VS are
++ * uploaded. Fallback pipelines retain the complete layout. */
++static int vp_upload_compact_frame(void)
++{
++    u32 bytes = 0;
++    for (u32 i = 0; i < s_d3d.draw_count && i < MAX_DRAWS; ++i) {
++        D3D12DrawRecord* dr = &s_d3d.draws[i];
++        if (!dr->is_vp || dr->is_clear) continue;
++        u32 mask = s_frame_psos[i] && dr->vs_idx >= 0 && dr->vs_idx < s_d3d.vp_vs_n
++            ? s_d3d.vp_vs[dr->vs_idx].input_mask : 0xFFFFu;
++        dr->gpu_input_mask = mask;
++        dr->gpu_stride = vp_vertex_stride(mask);
++        dr->gpu_byte_offset = bytes;
++        bytes += dr->vertex_count * dr->gpu_stride;
++    }
++    if (bytes > s_d3d.vp_gpu_capacity) {
++        u32 capacity = s_d3d.vp_gpu_capacity;
++        while (capacity < bytes) capacity *= 2u;
++        D3D12_HEAP_PROPERTIES hp = {0}; hp.Type = D3D12_HEAP_TYPE_UPLOAD;
++        D3D12_RESOURCE_DESC bd = {0};
++        bd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
++        bd.Width = (u64)capacity * 2u;
++        bd.Height = 1; bd.DepthOrArraySize = 1; bd.MipLevels = 1;
++        bd.SampleDesc.Count = 1; bd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
++        ID3D12Resource* resource = NULL; void* mapped = NULL;
++        D3D12_RANGE empty = {0,0};
++        HRESULT hr = s_d3d.device->lpVtbl->CreateCommittedResource(s_d3d.device, &hp,
++            D3D12_HEAP_FLAG_NONE, &bd, D3D12_RESOURCE_STATE_GENERIC_READ, NULL,
++            &IID_ID3D12Resource, (void**)&resource);
++        if (SUCCEEDED(hr)) hr = resource->lpVtbl->Map(resource, 0, &empty, &mapped);
++        if (FAILED(hr) || !mapped) {
++            if (resource) resource->lpVtbl->Release(resource);
++            fprintf(stderr, "[VPVB] GPU allocation failed (%u bytes/frame, hr=%08X)\n",
++                capacity, (unsigned)hr);
++            return 0;
++        }
++        s_d3d.vp_vb->lpVtbl->Unmap(s_d3d.vp_vb, 0, NULL);
++        s_d3d.vp_vb->lpVtbl->Release(s_d3d.vp_vb);
++        s_d3d.vp_vb = resource; s_d3d.vp_vb_upload = mapped;
++        s_d3d.vp_gpu_capacity = capacity;
++        fprintf(stderr, "[VPVB] GPU upload grew to %u bytes per frame\n", capacity);
++    }
++    for (u32 i = 0; i < s_d3d.draw_count && i < MAX_DRAWS; ++i) {
++        D3D12DrawRecord* dr = &s_d3d.draws[i];
++        if (!dr->is_vp || dr->is_clear) continue;
++        u32 mask = dr->gpu_input_mask;
++        vp_pack_vertex_stream((char*)s_d3d.vp_vb_upload +
++            (u64)s_d3d.vp_parity * s_d3d.vp_gpu_capacity + dr->gpu_byte_offset,
++            (char*)s_d3d.vp_vb_mapped + (u64)s_d3d.vp_parity *
++            s_d3d.vp_vertex_capacity * 256u + dr->vb_byte_offset, dr->vertex_count, mask);
++    }
++    if (perf_on()) {
++        static u32 frames = 0;
++        if (++frames % 120u == 0)
++            fprintf(stderr, "[PERF vertex] canonical=%u upload=%u GPU-capacity=%u bytes/frame\n",
++                s_d3d.vp_vb_offset, bytes, s_d3d.vp_gpu_capacity);
++    }
++    return 1;
++}
++
+ static void render_frame(void)
+ {
+     double _rf0 = perf_on() ? perf_now() : 0.0;
+@@ -4484,9 +4602,6 @@
+     if (perf_on()) s_perf_fence += perf_now() - fence_start;
+     double flush_start = perf_on() ? perf_now() : 0.0;
+     vp_release_frame_psos();
+-    if (s_d3d.vp_vb_upload && s_d3d.vp_vb_mapped)
+-        vp_flush_vertex_frame(s_d3d.vp_vb_upload, s_d3d.vp_vb_mapped,
+-            s_d3d.vp_vertex_capacity, s_d3d.vp_parity, s_d3d.vp_vb_offset);
+     if (!rsx_prepare_samplers()) return;
+     if (perf_on()) s_perf_flush += perf_now() - flush_start;
+     /* Compile the real vertex program once its microcode is captured, and keep
+@@ -5009,6 +5124,10 @@
+         if (perf_on()) s_perf_pso += perf_now() - _ps0;
+     }
+
++    flush_start = perf_on() ? perf_now() : 0.0;
++    if (!vp_upload_compact_frame()) return;
++    if (perf_on()) s_perf_flush += perf_now() - flush_start;
++
+     /* Transition render target to RENDER_TARGET state */
+     D3D12_RESOURCE_BARRIER barrier = {0};
+     barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+@@ -5187,12 +5306,6 @@
+             D3D12_GPU_DESCRIPTOR_HANDLE gh;
+             s_d3d.srv_heap->lpVtbl->GetGPUDescriptorHandleForHeapStart(s_d3d.srv_heap, &gh);
+             s_d3d.cmd_list->lpVtbl->SetGraphicsRootDescriptorTable(s_d3d.cmd_list, 1, gh);
+-            D3D12_VERTEX_BUFFER_VIEW vbv;
+-            vbv.BufferLocation = s_d3d.vp_vb->lpVtbl->GetGPUVirtualAddress(s_d3d.vp_vb)
+-                               + (u64)s_d3d.vp_parity * s_d3d.vp_vertex_capacity * 256;
+-            vbv.SizeInBytes    = s_d3d.vp_vertex_capacity * 256u;
+-            vbv.StrideInBytes  = 256;   /* 16 float4 attrib slots */
+-            s_d3d.cmd_list->lpVtbl->IASetVertexBuffers(s_d3d.cmd_list, 0, 1, &vbv);
+             D3D12_GPU_DESCRIPTOR_HANDLE gh_base;
+             s_d3d.srv_heap->lpVtbl->GetGPUDescriptorHandleForHeapStart(s_d3d.srv_heap, &gh_base);
+             u32 vp_last_topology = RSX_TOPOLOGY_TRIANGLES;
+@@ -5295,7 +5408,7 @@
+                     { static int tt = -1;
+                       if (tt < 0) { const char* e = getenv("VP_TESTTRI"); tt = e ? atoi(e) : 0; }
+                       if (tt && want >= 0 && s_d3d.vp_vb_mapped) {
+-                          float* vtx = (float*)((char*)s_d3d.vp_vb_upload
++                          float* vtx = (float*)((char*)s_d3d.vp_vb_mapped
+                               + (u64)s_d3d.vp_parity * s_d3d.vp_vertex_capacity * 256u
+                               + (u64)1000 * 256u);
+                           static const float tri[3][4] = {
+@@ -5463,8 +5576,14 @@
+                         s_d3d.cmd_list, topo_to_d3d(dr->topology));
+                     vp_last_topology = dr->topology;
+                 }
++                D3D12_VERTEX_BUFFER_VIEW vbv;
++                vbv.BufferLocation = s_d3d.vp_vb->lpVtbl->GetGPUVirtualAddress(s_d3d.vp_vb)
++                    + (u64)s_d3d.vp_parity * s_d3d.vp_gpu_capacity + dr->gpu_byte_offset;
++                vbv.SizeInBytes = dr->vertex_count * dr->gpu_stride;
++                vbv.StrideInBytes = dr->gpu_stride;
++                s_d3d.cmd_list->lpVtbl->IASetVertexBuffers(s_d3d.cmd_list, 0, 1, &vbv);
+                 s_d3d.cmd_list->lpVtbl->DrawInstanced(s_d3d.cmd_list,
+-                    dr->vertex_count, 1, dr->vb_byte_offset / 256, 0);
++                    dr->vertex_count, 1, 0, 0);
+                 { static int cap = -1, n = 0;
+                   if (cap < 0) { const char* e = getenv("RX_DISPDBG"); cap = e ? atoi(e) : 0; }
+                   if (cap && n < cap && dr->rt_off == 0 && dr->fp_addr) { n++;
+@@ -7070,40 +7189,13 @@
+     if (required <= s_d3d.vp_vertex_capacity) return 1;
+     u32 capacity = vp_capacity_for(s_d3d.vp_vertex_capacity, required);
+     if (!capacity) { fprintf(stderr, "[VPVB] frame exceeds supported upload size\n"); return 0; }
+-    D3D12_HEAP_PROPERTIES hp = {0}; hp.Type = D3D12_HEAP_TYPE_UPLOAD;
+-    D3D12_RESOURCE_DESC bd = {0};
+-    bd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+-    bd.Width = (u64)capacity * 256u * 2u;
+-    bd.Height = 1; bd.DepthOrArraySize = 1; bd.MipLevels = 1;
+-    bd.SampleDesc.Count = 1; bd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+-    ID3D12Resource* resource = NULL; void* mapped = NULL;
+-    D3D12_RANGE empty = {0,0};
+-    HRESULT hr = s_d3d.device->lpVtbl->CreateCommittedResource(s_d3d.device, &hp,
+-        D3D12_HEAP_FLAG_NONE, &bd, D3D12_RESOURCE_STATE_GENERIC_READ, NULL,
+-        &IID_ID3D12Resource, (void**)&resource);
+-    if (SUCCEEDED(hr)) hr = resource->lpVtbl->Map(resource, 0, &empty, &mapped);
+-    if (FAILED(hr) || !mapped) {
+-        if (resource) resource->lpVtbl->Release(resource);
+-        fprintf(stderr, "[VPVB] cannot grow upload buffer to %u vertices (hr=%08X)\n", capacity, (unsigned)hr);
+-        return 0;
+-    }
+-    void* cpu = malloc((size_t)bd.Width);
+-    if (!cpu) {
+-        resource->lpVtbl->Unmap(resource, 0, NULL);
+-        resource->lpVtbl->Release(resource);
+-        return 0;
+-    }
+-    /* Never read back an UPLOAD heap: write-combined CPU reads stalled Aquos
+-     * for seconds at each growth. Pending vertices live in cached RAM. Keep
+-     * both parity regions and drain the GPU before releasing its old buffer. */
++    void* cpu = malloc((size_t)capacity * 256u * 2u);
++    if (!cpu) return 0;
+     vp_copy_vertex_frames(cpu, capacity, s_d3d.vp_vb_mapped, s_d3d.vp_vertex_capacity);
+-    wait_for_gpu();
+-    s_d3d.vp_vb->lpVtbl->Unmap(s_d3d.vp_vb, 0, NULL);
+-    s_d3d.vp_vb->lpVtbl->Release(s_d3d.vp_vb);
+     free(s_d3d.vp_vb_mapped);
+-    s_d3d.vp_vb = resource; s_d3d.vp_vb_mapped = cpu; s_d3d.vp_vb_upload = mapped;
++    s_d3d.vp_vb_mapped = cpu;
+     s_d3d.vp_vertex_capacity = capacity;
+-    fprintf(stderr, "[VPVB] grew to %u vertices per frame (%llu MB)\n", capacity, (unsigned long long)(bd.Width >> 20));
++    fprintf(stderr, "[VPVB] CPU staging grew to %u vertices per frame\n", capacity);
+     return 1;
+ }
+
+--
