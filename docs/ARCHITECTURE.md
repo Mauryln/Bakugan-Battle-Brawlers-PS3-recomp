@@ -19,8 +19,9 @@ port-specific glue       bakugan-recomp/main.cpp, stubs.cpp, movie_*.cpp
 ```
 
 The guest executes lifted C++ and calls HLE functions where the original called
-imports. There is no interpreter and no JIT: if a function was lifted, it runs
-as compiled code.
+imports. Lifted functions run as compiled code. Dynamic SPU jobs without a
+matching lifted image can use the runtime interpreter fallback; this port
+also enables it for generated mixer kernels.
 
 ## The RSX path (where the bugs are)
 
@@ -31,7 +32,7 @@ cellGcmSys.c      owns the command buffer ring, tiles, display buffers and the
 rsx_commands.c    walks the NV4097 method stream and keeps rsx_state
                   (blend, depth, vertex format, textures, viewport...).
       │
-rsx_vertex_fetch.c  resolves attribute arrays and PROGRAMS (VP/FP) to host code.
+rsx_vertex_fetch.c  decodes attribute arrays (formats, endianness, frequency).
       │
 rsx_d3d12_backend.c  PSO cache keyed on the state that matters, per-draw
                   vertex buffers, present, and the readback used by diagnostics.

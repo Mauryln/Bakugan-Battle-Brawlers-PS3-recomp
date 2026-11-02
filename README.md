@@ -12,28 +12,23 @@
 <img src="https://img.shields.io/badge/graphics-Direct3D%2012-107C10?style=flat-square" alt="Graphics: Direct3D 12">
 <img src="https://img.shields.io/badge/title-BLES00758-c0392b?style=flat-square" alt="Title: BLES00758">
 <img src="https://img.shields.io/badge/license-MIT-2ea44f?style=flat-square" alt="License: MIT">
-<img src="https://img.shields.io/badge/status-Battle%20Arena%20gameplay%20fixed-green?style=flat-square" alt="Battle Arena gameplay fixed; effects and shaders pending">
+<img src="https://img.shields.io/badge/status-Battle%20Arena%20gameplay%20fixed-green?style=flat-square" alt="Aquos reflections and shadows corrected; performance pending">
 </p>
 
 <p><a href="README.es.md">Español</a> · <a href="docs/STATUS.md">Status</a> · <a href="docs/VIDEO.md">Video pipeline</a> · <a href="docs/ARCHITECTURE.md">Architecture</a> · <a href="CONTRIBUTING.md">Contributing</a></p>
 
 </div>
 
-> **2026-10-31 — FPS fix gameplay.** 3D rendering and playable Battle Arena gameplay,
-> with smoother gameplay at **about 20 FPS on average** (approximate user estimate,
-> not a benchmark): detailed views run at 16–18 FPS, while Bakugan launch/control
-> reaches 28–30 FPS. Menus recover to 30 FPS; cinematics run around 27–30 FPS.
-> The original **30 FPS cap is preserved**. Small loading hitches remain.
-> [Performance fixes and remaining work](docs/PERFORMANCE_2026-10-31.md).
+> **2026-11-01 — Aquos reflections and shadows corrected.** Falling water, rain,
+> reflections and dark shadows are confirmed by the user. Performance is the
+> current priority: Aquos gameplay is around 12–15 FPS, loading still stutters,
+> and an occasional black flash remains. The original 30 FPS cap is preserved;
+> sustained 30 FPS has not been achieved.
+> [Current status and next steps](docs/NEXT_SESSION.md) · [Measurements](docs/PERFORMANCE_2026-11-01.md).
 
-> **2026-10-31 — Battle Arena gameplay fixed.** Fixed turn-transition freezes,
-> speckled field rendering, and card textures. Player/CPU turns verified.
-> [Report and screenshots](docs/BATTLE_ARENA_FIXED.md).
-> Next: [effects and shaders](docs/NEXT_SESSION_EFFECTS_SHADERS.md).
+[Bakugan: Battle Brawlers](https://en.wikipedia.org/wiki/Bakugan:_Battle_Brawlers) (2009) was never ported to PC. This project lifts the game's **PPU (CPU) and SPU (DSP) code to C++ ahead of time** with [ps3recomp](https://github.com/sp00nznet/ps3recomp) and links it against a small HLE runtime, producing an ordinary `.exe` that renders through Direct3D 12. Menus reach 30 FPS; detailed Aquos gameplay currently runs around 12–15 FPS, with further performance work pending.
 
-[Bakugan: Battle Brawlers](https://en.wikipedia.org/wiki/Bakugan:_Battle_Brawlers) (2009) was never ported to PC. This project lifts the game's **PPU (CPU) and SPU (DSP) code to C++ ahead of time** with [ps3recomp](https://github.com/sp00nznet/ps3recomp) and links it against a small HLE runtime, producing an ordinary `.exe` that renders through Direct3D 12. Menus reach 30 FPS; 3D Battle Arena gameplay averages roughly 20 FPS in user testing, with further performance work pending.
-
-Nothing runs in an emulator: the machine code is translated once, then compiled like any other program.
+Lifted code is compiled ahead of time; dynamic SPU jobs without a matching recompiled image can use the runtime fallback.
 
 | | |
 |---|---|
@@ -48,7 +43,7 @@ Nothing runs in an emulator: the machine code is translated once, then compiled 
 | PPU lift — 15,682 functions / 17 translation units | ✅ |
 | SPU lift — 5 images, 1,331 functions | ✅ |
 | HLE table — 1,204 handlers | ✅ |
-| Build — clang-cl + Ninja + Direct3D 12, 30 FPS | ✅ |
+| Build — clang-cl + Ninja + Direct3D 12 | ✅ |
 | Asset pipeline — 607 inflate jobs decompressed on the SPUs | ✅ |
 | Publisher FMVs — Activision, Nowpro, Premium Agency, Nelvana | ✅ |
 | Opening + narrative intro — H.264/AAC through Media Foundation | ✅ |
@@ -57,17 +52,17 @@ Nothing runs in an emulator: the machine code is translated once, then compiled 
 | Music — `SNDP` PCM scores mixed by the SPU, plus FMV AAC | ✅ |
 | Battle Arena — player/CPU turns, field and card textures fixed | ✅ |
 | *Known defect:* mode-select "gate" — 2D layers behind the portrait overlap | ⚠️ |
-| **3D scene** — field visible; effects, shaders and shadows pending | ⚠️ |
+| **3D scene** — Aquos reflections and shadows corrected; other arenas need validation | ⚠️ |
 | **Gameplay** — tutorial and story require validation | ⚠️ |
 | **Sound effects** — ATRAC3 in `SOUND/*.PAST` | ❌ |
 
-**Battle Arena is playable with corrected field and card textures. Effects, shaders, and performance still need work.**
+**Battle Arena is playable with corrected field and card textures. Performance, an occasional flash, and other-arena validation remain.**
 
 ## Help wanted
 
 These are the walls we are stuck on. Each one is a self-contained problem with a measurement already done — the details are in [`docs/STATUS.md`](docs/STATUS.md) and [`docs/NEXT_SESSION.md`](docs/NEXT_SESSION.md).
 
-1. **Effects and shaders.** Isolate lighting, transparency, reflection, and composition differences. Shadows require a real offscreen depth target. See [`docs/NEXT_SESSION_EFFECTS_SHADERS.md`](docs/NEXT_SESSION_EFFECTS_SHADERS.md).
+1. **Performance.** Reduce loading stalls and reach sustained 30 FPS while preserving effects and complete frames. See [`docs/NEXT_SESSION.md`](docs/NEXT_SESSION.md).
 2. **Audio leftovers.** Menu scores and the SPU mixer work; the `.PAST` effects are ATRAC3 and still silent, and a few cuts are under review. `libs/audio/`.
 3. **Testers.** Does it boot on your GPU/driver? A `run.log` and one sentence is enough to open an issue.
 

@@ -1,3 +1,6 @@
+> Informe histórico de un hito anterior. Estado vigente y pendientes:
+> [NEXT_SESSION.md](NEXT_SESSION.md).
+
 # Fixed: Battle Arena gameplay, campo y cartas — 31/10/2026
 
 Battle Arena supera `GAME START`, entra al turno del jugador y continúa al turno
@@ -7,7 +10,7 @@ El siguiente trabajo es sobre **efectos y shaders**: este anuncio no significa
 que todo el renderizado, todos los modos o el rendimiento estén terminados.
 
 Rama: `codex/battle-arena-rendering`. Continuar por
-[NEXT_SESSION_EFFECTS_SHADERS.md](NEXT_SESSION_EFFECTS_SHADERS.md).
+[NEXT_SESSION.md](NEXT_SESSION.md).
 
 ## Correcciones conservadas
 

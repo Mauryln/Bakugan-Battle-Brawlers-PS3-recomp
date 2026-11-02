@@ -1,28 +1,92 @@
-> **CIERRE FPS FIX GAMEPLAY:** build principal actualizada; última prueba: vistas detalladas 16–18 FPS, cinemáticas ~27 FPS, tirones de carga breves. Mantener límite 30 FPS y strips nativos. Ver el cierre y siguientes mediciones en [PERFORMANCE_2026-10-31.md](PERFORMANCE_2026-10-31.md).
+# Continuar desde aquí — 01/11/2026
 
-> **ACTUALIZACIÓN POSTERIOR 31/10/2026:** leer [PERFORMANCE_2026-10-31.md](PERFORMANCE_2026-10-31.md).
-> Cinemáticas/menú a 30 FPS y lanzamiento/control del Bakugan a 28–30 confirmados.
-> Conservar cuadros completos y strips nativos. Queda el primer plano de selección (~18 FPS).
->
-> **ACTUALIZACIÓN 31/10/2026:** gameplay Battle Arena, campo y cartas corregidos.
-> Cierre y validación: [BATTLE_ARENA_FIXED.md](BATTLE_ARENA_FIXED.md).
-> Continuar con [NEXT_SESSION_EFFECTS_SHADERS.md](NEXT_SESSION_EFFECTS_SHADERS.md).
-> El contenido siguiente se conserva como informe histórico.
+## Estado vigente
 
-> **Estado vigente al 30/10/2026:** el informe de cierre de hoy (FIFO desync, cartas BC3, transparencias, sombras) está en [NEXT_SESSION_FIFO.md](NEXT_SESSION_FIFO.md). Continuar por ahí. Gameplay, HUD y Sixaxis corregidos; queda el cuelgue del FIFO y efectos visuales.
+Build principal: `bakugan-recomp/build/BakuganRecomp.exe`, Release Windows
+D3D12, BLES00758. El usuario confirmó cascadas, lluvia, reflejos correctos y
+sombras oscuras en Aquos. El objetivo prioritario ahora es rendimiento:
+gameplay <=15 FPS, tirones desde loading y audio adelantado a las primeras
+presentaciones. NO se dan por alcanzados 30 FPS sostenidos.
 
-Lo que quedó arreglado (commiteado)
-Parche	Fix
-0009	Deformación 3D — los strips de la arena cortan con 0x7FFF; ya no se lee como vértice.
-0010	Cinemáticas negras (RT_REBIND fijo) + congelamientos (caché de shaders en shadercache/).
-Build verde, pipeline reconoce los 10 parches, repo limpio. Todo en patches/.
-Lo que NO resolví (para mañana)
-1. Negro del gameplay (turno del jugador) — la escena 3D sí dibuja a 0xEAB0000 (62% de píxeles), el quad de composición sí se dibuja con alpha=1, pero el backbuffer sale negro. Causa exacta aún sin confirmar.
-2. Texturas granuladas (mipmaps/sampling).
-3. Caras invisibles (alpha/transparencia).
-Dónde está todo
-- docs/NEXT_SESSION.md → informe completo: lo arreglado, lo revertido (el alias 1:1 que rompía el HUD), los diagnósticos que dejé, y la prueba concreta para mañana (un comando RSX_CAP+RX_DISPDBG+VP_DUMP listo para copiar/pegar y llegar al turno del jugador).
-- En ps3recomp-src quedan sin commitear dos diagnósticos útiles (VTX_COL para ver el alpha del composite, y el conteo de superficie indexada). Están documentados en el informe.
-Lo que puedes hacer tú manualmente mañana
-Ejecuta el comando del apartado "Prueba concreta" del informe, llega al turno del jugador, muévete 4-5 s y cierra. Con el manifest.txt + [DISPDRAW] sabremos si el composite se dibuja (t0=0xDF60000) y con qué estado, que es la pieza que falta.
-No verifiqué: no llegué a confirmar visualmente si la escena 3D del gameplay está fuera de pantalla (cámara/VP) o es un problema del composite — la captura que hice cayó en un frame de transición sin el quad de composición. Riesgo: los dos diagnósticos sin commitear en ps3recomp-src se perderían si haces git checkout . ahí; si los quieres conservar, pídeme que los meta en un parche.
+Tras corregir fronteras de cuadros y ampliar la reserva, 24 capturas del turno
+no mostraron cuadros vacíos / reflejos duplicados. Sin embargo, el usuario
+vio un destello negro aislado después de jugar un rato: sigue pendiente.
+No considerar cerrados los efectos de todas las arenas: faltan pruebas
+completas de Pyrus, Haos, Subterra y Ventus, tutorial e historia.
+
+## Qué cambió
+
+| Parche | Resultado |
+|---|---|
+| 0036 | Samplers reales por draw: wrap/filtros/LOD/borde; cascadas y lluvia confirmadas |
+| 0037 | Vértices en RAM cacheada; mejora parcial de recuperación de carga, mayor RAM |
+| 0038 | SET_SHADER_WINDOW / WPOS: origen, centro, altura y 1/W; reflejos confirmados |
+| 0039 | D24 DSV/SRV por superficie, clears ordenados, pases sin color y ZFUNC correcto; sombras oscuras confirmadas |
+| 0040 | GCM_FULL_FRAMES por defecto en el port, notificación de flip consumida una vez y 8192 draws; corrige mezcla/truncamiento capturados |
+| 0041 | PERF separa VS lookup, snapshots de constantes, fence y copia de vértices; diagnóstico desactivado sin PERF=1 |
+
+Hay 40 parches en la serie 0001–0041: 0023 sigue retirado. No editar lifts.
+Los dos diagnósticos históricos locales VTX_COL y conteo de draws indexados
+no están en parches. Evitar resets generales dentro de ps3recomp-src.
+
+## Primera tarea al retomar: rendimiento
+
+Leer [PERFORMANCE_2026-11-01.md](PERFORMANCE_2026-11-01.md): contiene cifras,
+limitaciones del perfil y el prototipo compacto no integrado. Gameplay de
+Aquos ronda 12 FPS; preparación de draws ~49%, render_frame ~24%, y copiar
+vértices consume ~11 ms/cuadro. Loading inicial a 4–5 FPS tiene casi todo el
+tiempo fuera del renderizador; después aparecen crecimientos de VBO hasta
+1536 MiB. Tratar ambos tramos por separado.
+
+1. Integrar/probar stream GPU compacto por inputs del VP y capacidad GPU
+   independiente del staging CPU. Conservar fallback de 16 atributos.
+2. Medir idéntica cámara antes/después; conservar solo mejoras demostradas.
+3. Perfilar loading PPU/SPU y esperas; no asumir que todo es asignación GPU.
+4. Reproducir el destello negro de larga duración con la build final.
+5. Probar efectos de las otras arenas y después el congelamiento por
+   inactividad en menús (`fifo recycle: drain stalled`, 2000 ms).
+
+## Reproducir / medir
+
+```powershell
+.\.venv\Scripts\python.exe tools\pipeline.py --only patch
+.\.venv\Scripts\python.exe tools\build.py
+.\tools\run.ps1
+# Para medir, antes de lanzar:
+$env:PERF = "1"
+```
+
+PERF no debe combinarse con capturas para comparar FPS. Los scripts de
+RenderDoc y análisis están documentados en
+[EFFECTS_COMPARE_2026-11-01.md](EFFECTS_COMPARE_2026-11-01.md). Las capturas
+de RPCS3 fueron de momentos distintos y una del recomp quedó incompleta;
+la correlación de bandas no prueba por sí sola que falte el espejo.
+
+## Evidencia local útil
+
+- `diagnostics/arena/aquos-window-20261101`: primera corrección de reflejos.
+- `aquos-shadow-compare-20261101`: sombras oscuras; readback nativo correcto.
+- `aquos-depth-isolated-20261101/frame_130`: negro, 2048 ops y pase de reflejo
+  duplicado (702 frente a 351 draws en vecinos), cola truncada.
+- `aquos-full-frames-20261101/frame_118` a `frame_141`: 24 capturas sin ese
+  patrón de duplicación / cuadro vacío; no prueba estabilidad prolongada.
+- `aquos-perf-20261101`: perfil sin capturas, CPU y fases de carga/gameplay.
+- `compact-prototype-20261101`: fuentes y prueba GPU del prototipo retirado.
+- `shadow-experiment-withdrawn-20261101`: primera prueba fallida, solo histórica.
+- `battle-arena-picture/bugs`: capturas aportadas por el usuario.
+
+Todas esas rutas son relativas a `diagnostics/arena/` salvo la última. Los
+dumps, símbolos, capturas y assets son locales e ignorados. No subirlos a Git.
+
+## Invariantes
+
+Conservar límite original 30 FPS, cuadros completos, strips nativos, estado
+por draw, todas las texturas/partículas, transparencia, profundidad y audio.
+No activar NODEPTH/DEPTH_OFF, no simular sombras, no saltar trabajo SPU, no
+alterar el reloj para inflar contadores. Conservar backpressure del FIFO y
+comparación de alfa UNORM. Mantener parches reproducibles y pruebas GPU.
+
+Los antiguos handoffs de 26–30/10 se retiraron por estar sustituidos. Sus
+versiones siguen en Git; una copia local anterior a la limpieza queda en
+`diagnostics/arena/docs-before-close-20261101/`. Los informes de hitos
+con evidencia útil se conservan, marcados como históricos.

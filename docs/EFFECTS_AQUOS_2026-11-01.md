@@ -1,3 +1,6 @@
+> Informe histórico de un hito anterior. Estado vigente y pendientes:
+> [NEXT_SESSION.md](NEXT_SESSION.md).
+
 # Aquos: samplers de agua y reflejos — 01/11/2026
 
 El usuario confirmó que el rojo de `battle-arena-picture/` ya no reproduce con
@@ -36,7 +39,7 @@ enlazar las dos tablas. No se añade una espera GPU por draw.
 Límites: CLAMP antiguo y modos MIRROR_ONCE extendidos usan la aproximación de
 borde de D3D; convolución usa filtrado lineal. Esta corrección no implementa
 anisotropía ni comparación de sombras. Las sombras por superficie siguen
-pendientes según `NEXT_SESSION_EFFECTS_SHADERS.md`.
+pendientes según `NEXT_SESSION.md`.
 
 ## Validación
 

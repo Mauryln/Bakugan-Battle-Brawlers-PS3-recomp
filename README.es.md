@@ -12,28 +12,23 @@
 <img src="https://img.shields.io/badge/gr%C3%A1ficos-Direct3D%2012-107C10?style=flat-square" alt="Gráficos: Direct3D 12">
 <img src="https://img.shields.io/badge/t%C3%ADtulo-BLES00758-c0392b?style=flat-square" alt="Título: BLES00758">
 <img src="https://img.shields.io/badge/licencia-MIT-2ea44f?style=flat-square" alt="Licencia: MIT">
-<img src="https://img.shields.io/badge/status-Battle%20Arena%20gameplay%20fixed-green?style=flat-square" alt="Battle Arena gameplay fixed; effects and shaders pending">
+<img src="https://img.shields.io/badge/status-Battle%20Arena%20gameplay%20fixed-green?style=flat-square" alt="Aquos reflections and shadows corrected; performance pending">
 </p>
 
 <p><a href="README.md">English</a> · <a href="docs/STATUS.md">Estado</a> · <a href="docs/VIDEO.md">Vídeo</a> · <a href="docs/ARCHITECTURE.md">Arquitectura</a></p>
 
 </div>
 
-> **31/10/2026 — FPS fix gameplay.** Ya hay renderizado 3D y gameplay fluido
-> en Battle Arena, con **unos 20 FPS de media** (estimación aproximada del usuario,
-> no un benchmark): las vistas detalladas van a 16–18 FPS y el lanzamiento/control
-> del Bakugan alcanza 28–30 FPS. Los menús recuperan 30 FPS y las cinemáticas van
-> a 27–30 FPS. Se mantiene el **límite original de 30 FPS**. Quedan pequeños
-> tirones de carga. [Mejoras y trabajo pendiente](docs/PERFORMANCE_2026-10-31.md).
+> **01/11/2026 — Reflejos y sombras de Aquos corregidos.** Cascadas, lluvia,
+> reflejos y sombras oscuras confirmados por el usuario. La prioridad es ahora
+> el rendimiento: gameplay alrededor de 12–15 FPS en Aquos, tirones desde la
+> carga y un destello negro ocasional todavía pendiente. Se mantiene el límite
+> original de 30 FPS; no se dan por alcanzados 30 FPS sostenidos.
+> [Estado y próximo trabajo](docs/NEXT_SESSION.md) · [Mediciones](docs/PERFORMANCE_2026-11-01.md).
 
-> **31/10/2026 — Fixed gameplay Battle Arena.** Corregidos el bloqueo al cambiar
-> de turno, el granulado del campo y las texturas de cartas. Turnos 1P/CPU
-> verificados. [Informe y capturas](docs/BATTLE_ARENA_FIXED.md).
-> Próximo trabajo: [efectos y shaders](docs/NEXT_SESSION_EFFECTS_SHADERS.md).
+[Bakugan: Battle Brawlers](https://es.wikipedia.org/wiki/Bakugan:_Battle_Brawlers) (2009) nunca salió en PC. Este proyecto levanta el código **PPU (CPU) y SPU (DSP)** del juego a C++ de forma estática con [ps3recomp](https://github.com/sp00nznet/ps3recomp) y lo enlaza contra un runtime HLE pequeño: el resultado es un `.exe` normal que dibuja por Direct3D 12. Los menús alcanzan 30 FPS; el gameplay detallado de Aquos ronda 12–15 FPS en las pruebas actuales, con optimizaciones pendientes.
 
-[Bakugan: Battle Brawlers](https://es.wikipedia.org/wiki/Bakugan:_Battle_Brawlers) (2009) nunca salió en PC. Este proyecto levanta el código **PPU (CPU) y SPU (DSP)** del juego a C++ de forma estática con [ps3recomp](https://github.com/sp00nznet/ps3recomp) y lo enlaza contra un runtime HLE pequeño: el resultado es un `.exe` normal que dibuja por Direct3D 12. Los menús alcanzan 30 FPS; el gameplay 3D de Battle Arena ronda los 20 FPS de media en pruebas del usuario, con optimizaciones pendientes.
-
-Aquí no hay emulación: el código máquina se traduce una vez y después se compila como cualquier otro programa.
+El código levantado se compila por adelantado; los trabajos SPU dinámicos sin imagen recompilada pueden usar el fallback del runtime.
 
 | | |
 |---|---|
@@ -57,15 +52,15 @@ Aquí no hay emulación: el código máquina se traduce una vez y después se co
 | Música — partituras PCM `SNDP` mezcladas en el SPU, más el AAC de los vídeos | ✅ |
 | Battle Arena — turnos 1P/CPU, campo y cartas corregidos | ✅ |
 | *Defecto conocido:* el "gate" del selector de modo — las capas 2D tras el retrato se solapan | ⚠️ |
-| **Escena 3D** — campo visible; efectos, shaders y sombras pendientes | ⚠️ |
+| **Escena 3D** — Aquos con reflejos y sombras corregidos; otras arenas por validar | ⚠️ |
 | **Gameplay** — tutorial e historia pendientes de validación | ⚠️ |
 | **Efectos de sonido** — ATRAC3 en `SOUND/*.PAST` | ❌ |
 
-**Battle Arena es jugable y el campo y las cartas se ven correctamente. Quedan efectos, shaders y rendimiento por mejorar.**
+**Battle Arena es jugable y el campo y las cartas se ven correctamente. Quedan rendimiento, un destello ocasional y validación de otras arenas.**
 
 ## Se busca ayuda
 
-1. **Efectos y shaders.** Aislar diferencias de iluminación, transparencias, reflejos y composición. Las sombras necesitan un depth target offscreen real. Plan: [`docs/NEXT_SESSION_EFFECTS_SHADERS.md`](docs/NEXT_SESSION_EFFECTS_SHADERS.md).
+1. **Rendimiento.** Reducir tirones de carga y alcanzar 30 FPS sostenidos, conservando efectos y cuadros completos. Plan: [`docs/NEXT_SESSION.md`](docs/NEXT_SESSION.md).
 2. **Lo que queda de audio.** Las partituras de menú y el mezclador SPU funcionan; los efectos `.PAST` son ATRAC3 y siguen en silencio, y quedan cortes por revisar. `libs/audio/`.
 3. **Testers.** ¿Arranca en tu GPU/driver? Con un `run.log` y una frase basta para abrir un issue.
 

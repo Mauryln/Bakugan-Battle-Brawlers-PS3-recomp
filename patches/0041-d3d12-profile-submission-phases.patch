@@ -1,0 +1,85 @@
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -632,6 +632,8 @@
+ static double s_perf_gpu = 0.0, s_perf_pre = 0.0, s_perf_srv = 0.0, s_perf_pso = 0.0;
+ static int s_perf_pso_calls = 0, s_perf_pso_miss = 0, s_perf_pso_hashbytes = 0;
+ static double s_perf_submit = 0.0;
++static double s_perf_vs_lookup = 0.0, s_perf_cb_record = 0.0;
++static double s_perf_fence = 0.0, s_perf_flush = 0.0;
+ static u64    s_perf_nverts = 0;
+ static u64    s_perf_texbytes = 0;
+ static int    s_perf_ntex = 0;
+@@ -1966,7 +1968,7 @@
+     return h ? h : 1u;
+ }
+
+-static int vp_get_vs(const rsx_state* st)
++static int vp_get_vs_impl(const rsx_state* st)
+ {
+     extern int rsx_vp_decompile(const uint8_t*, u32, char*, u32);
+     if (!st || st->vp_ucode_bytes < 16) return -1;
+@@ -2082,6 +2084,14 @@
+         s_d3d.current_rsx_state = prev;
+     }
+     return slot;
++}
++
++static int vp_get_vs(const rsx_state* state)
++{
++    double start = perf_on() ? perf_now() : 0.0;
++    int result = vp_get_vs_impl(state);
++    if (perf_on()) s_perf_vs_lookup += perf_now() - start;
++    return result;
+ }
+
+ /* --- Guest blend state -> packed PSO key ----------------------------------
+@@ -3510,7 +3520,7 @@
+     memcpy(dr->viewport_offset, st->viewport_offset, sizeof(dr->viewport_offset));
+ }
+
+-static void vp_record_cb(u32 slot, int vs_idx, D3D12DrawRecord* dr)
++static void vp_record_cb_impl(u32 slot, int vs_idx, D3D12DrawRecord* dr)
+ {
+     const rsx_state* st = s_d3d.current_rsx_state;
+     if (!s_d3d.vp_cb_mapped || !st || slot >= MAX_DRAWS) return;
+@@ -3732,6 +3742,13 @@
+         }
+     }
+
++}
++
++static void vp_record_cb(u32 slot, int vs_idx, D3D12DrawRecord* draw)
++{
++    double start = perf_on() ? perf_now() : 0.0;
++    vp_record_cb_impl(slot, vs_idx, draw);
++    if (perf_on()) s_perf_cb_record += perf_now() - start;
+ }
+
+ /* Which offscreen surface (if any) does the current RSX state render to?
+@@ -4462,12 +4479,16 @@
+      * (gcm/cube: triangles mixing stale and new vertices -> missing/sliver
+      * polygons). These workloads are a few draws/frame, so full serialisation
+      * costs little. */
++    double fence_start = perf_on() ? perf_now() : 0.0;
+     wait_for_gpu();
++    if (perf_on()) s_perf_fence += perf_now() - fence_start;
++    double flush_start = perf_on() ? perf_now() : 0.0;
+     vp_release_frame_psos();
+     if (s_d3d.vp_vb_upload && s_d3d.vp_vb_mapped)
+         vp_flush_vertex_frame(s_d3d.vp_vb_upload, s_d3d.vp_vb_mapped,
+             s_d3d.vp_vertex_capacity, s_d3d.vp_parity, s_d3d.vp_vb_offset);
+     if (!rsx_prepare_samplers()) return;
++    if (perf_on()) s_perf_flush += perf_now() - flush_start;
+     /* Compile the real vertex program once its microcode is captured, and keep
+      * the constant bank uploaded for the VS. */
+     /* The base VP pipeline gates the ENTIRE vertex-program draw pass below
+@@ -5555,6 +5576,9 @@
+                     s_perf_pso_calls, s_perf_pso_miss, s_perf_pso_hashbytes / 1024,
+                     fr - s_perf_rf, 100.0 * (fr - s_perf_rf) / fr, 10);
+             fprintf(stderr, "[PERF submit] %.3fs (%.0f%%) in vertex packing and draw snapshots\n", s_perf_submit, 100.0 * s_perf_submit / fr);
++            fprintf(stderr, "[PERF detail] VS %.3fs | CB %.3fs | fence %.3fs | vertex flush %.3fs\n",
++                s_perf_vs_lookup, s_perf_cb_record, s_perf_fence, s_perf_flush);
++            s_perf_vs_lookup = s_perf_cb_record = s_perf_fence = s_perf_flush = 0.0;
+             s_perf_submit = 0.0;
+             s_perf_frame = 0.0; s_perf_tex = 0.0; s_perf_vtx = 0.0; s_perf_rf = 0.0;
+             s_perf_gpu = 0.0; s_perf_pre = 0.0; s_perf_srv = 0.0; s_perf_pso = 0.0;

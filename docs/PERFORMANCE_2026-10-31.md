@@ -1,3 +1,6 @@
+> Informe histórico de un hito anterior. Estado vigente y pendientes:
+> [NEXT_SESSION.md](NEXT_SESSION.md).
+
 # Rendimiento — 31/10/2026
 
 Se conserva el ritmo original del juego de **30 FPS**. No se cambia el timebase,

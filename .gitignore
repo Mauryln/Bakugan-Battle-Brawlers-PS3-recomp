@@ -3,6 +3,7 @@
 # tools/pipeline.py and must never be committed.
 # ---------------------------------------------------------------------------
 iso/
+bakugan-nx/
 game/
 gamedata/
 analysis/
@@ -29,6 +30,8 @@ ps3recomp-src/
 tools/rpcs3/
 tools/rpcs3.7z
 tools/bin/
+tools/renderdoc/
+*.rdc
 
 # ---------------------------------------------------------------------------
 # Python

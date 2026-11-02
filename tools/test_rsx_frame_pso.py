@@ -1,6 +1,7 @@
 """Prepare PSOs once per draw and retain them through GPU completion."""
 from pathlib import Path
 import subprocess
+import re
 import sys
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -14,7 +15,8 @@ for name in ["static void vp_store_frame_pso(", "static void vp_release_frame_ps
     start = source.index(name)
     parts.append(source[start:source.index("\n}", start) + 2])
 assert source.count("vp_get_fp_pso(") == 2, "draw pass must reuse the prepared pipeline"
-assert source.count("wait_for_gpu();\n    vp_release_frame_psos();") == 2
+# Profiling may sit between the fence and release; ownership still must wait.
+assert len(re.findall(r"wait_for_gpu\(\);(?:(?![{}]).)*?vp_release_frame_psos\(\);", source, re.S)) == 2
 out = ROOT / "diagnostics/performance/frame-pso"
 out.mkdir(parents=True, exist_ok=True)
 (out / "frame_pso.inc").write_text("\n".join(parts), encoding="utf-8")
