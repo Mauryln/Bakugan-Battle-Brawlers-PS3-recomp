@@ -212,3 +212,31 @@ relleno usaba una y `vp_upload_compact_frame` recalculaba otra.
    comparar cada bloque, no 200 vertices por draw.
 
 Ganancia esperada: 67 -> 57 ms (~17,5 FPS).
+
+## Relleno compacto: aplicado y SIN efecto en FPS
+
+Implementado el paso 1-5 de la receta (mascara decidida una sola vez, guardia
+`[VPMASK]`, empaquetado con la mascara registrada):
+
+- `def` 0,212 s -> **0,000** (los 10,6 ms desaparecen)
+- `VPCHK`: **0 desviaciones**
+- `[VPMASK]`: **0 avisos**
+- graficos correctos
+- **FPS: 14,8 -> 14,6. Sin mejora.**
+
+## El hallazgo que cambia el problema
+
+Es la cuarta vez que se elimina un bloque grande medido (resolver, copias,
+llamadas, `def`) y el FPS no se mueve. Por tanto:
+
+**el frame NO es la suma de lo que mide `[PERF]`.**
+
+Desglose actual: `submit` ~34 ms + `render_frame` ~16 ms = 50 ms, pero el
+frame real es 68,5 ms. **Hay ~18 ms fuera de toda medida**, en el cubo
+`guest`: walker del FIFO, `rsx_backend_pump` y lo que sea que espere el
+hilo `frame_clock`. Mientras no se sepa que son esos 18 ms, optimizar el
+camino de dibujo no puede mover el marcador: se esta quitando agua de un cubo
+que no es el que desborda.
+
+Siguiente paso obligado (no es dibujo): instrumentar el bucle de `frame_clock`
+por fases -- drain, pump, espera -- y los 18 ms del cubo `guest`.
