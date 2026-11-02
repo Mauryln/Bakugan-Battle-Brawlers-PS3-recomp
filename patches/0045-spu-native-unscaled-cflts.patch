@@ -1,0 +1,34 @@
+--- a/runtime/spu/spu_helpers.h
++++ b/runtime/spu/spu_helpers.h
+@@ -999,7 +999,30 @@
+     const uint32_t v = sh >= 0 ? m << sh : (sh <= -24 ? 0 : m >> -sh);
+     return neg ? 0u - v : v;
+ }
+-static inline u128 spu_cflts(u128 a, int i8) { u128 r; for (int i = 0; i < 4; i++) r._u32[i] = spu__cfl_lane(a._u32[i], 173 - (i8 & 0xFF), 0); return r; }
++static inline u128 spu_cflts(u128 a, int i8) {
++#if (defined(__SSE2__) || defined(_M_X64)) && !defined(SPU_SCALAR_HELPERS)
++    if ((i8 & 0xFF) == 173) {
++        /* Unscaled conversion in the audio kernels. CVTT truncates regardless
++         * of MXCSR rounding. Negative overflow already produces INT_MIN;
++         * positive overflow (including SPU extended exponent 255) saturates
++         * to INT_MAX instead of the hardware's indefinite integer. */
++        __m128i bits;
++        memcpy(&bits, &a, 16);
++        const __m128i positive_overflow = _mm_cmpgt_epi32(bits, _mm_set1_epi32(0x4EFFFFFF));
++        const __m128i converted = _mm_cvttps_epi32(_mm_castsi128_ps(bits));
++        const __m128i result = _mm_or_si128(
++            _mm_andnot_si128(positive_overflow, converted),
++            _mm_and_si128(positive_overflow, _mm_set1_epi32(0x7FFFFFFF)));
++        u128 out;
++        memcpy(&out, &result, 16);
++        return out;
++    }
++#endif
++    u128 r;
++    for (int i = 0; i < 4; i++)
++        r._u32[i] = spu__cfl_lane(a._u32[i], 173 - (i8 & 0xFF), 0);
++    return r;
++}
+ static inline u128 spu_cfltu(u128 a, int i8) { u128 r; for (int i = 0; i < 4; i++) r._u32[i] = spu__cfl_lane(a._u32[i], 173 - (i8 & 0xFF), 1); return r; }
+ static inline u128 spu_csflt(u128 a, int i8) { u128 r; for (int i = 0; i < 4; i++) { const int32_t v = a._s32[i];
+     r._u32[i] = v ? spu__sf_pack(v < 0 ? 0x80000000u : 0, v < 0 ? 0u - (uint32_t)v : (uint32_t)v, -(155 - (i8 & 0xFF))) : 0; } return r; }
