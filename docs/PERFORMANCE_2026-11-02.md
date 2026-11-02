@@ -272,3 +272,65 @@ render ni el VFS. Es una linea de trabajo distinta de la del gameplay.
 `spu_exec`, `spu_fallback`, `pm_write_watch`, `timer_thread`,
 `raw_spu`, `spurs_jc`. Sin eso no se puede correlacionar CPU con rol
 (Windows oculta la direccion de inicio sin elevacion).
+
+## Siguiente bloque: decode de vertices en compute shader (diseno)
+
+Estado de partida: **18 FPS** en Aquos. Frame 55 ms = drain 70 % + dibujo 29 %.
+Detalle del drain: `attr` 14 ms (decode por vertice), `vertex flush` 8,3 ms
+(subida write-combined), walker ~8 ms, relleno de registros ~8 ms.
+GPU ociosa y `fence 0.000s`: **nunca esperamos a la GPU**, asi que dobuf er de
+listas/fences no aporta nada (descartado con medida, no con opinion).
+
+### Idea
+
+La CPU deja de tocar los datos de vertice. Por cada vertice emite **16 bytes de
+trabajo** en vez de leer y convertir ~76:
+
+`
+struct VertexJob {          // 16 B, caben 4 por cache line
+    uint32_t src;           // direccion del guest ya resuelta (base + idx*stride)
+    uint16_t stride;
+    uint8_t  type;          // NV4097 tipo (2 = float32 BE, 3 = half, ...)
+    uint8_t  ncomp;
+    uint32_t dst;           // byte offset del destino compacto
+};
+`
+
+- CPU: recorre indices (barato), calcula `src` y escribe 16 B por vertice.
+  500k vertices = **8 MB/frame** escritos en RAM cacheada (~1,5 ms) en vez de
+  ~14 ms de decode.
+- GPU: un `Dispatch` de un hilo por vertice lee `src`, hace el byte-swap
+  big-endian y escribe el float4 en el vertex buffer compacto.
+
+Se espera: `attr` 14 -> ~1 ms, y `vertex flush` 8,3 -> ~1 ms (el compute
+escribe directo en el VB, sin staging intermedio). **Frame 55 -> ~32 ms ˜ 31 FPS.**
+
+### Piezas a construir
+
+1. **Root signature de compute** con un descriptor UAV (SRV de jobs + UAV de
+   salida). El backend ya compila HLSL en runtime con D3DCompile, asi que el
+   shader va embebido como string.
+2. **Buffer de jobs**: 500k x 16 B = 8 MB, en UPLOAD heap, doble buffer por
+   paridad (reusar `vp_parity`).
+3. **Vertex buffer objetivo en DEFAULT heap** (no UPLOAD): el compute escribe
+   ahi, y el draw lo lee. Hoy es UPLOAD; hay que cambiarlo y ajustar el binding.
+4. **Barrera** UAV -> VERTEX_AND_CONSTANT_BUFFER despues del dispatch.
+5. **Mapeo destino**: el offset compacto ya lo calcula `vp_upload_compact_frame`
+   (`dr->gpu_byte_offset` + `gpu_stride`); se puede emitir en el job.
+
+### Verificacion obligatoria
+
+`VPCHK` compara hoy bloque por bloque contra una referencia lenta. Para el
+compute hace falta el equivalente: en un frame de debug, leer el VB con una
+copia a READBACK y comparar contra `vp_fetch_vertex_ref` para 1000 vertices
+elegidos. Sin eso no se acepta el cambio: es exactamente el tipo de sitio donde
+un byte mal puesto da geometria sutilmente rota y cuesta horas encontrarlo.
+
+### Riesgos concretos
+
+- El VB pasa a DEFAULT heap: cualquier sitio que hoy haga `Map` sobre el
+  vertex buffer deja de funcionar.
+- Un `Dispatch` por frame con 500k hilos necesita que el layout sea uniforme;
+  los draws con mascara distinta deben emitir jobs con su propio stride.
+- Sin `UAV barrier` correcta, el draw lee el VB antes de que el compute
+  termine (sintoma: geometria de un frame anterior).
