@@ -114,3 +114,29 @@ límites de escritura y equivalencia de píxeles WARP con ATTR3/8/15, offsets
 de buffer distintos de cero y el decompilador real. La suite de render pasa
 a 24 pruebas. El prototipo histórico de diagnostics se conserva como evidencia;
 la implementación reproducible está en `patches/0042-d3d12-compact-vertex-upload.patch`.
+
+## Reciclaje FIFO: causa reproducida y corrección 0043
+
+En `aquos-compact-20261101` la pantalla principal presentó intervalos de
+~5,3 FPS con `guest` ~3,77 s y render ~0,01 s por 20 cuadros. Coincidían con
+`fifo recycle: drain stalled`, 2000 ms, y con el reciclador automático del
+título. Ese mecanismo de recuperación también actuaba sobre nuestro callback
+HLE: podía llevar GET al inicio sin consumir el JUMP que el productor esperaba.
+
+0043 excluye del reciclador automático los contextos cuyo callback es el
+sentinel HLE (directo o vía OPD). Mantiene la espera real de backpressure y
+la recuperación para callbacks de títulos que no reciclan. Prueba ampliada:
+`tools/test_gcm_fifo_wrap.py`.
+
+En `diagnostics/arena/aquos-recycle-owner-20261101` los reciclajes observados
+tardaron ~3–7 ms; no volvieron avisos de stalls ni de recuperación automática.
+El usuario confirmó menú destrabado, audio de menús sin ruido y ausencia de
+pantallazos en la prueba de Aquos. Persisten tirones desde loading, gameplay
+reportado de 11 FPS y ruido de audio en batalla. No dar estos últimos por
+resueltos ni la estabilidad prolongada por demostrada.
+
+Se repitió muestreo CPU de gameplay, verificando idéntica .pdata en el mapa
+auxiliar y el ejecutable. El hilo de render ocupa ~7,3 s de CPU/8 s; fetch de
+atributos ~17% de muestras. Las pilas adicionales señalan también consultas
+CRT de diagnóstico dentro de `d3d12_bind_texture`. El audio/SPU sigue ocupando
+un núcleo; esto no demuestra que pueda omitirse ni que sea el único límite.

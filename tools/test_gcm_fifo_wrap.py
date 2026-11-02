@@ -11,7 +11,8 @@ out = ROOT / "diagnostics/arena/fifo-wrap-test"
 out.mkdir(parents=True, exist_ok=True)
 source = (ROOT / "ps3recomp-src/libs/video/cellGcmSys.c").read_text(encoding="utf-8")
 functions = []
-for signature in ("void cellGcm_fifo_recycle(u32 ctx_ea)",
+for signature in ("static int gcm_title_recycle_allowed(u32 ctx)",
+                  "void cellGcm_fifo_recycle(u32 ctx_ea)",
                   "static int gcm_flip_into_fifo(u32 ctx, u32 bufferId)"):
     start = source.index(signature)
     body = source.index("{", start)

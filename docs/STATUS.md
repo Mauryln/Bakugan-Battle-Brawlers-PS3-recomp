@@ -12,6 +12,9 @@ Actualizado el 01/11/2026. La guía única para retomar trabajo es
   mediante mapas D24 nativos y comparación correcta. Confirmado por el usuario.
 - Fronteras de cuadros, notificación de flip y capacidad corregidas tras
   capturar un cuadro truncado; no se omiten efectos ni trabajo SPU.
+- Stream GPU compacto integrado (0042), con fallback completo.
+- Reciclaje FIFO con due�o �nico (0043): el usuario confirm� men� sin atasco,
+  audio de men�s sin ruido y ausencia de pantallazos en la prueba de Aquos.
 - Música PCM / mezclador SPU y audio de películas disponibles; no se da por
   cerrado el audio ATRAC3 / efectos .PAST.
 
@@ -19,7 +22,8 @@ Actualizado el 01/11/2026. La guía única para retomar trabajo es
 
 1. **30 FPS sostenidos.** Aquos ronda 12 FPS en el perfil de gameplay; el
    usuario reporta <=15 FPS. Hay tirones a 4–5 FPS desde loading, audio antes
-   que imagen en presentaciones y crecimiento de VBO a 1536 MiB.
+   que imagen en presentaciones y ruido de audio en batalla. El upload GPU compacto qued� en 384 MiB
+   en la corrida medida, frente a 1536 MiB anteriores.
 2. **Destello negro ocasional.** Mejoraron los fallos capturados de mezcla /
    truncamiento, pero el usuario volvió a ver uno tras jugar un rato.
 3. Validar Pyrus, Haos, Subterra, Ventus, tutorial e historia y sesiones largas.
@@ -36,8 +40,8 @@ Actualizado el 01/11/2026. La guía única para retomar trabajo es
 Los informes BATTLE_ARENA_FIXED, EFFECTS_AQUOS y PERFORMANCE_2026-10-31 se
 conservan como evidencia histórica, no como lista vigente de pendientes.
 La serie tiene 40 parches (0001–0041, sin 0023). La validación del cierre
-incluye Release, las 23 pruebas activas de render/FIFO/pipeline y aplicación
-sobre toolkit limpio. El prototipo compacto NO forma parte de la build.
+incluye Release, las 24 pruebas activas de render/FIFO/pipeline y aplicación
+sobre toolkit limpio. El stream compacto ya forma parte de la build; conserva RAM can�nica para respaldo y capturas.
 
 ## Construir y ejecutar
 

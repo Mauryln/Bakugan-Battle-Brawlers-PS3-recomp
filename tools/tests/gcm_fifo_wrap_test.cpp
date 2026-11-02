@@ -43,6 +43,10 @@ int main()
     memory[0x208] = 0x1C0000;
     memory[0x20C] = 0x300;
     memory[0x300] = GCM_FIFO_CALLBACK_SENTINEL_EA;
+    require(!gcm_title_recycle_allowed(0x200), "HLE callback owns recycling; walker must not rewind its ring");
+    memory[0x300] = 0x8888;
+    require(gcm_title_recycle_allowed(0x200), "real non-recycling callbacks retain overflow recovery");
+    memory[0x300] = GCM_FIFO_CALLBACK_SENTINEL_EA;
     s_fifo_getoff = 0x70000;
     require(gcm_flip_into_fifo(0x200, 0) == 1, "flip queues successfully");
     require(waits == 0, "queuing a flip does not execute it before its completion request is armed");
