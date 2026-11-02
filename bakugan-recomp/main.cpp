@@ -1,4 +1,4 @@
-/*
+﻿/*
  * ps3recomp game project -- entry point template.
  *
  * This is the runner. It boots a lifted title through the toolkit's PPU
@@ -210,11 +210,25 @@ static unsigned frame_clock_due_ticks(unsigned long long now,
     return (unsigned)due;
 }
 
+static double s_wait_s = 0.0; unsigned s_wait_n = 0;
+static double s_pres_s = 0.0; unsigned s_pres_n = 0;
+static double s_qpc_freq2 = 0.0;
+static void present_timed(void)
+{
+    if (s_qpc_freq2 == 0.0) { LARGE_INTEGER f; QueryPerformanceFrequency(&f); s_qpc_freq2 = (double)f.QuadPart; }
+    LARGE_INTEGER a, b; QueryPerformanceCounter(&a);
+    present_guest_frame();
+    QueryPerformanceCounter(&b);
+    s_pres_s += (double)(b.QuadPart - a.QuadPart) / s_qpc_freq2;
+    s_pres_n++;
+}
+
 static DWORD WINAPI frame_clock(LPVOID)
 {
     LARGE_INTEGER _f; QueryPerformanceFrequency(&_f);
     const double s_qpc_freq = (double)_f.QuadPart;
     double s_drain_s = 0.0; unsigned s_drain_n = 0;
+    unsigned s_outer_n = 0, s_due_sum = 0, s_pump_n = 0;
     ULONGLONG s_drain_t0 = GetTickCount64();
     const char* title = getenv("PS3_TITLE");
     if (!title || !*title) title = "Bakugan: Battle Brawlers";
@@ -233,15 +247,24 @@ static DWORD WINAPI frame_clock(LPVOID)
 #ifdef _WIN32
         /* A guest waiting on an RSX reference wakes the consumer immediately.
          * A fixed sleep here adds a scheduler delay to every render-pass fence. */
-        cellGcm_fifo_kick_wait(4);
+        { LARGE_INTEGER _a, _b; QueryPerformanceCounter(&_a);
+        /* Waiting here is pure latency: the drain below runs regardless, so a
+         * long timeout only delays the work. PS3_KICKWAIT sets it in ms. */
+        static int kw = -1;
+        if (kw < 0) { const char* e = getenv("PS3_KICKWAIT"); kw = e ? atoi(e) : 4; }
+        cellGcm_fifo_kick_wait(kw);
+        QueryPerformanceCounter(&_b);
+        s_wait_s += (double)(_b.QuadPart - _a.QuadPart) / s_qpc_freq;
+        s_wait_n++; }
 #else
         Sleep(4);
 #endif
         ULONGLONG now = GetTickCount64();
 
         unsigned due = frame_clock_due_ticks(now, &next_tick);
+        s_outer_n++; s_due_sum += due;
         for (unsigned fired = 0; fired < due; fired++) {
-            if (rsx_ok && rsx_backend_pump() != 0) rsx_ok = 0;
+            if (rsx_ok && (s_pump_n++, rsx_backend_pump()) != 0) rsx_ok = 0;
             cellGcmTickVBlank();
             cellGcmTickFlip();
             /* Present a pending flip BEFORE draining any further. The flip
@@ -250,7 +273,7 @@ static DWORD WINAPI frame_clock(LPVOID)
              * after the drain races the guest's next-frame writes and shows a
              * mixed one. */
             if (rsx_ok && cellGcm_take_flip_pending()) {
-                present_guest_frame();
+                present_timed();
                 last_flip = cellGcm_flip_request_count();
             }
             /* Drain the FIFO every tick. This is what writes the RSX sync-fence
@@ -269,7 +292,7 @@ static DWORD WINAPI frame_clock(LPVOID)
          * The real RSX writes them in microseconds. */
         if (rsx_ok) {
             if (cellGcm_take_flip_pending()) {
-                present_guest_frame();
+                present_timed();
                 last_flip = cellGcm_flip_request_count();
             }
             { LARGE_INTEGER _a, _b; QueryPerformanceCounter(&_a);
@@ -277,7 +300,7 @@ static DWORD WINAPI frame_clock(LPVOID)
               QueryPerformanceCounter(&_b);
               s_drain_s += (double)(_b.QuadPart - _a.QuadPart) / s_qpc_freq;
               s_drain_n++; }
-            if (rsx_backend_pump() != 0) {
+            if ((s_pump_n++, rsx_backend_pump()) != 0) {
                 rsx_ok = 0;              /* window closed */
                 continue;
             }
@@ -289,7 +312,7 @@ static DWORD WINAPI frame_clock(LPVOID)
                 /* This drain reached the marker. Consume its pending flag here
                  * too, or the next pre-drain check presents an empty batch. */
                 cellGcm_take_flip_pending();
-                present_guest_frame();
+                present_timed();
                 last_flip = fc;
             } else if (fc == 0) {
                 rsx_backend_present();
@@ -298,10 +321,10 @@ static DWORD WINAPI frame_clock(LPVOID)
         { ULONGLONG t = GetTickCount64();
           if (t - s_drain_t0 >= 2000 && s_drain_n) {
             double secs = (double)(t - s_drain_t0) / 1000.0;
-            fprintf(stderr, "[DRAIN] %u drains in %.2fs = %.0f/s | %.3fs total = %.0f%% of wall | %.0f us/drain%c",
-                    s_drain_n, secs, s_drain_n / secs, s_drain_s,
-                    100.0 * s_drain_s / secs, 1e6 * s_drain_s / s_drain_n, 10);
-            s_drain_s = 0.0; s_drain_n = 0; s_drain_t0 = t;
+            fprintf(stderr, "[FRAME] outer/s=%.1f due/s=%.1f pump/s=%.0f drain/s=%.0f | drain %.3fs of %.2fs | wait %.3fs | pres %.3fs (%u)%c",
+                    s_outer_n / secs, (double)s_due_sum / secs, (double)s_pump_n / secs, s_drain_n / secs,
+                    s_drain_s, secs, s_wait_s, s_pres_s, s_pres_n, 10);
+            s_outer_n = 0; s_due_sum = 0; s_pump_n = 0; s_drain_s = 0.0; s_drain_n = 0; s_wait_s = 0.0; s_wait_n = 0; s_pres_s = 0.0; s_pres_n = 0; s_drain_t0 = t;
           } }
     }
     return 0;
