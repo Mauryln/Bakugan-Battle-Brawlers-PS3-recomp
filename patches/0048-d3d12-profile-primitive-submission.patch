@@ -1,0 +1,62 @@
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -703,6 +703,15 @@
+ static double s_perf_submit = 0.0;
+ static double s_perf_vs_lookup = 0.0, s_perf_cb_record = 0.0;
+ static double s_perf_fence = 0.0, s_perf_flush = 0.0;
++typedef struct { u64 calls, inputs; double seconds; } RSXPrimitivePerf;
++static RSXPrimitivePerf s_perf_arrays[11], s_perf_indexed[11];
++static void perf_record_primitive_sample(RSXPrimitivePerf* table, u32 primitive, u32 count, double seconds)
++{
++    if (primitive >= 11u) primitive = 0;
++    table[primitive].calls++;
++    table[primitive].inputs += count;
++    table[primitive].seconds += seconds;
++}
+ static u64    s_perf_nverts = 0;
+ static u64 s_perf_index_refs = 0, s_perf_index_decoded = 0;
+ static u64    s_perf_texbytes = 0;
+@@ -5714,6 +5723,17 @@
+             fprintf(stderr, "[PERF index] decoded=%llu references=%llu\n",
+                 (unsigned long long)s_perf_index_decoded, (unsigned long long)s_perf_index_refs);
+             s_perf_index_refs = s_perf_index_decoded = 0;
++            for (u32 kind = 0; kind < 2; ++kind) {
++                RSXPrimitivePerf* table = kind ? s_perf_indexed : s_perf_arrays;
++                for (u32 primitive = 0; primitive < 11; ++primitive) {
++                    if (table[primitive].calls)
++                        fprintf(stderr, "[PERF primitive] %s prim=%u calls=%llu inputs=%llu ms=%.3f\n",
++                            kind ? "indexed" : "arrays", primitive,
++                            (unsigned long long)table[primitive].calls,
++                            (unsigned long long)table[primitive].inputs, table[primitive].seconds * 1000.0);
++                }
++                memset(table, 0, sizeof(s_perf_arrays));
++            }
+             s_perf_submit = 0.0;
+             s_perf_frame = 0.0; s_perf_tex = 0.0; s_perf_vtx = 0.0; s_perf_rf = 0.0;
+             s_perf_gpu = 0.0; s_perf_pre = 0.0; s_perf_srv = 0.0; s_perf_pso = 0.0;
+@@ -7573,7 +7593,11 @@
+     double started = perf_on() ? perf_now() : 0.0;
+     vp_prepare_vertex_fetch(s_d3d.current_rsx_state);
+     d3d12_draw_arrays_impl(ud, primitive, first, count);
+-    if (perf_on()) s_perf_submit += perf_now() - started;
++    if (perf_on()) {
++        double elapsed = perf_now() - started;
++        s_perf_submit += elapsed;
++        perf_record_primitive_sample(s_perf_arrays, primitive, count, elapsed);
++    }
+ }
+
+ static void d3d12_draw_indexed_impl(void* ud, u32 primitive, u32 first, u32 count)
+@@ -7701,7 +7725,11 @@
+     double started = perf_on() ? perf_now() : 0.0;
+     vp_prepare_vertex_fetch(s_d3d.current_rsx_state);
+     d3d12_draw_indexed_impl(ud, primitive, first, count);
+-    if (perf_on()) s_perf_submit += perf_now() - started;
++    if (perf_on()) {
++        double elapsed = perf_now() - started;
++        s_perf_submit += elapsed;
++        perf_record_primitive_sample(s_perf_indexed, primitive, count, elapsed);
++    }
+ }
+
+ static void d3d12_bind_texture(void* ud, u32 unit, const rsx_texture_state* tex)
