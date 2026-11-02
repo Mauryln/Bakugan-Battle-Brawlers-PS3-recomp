@@ -222,6 +222,16 @@ static void present_timed(void)
     s_pres_s += (double)(b.QuadPart - a.QuadPart) / s_qpc_freq2;
     s_pres_n++;
 }
+static double s_pump_s = 0.0;
+static int pump_timed(void)
+{
+    if (s_qpc_freq2 == 0.0) { LARGE_INTEGER f; QueryPerformanceFrequency(&f); s_qpc_freq2 = (double)f.QuadPart; }
+    LARGE_INTEGER a, b; QueryPerformanceCounter(&a);
+    int r = rsx_backend_pump();
+    QueryPerformanceCounter(&b);
+    s_pump_s += (double)(b.QuadPart - a.QuadPart) / s_qpc_freq2;
+    return r;
+}
 
 static DWORD WINAPI frame_clock(LPVOID)
 {
@@ -264,7 +274,7 @@ static DWORD WINAPI frame_clock(LPVOID)
         unsigned due = frame_clock_due_ticks(now, &next_tick);
         s_outer_n++; s_due_sum += due;
         for (unsigned fired = 0; fired < due; fired++) {
-            if (rsx_ok && (s_pump_n++, rsx_backend_pump()) != 0) rsx_ok = 0;
+            if (rsx_ok && (s_pump_n++, pump_timed()) != 0) rsx_ok = 0;
             cellGcmTickVBlank();
             cellGcmTickFlip();
             /* Present a pending flip BEFORE draining any further. The flip
@@ -300,7 +310,7 @@ static DWORD WINAPI frame_clock(LPVOID)
               QueryPerformanceCounter(&_b);
               s_drain_s += (double)(_b.QuadPart - _a.QuadPart) / s_qpc_freq;
               s_drain_n++; }
-            if ((s_pump_n++, rsx_backend_pump()) != 0) {
+            if ((s_pump_n++, pump_timed()) != 0) {
                 rsx_ok = 0;              /* window closed */
                 continue;
             }
@@ -321,10 +331,10 @@ static DWORD WINAPI frame_clock(LPVOID)
         { ULONGLONG t = GetTickCount64();
           if (t - s_drain_t0 >= 2000 && s_drain_n) {
             double secs = (double)(t - s_drain_t0) / 1000.0;
-            fprintf(stderr, "[FRAME] outer/s=%.1f due/s=%.1f pump/s=%.0f drain/s=%.0f | drain %.3fs of %.2fs | wait %.3fs | pres %.3fs (%u)%c",
+            fprintf(stderr, "[FRAME] outer/s=%.1f due/s=%.1f pump/s=%.0f drain/s=%.0f | drain %.3fs of %.2fs | wait %.3fs | pres %.3fs (%u) | pump %.3fs%c",
                     s_outer_n / secs, (double)s_due_sum / secs, (double)s_pump_n / secs, s_drain_n / secs,
-                    s_drain_s, secs, s_wait_s, s_pres_s, s_pres_n, 10);
-            s_outer_n = 0; s_due_sum = 0; s_pump_n = 0; s_drain_s = 0.0; s_drain_n = 0; s_wait_s = 0.0; s_wait_n = 0; s_pres_s = 0.0; s_pres_n = 0; s_drain_t0 = t;
+                    s_drain_s, secs, s_wait_s, s_pres_s, s_pres_n, s_pump_s, 10);
+            s_outer_n = 0; s_due_sum = 0; s_pump_n = 0; s_drain_s = 0.0; s_drain_n = 0; s_wait_s = 0.0; s_wait_n = 0; s_pres_s = 0.0; s_pres_n = 0; s_pump_s = 0.0; s_drain_t0 = t;
           } }
     }
     return 0;
