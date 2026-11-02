@@ -1,0 +1,69 @@
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -704,6 +704,7 @@
+ static double s_perf_vs_lookup = 0.0, s_perf_cb_record = 0.0;
+ static double s_perf_fence = 0.0, s_perf_flush = 0.0;
+ static u64    s_perf_nverts = 0;
++static u64 s_perf_index_refs = 0, s_perf_index_decoded = 0;
+ static u64    s_perf_texbytes = 0;
+ static int    s_perf_ntex = 0;
+ static double perf_now(void)
+@@ -5710,6 +5711,9 @@
+             fprintf(stderr, "[PERF detail] VS %.3fs | CB %.3fs | fence %.3fs | vertex flush %.3fs\n",
+                 s_perf_vs_lookup, s_perf_cb_record, s_perf_fence, s_perf_flush);
+             s_perf_vs_lookup = s_perf_cb_record = s_perf_fence = s_perf_flush = 0.0;
++            fprintf(stderr, "[PERF index] decoded=%llu references=%llu\n",
++                (unsigned long long)s_perf_index_decoded, (unsigned long long)s_perf_index_refs);
++            s_perf_index_refs = s_perf_index_decoded = 0;
+             s_perf_submit = 0.0;
+             s_perf_frame = 0.0; s_perf_tex = 0.0; s_perf_vtx = 0.0; s_perf_rf = 0.0;
+             s_perf_gpu = 0.0; s_perf_pre = 0.0; s_perf_srv = 0.0; s_perf_pso = 0.0;
+@@ -6804,6 +6808,37 @@
+     return o;
+ }
+
++/* Reuse decoding only within one packet: arrays/constants can change before
++ * the next submission. Tags preserve correctness even for colliding indices. */
++static u32 vp_fetch_triangle_vertices(const rsx_state* state, u32 first, u32 count, VPSlot* out)
++{
++    static int enabled = -1;
++    if (enabled < 0) {
++        const char* value = getenv("VP_INDEX_CACHE");
++        enabled = !value || value[0] != '0';
++    }
++    if (count < 12 || !enabled) {
++        for (u32 k = 0; k < count; ++k)
++            read_vp_vertex(state, read_guest_index(state, first + k), &out[k * 16]);
++        return count;
++    }
++    u32 decoded = 0;
++    VPSlot cache[64][16];
++    u32 tags[64];
++    unsigned char valid[64] = {0};
++    for (u32 k = 0; k < count; ++k) {
++        u32 index = read_guest_index(state, first + k), slot = index & 63u;
++        if (!valid[slot] || tags[slot] != index) {
++            read_vp_vertex(state, index, cache[slot]);
++            ++decoded;
++            tags[slot] = index;
++            valid[slot] = 1;
++        }
++        memcpy(&out[k * 16], cache[slot], sizeof(cache[slot]));
++    }
++    return decoded;
++}
++
+ static u32 upload_tris_vp_indexed(const rsx_state* state, u32 first, u32 count)
+ {
+     extern uint8_t* vm_base;
+@@ -6820,8 +6855,8 @@
+     VPSlot* out = (VPSlot*)((u8*)s_d3d.vp_vb_mapped
+         + s_d3d.vp_vb_offset);
+     { double _tv = perf_on() ? perf_now() : 0.0;
+-      for (u32 k = 0; k < count; k++)
+-          read_vp_vertex(state, read_guest_index(state, first + k), &out[k*16]);
++      u32 decoded = vp_fetch_triangle_vertices(state, first, count, out);
++      if (perf_on()) { s_perf_index_refs += count; s_perf_index_decoded += decoded; }
+       if (perf_on()) { s_perf_vtx += perf_now() - _tv; s_perf_nverts += count; } }
+     /* IDXDBG=<hex shader_program>: index range for that program's draws. An
+      * index past the vertex array reads unmapped guest memory as zero, which
