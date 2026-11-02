@@ -240,3 +240,35 @@ que no es el que desborda.
 
 Siguiente paso obligado (no es dibujo): instrumentar el bucle de `frame_clock`
 por fases -- drain, pump, espera -- y los 18 ms del cubo `guest`.
+
+## Fase de carga: medida, no es I/O, no es render, es compute de SPU
+
+Sintomas reportados: la pantalla de carga cae a 5-9 FPS y se congela segundos;
+el audio de la primera cinematica empieza ~1 s antes que los modelos.
+
+Medido con contadores y muestreo de hilos por CPU:
+
+| Comprobacion | Resultado |
+|---|---|
+| Lecturas de fichero (`PS3_FSSTAT`) | **menos de 64** en toda la carga |
+| Ejecuciones SPU via `spu_run_with_halt` | 0 |
+| Vertices / draws durante la carga | 0k / ~32 |
+| Hilo con mas CPU | **`spu_exec` al 99 %** (un solo nucleo) |
+| Hilos `spurs_pm_worker` / `spurs_kernel` | ~1-2 %: duermen bien |
+| `audio_mix` | ~1 % |
+
+Conclusion: la carga la ejecuta **un hilo SPU liftado al 99 % de un nucleo**,
+en serie. No hay espera ni bloqueo (una espera acotada en `spu_rdch` no cambio
+nada), es computo real. El PPU avanza a trompicones porque compite con ese
+nucleo, y de ahi el audio adelantado y los 5 FPS.
+
+Para acelerarlo hay que optimizar la ejecucion del codigo SPU liftado, no el
+render ni el VFS. Es una linea de trabajo distinta de la del gameplay.
+
+## Instrumentacion de hilos del port
+
+`[PORTTID] nombre=tid` se imprime al arrancar cada hilo del port:
+`spurs_pm_worker`, `spurs_kernel`, `audio_mix`, `spu_async`,
+`spu_exec`, `spu_fallback`, `pm_write_watch`, `timer_thread`,
+`raw_spu`, `spurs_jc`. Sin eso no se puede correlacionar CPU con rol
+(Windows oculta la direccion de inicio sin elevacion).
