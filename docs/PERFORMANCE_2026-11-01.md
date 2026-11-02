@@ -6,6 +6,46 @@ objetivo: el usuario reporta gameplay <=15 FPS y el perfil de Aquos ronda
 12 FPS en la vista detallada. El flujo GPU compacto ya está integrado y
 probado en Aquos; la mejora global sigue siendo pequeña.
 
+## Vigente al 02/11/2026 — leer esto primero
+
+Lo que sigue en este documento es la evidencia de cómo se llegó aquí, con
+cifras de escenas distintas y varias listas de "próximo trabajo" ya cumplidas.
+El estado actual y el plan están en [STATUS.md](STATUS.md) y
+[NEXT_SESSION.md](NEXT_SESSION.md); esta sección solo fija qué está superado.
+
+Medición más reciente (`diagnostics/performance/index-reader-cache`,
+`strip-merge`, con 0047 y 0048): 16,6–17,4 FPS en la escena de perfil, ~60
+ms/cuadro. `submit` ~30 ms (50 %), `render_frame` ~14 ms (23 %), ~16 ms sin
+medir por separado. Dentro de `submit`, un solo primitivo:
+
+```
+indexed prim=6 (TRIANGLE_STRIP)  1418 llamadas/cuadro   23,3 ms/cuadro
+indexed prim=5 (TRIANGLES)        385 llamadas/cuadro    6,1 ms/cuadro
+arrays  prim=8 (QUADS)             12 llamadas/cuadro    0,1 ms/cuadro
+```
+
+El coste es tráfico de memoria: 256 B canónicos por vértice escritos en
+`submit` (~121 MB/cuadro), releídos por el empaquetado (~121 MB) y reducidos a
+~35 MB de upload, más 512 B de `memcpy` por vértice en `vp_fetch_vertex`.
+
+Quedan superados en este documento, y no deben citarse como pendientes:
+
+- "Integrar un stream GPU compacto": hecho, 0042, activo por defecto.
+- "Separar capacidad CPU de capacidad GPU": hecho, 0046.
+- "Optimizar consultas de diagnóstico dentro de bucles (VTX_DUMP)": hecho, 0044.
+- "Caché de decodificación de índices": hecho, 0047.
+- "La siguiente prueba es vertex pulling en GPU": probada en
+  `codex/gpu-vertex-pull` (0049–0051) y descartada por cobertura, no por
+  corrección: 32 draws y 1116 vértices por cuadro.
+- Las cifras de "~12,6–13,2 FPS", "13,2–13,9 FPS" y "~12,0 FPS" son de corridas
+  y cámaras distintas entre sí y no deben compararse con los 16,6–17,4 de
+  arriba: la escena de perfil de `diagnostics/performance/` no es la vista
+  Aquos cargada. Ninguna de ellas es un benchmark A/B.
+
+Sigue vigente: la etiqueta `vtx` solo cronometra uploads de TRIANGLES; el
+recuento de ~474k–500k vértices físicos por cuadro a 256 B; el muestreo CPU
+(~16,7 % en `rsx_fetch_attrib`); y el diagnóstico del audio de batalla.
+
 ## Reproducción y mediciones
 
 Corrida sin capturas ni FP_DUMP: `diagnostics/arena/aquos-perf-20261101`.
@@ -53,6 +93,10 @@ perfil de sistema; se usó un muestreador local del proceso.
   No se suben binarios, símbolos ni datos del juego a Git.
 
 ## Próximo trabajo, en orden
+
+> Histórico del 01/11. Los puntos 2, 3 y 4 están hechos (0042, 0046, 0044) y el
+> 5 se perfila dentro de la Fase 0 del plan vigente. La lista viva está en
+> [NEXT_SESSION.md](NEXT_SESSION.md).
 
 1. Mantener una cámara / escena de comparación y medir con PERF=1, sin
    capturas, RenderDoc ni volcados masivos durante la medición.
@@ -172,6 +216,9 @@ Una variante manual SIMD y otra con restrict del lector de atributos no
 mostraron ganancia clara: se descartaron. Evidencia local en vertex-decode.
 La siguiente prueba es vertex pulling de datos originales en GPU, con
 equivalencia de formatos/índices antes de habilitarlo en el juego.
+<!-- 02/11: probado en codex/gpu-vertex-pull (0049-0051). Descartado por
+     cobertura: 32 draws / 1116 vértices por cuadro. No reintentar sin
+     resolver antes el bucle de STRIP indexados de la sección vigente. -->
 
 ## Prueba GPU realizada y cierre de la sesión
 
@@ -204,8 +251,9 @@ llamadas, vértices de entrada y milisegundos por intervalo de 20 cuadros.
 Esto permite localizar el siguiente cambio sin inferir la primitiva a partir
 de vértices ya expandidos. RSX 5=TRIANGLES, 6=STRIP, 7=FAN, 8=QUADS;
 0 agrupa valores desconocidos. Los tiempos forman parte de submit, no sumarlos
-otra vez al total. Main pasa 28 comprobaciones: 26 render/FIFO/pipeline y dos
-audio/SPU. El prototipo compacto de 0042 está integrado; 30 FPS sigue pendiente.
+otra vez al total. Main pasa las 42 suites de `tools/test_*.py` (la CI sólo
+ejecuta `compileall` y `test_pipeline_patches.py`). El prototipo compacto
+de 0042 está integrado; 30 FPS sigue pendiente.
 
 Primera investigación mañana: medir los tipos dominantes con 0048, comprobar
 el coste de STRIP no indexados (aún expandidos en CPU), y decidir entre strips
@@ -213,6 +261,11 @@ nativos o ampliar vertex pulling al camino que realmente domina. Conservar
 la mezcla de paquetes, carry/winding y reinicios; no romper contigüidad de
 TRIANGLES al cambiar su representación. Loading inicial se perfila aparte:
 el desfase de ~1 segundo en las presentaciones sigue sin resolver.
+
+> 02/11: la medición se hizo. Los strips nativos ya estaban activos
+> (`RSX_NATIVE_STRIPS`, por defecto), el primitivo dominante es STRIP indexado y
+> vertex pulling quedó descartado. Lo único que sigue en pie de este párrafo es
+> el desfase de audio en las presentaciones y el perfilado de loading.
 
 Los comandos para alternar las dos ramas sin resetear el toolkit están en
 NEXT_SESSION.md. Las capturas, PCM, muestras, símbolos y variantes descartadas

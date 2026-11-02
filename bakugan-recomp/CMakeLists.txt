@@ -186,9 +186,11 @@ add_executable(${PROJECT_NAME}
 # changes the compile command of every lifted PPU TU, and those are large enough
 # that the needless rebuild is measured in tens of minutes.
 #   SPU_USE_DISPATCH_MT -- route SPU_IB_DISPATCH through the musttail path.
-#   -O2                 -- the target-wide -O1 exists for the huge PPU TUs; the
-#                          SPU sources are small and decode-hot, so they get
-#                          full optimization. The last -O on the line wins.
+#   -O2                 -- the SPU sources are small and decode-hot, so they get
+#                          full optimization regardless of the per-config
+#                          default. The last -O on the line wins. (The target
+#                          itself is not pinned to -O1: build.ninja carries
+#                          /O2 for the lifted PPU TUs too.)
 if(SPU_SOURCES)
     set_source_files_properties(${SPU_SOURCES} PROPERTIES
         INCLUDE_DIRECTORIES "${PS3RECOMP_DIR}/runtime/spu"

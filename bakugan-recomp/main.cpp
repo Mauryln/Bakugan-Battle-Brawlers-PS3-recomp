@@ -218,6 +218,9 @@ static DWORD WINAPI frame_clock(LPVOID)
     int rsx_ok = (rsx_backend_init(WINDOW_WIDTH, WINDOW_HEIGHT, title) == 0);
     fprintf(stderr, "[rsx] %s backend init %s\n", RSX_BACKEND_NAME,
             rsx_ok ? "OK -- window open" : "FAILED");
+    /* Which host thread owns the FIFO drain, so a sampler can tell it apart
+     * from the guest threads and the port's other workers. */
+    fprintf(stderr, "[frame_clock] host tid=%lu\n", (unsigned long)GetCurrentThreadId());
 
     unsigned  last_flip = 0;
     ULONGLONG next_tick = GetTickCount64();
