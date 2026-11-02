@@ -212,6 +212,10 @@ static unsigned frame_clock_due_ticks(unsigned long long now,
 
 static DWORD WINAPI frame_clock(LPVOID)
 {
+    LARGE_INTEGER _f; QueryPerformanceFrequency(&_f);
+    const double s_qpc_freq = (double)_f.QuadPart;
+    double s_drain_s = 0.0; unsigned s_drain_n = 0;
+    ULONGLONG s_drain_t0 = GetTickCount64();
     const char* title = getenv("PS3_TITLE");
     if (!title || !*title) title = "Bakugan: Battle Brawlers";
 
@@ -252,7 +256,11 @@ static DWORD WINAPI frame_clock(LPVOID)
             /* Drain the FIFO every tick. This is what writes the RSX sync-fence
              * labels the game's per-frame logic blocks on, so it has to keep
              * advancing at 60 Hz even while present() throttles. */
-            if (rsx_ok) cellGcm_rsx_process_fifo();
+            if (rsx_ok) { LARGE_INTEGER _a, _b; QueryPerformanceCounter(&_a);
+                cellGcm_rsx_process_fifo();
+                QueryPerformanceCounter(&_b);
+                s_drain_s += (double)(_b.QuadPart - _a.QuadPart) / s_qpc_freq;
+                s_drain_n++; }
         }
 
         /* Drain at the outer cadence too, not only on the 16 ms tick: titles
@@ -264,8 +272,11 @@ static DWORD WINAPI frame_clock(LPVOID)
                 present_guest_frame();
                 last_flip = cellGcm_flip_request_count();
             }
-            cellGcm_rsx_process_fifo();
-
+            { LARGE_INTEGER _a, _b; QueryPerformanceCounter(&_a);
+              cellGcm_rsx_process_fifo();
+              QueryPerformanceCounter(&_b);
+              s_drain_s += (double)(_b.QuadPart - _a.QuadPart) / s_qpc_freq;
+              s_drain_n++; }
             if (rsx_backend_pump() != 0) {
                 rsx_ok = 0;              /* window closed */
                 continue;
@@ -284,6 +295,14 @@ static DWORD WINAPI frame_clock(LPVOID)
                 rsx_backend_present();
             }
         }
+        { ULONGLONG t = GetTickCount64();
+          if (t - s_drain_t0 >= 2000 && s_drain_n) {
+            double secs = (double)(t - s_drain_t0) / 1000.0;
+            fprintf(stderr, "[DRAIN] %u drains in %.2fs = %.0f/s | %.3fs total = %.0f%% of wall | %.0f us/drain%c",
+                    s_drain_n, secs, s_drain_n / secs, s_drain_s,
+                    100.0 * s_drain_s / secs, 1e6 * s_drain_s / s_drain_n, 10);
+            s_drain_s = 0.0; s_drain_n = 0; s_drain_t0 = t;
+          } }
     }
     return 0;
 }
