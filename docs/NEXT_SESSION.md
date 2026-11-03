@@ -1,4 +1,40 @@
-# Continuar desde aquí — 02/11/2026
+# Continuar desde aquí — 03/11/2026
+
+## Handoff vigente
+
+Leer [HUD_CINEMATICS.md](HUD_CINEMATICS.md) y
+[AUDIO_MENU_GUARDRAILS.md](AUDIO_MENU_GUARDRAILS.md).
+
+**WIP sin commit:** espera de canales SPU solo para grupos LV2 y admisión de
+cuatro palabras en el buzón. Las pruebas de regresión pasan. No usar
+`SPU_CH_BLOCK=1` global: bloquea trabajos SPURS.
+
+**Rendimiento: cerrado por el usuario el 03/11, no reabrirlo con las mismas
+ideas.** Medido en batalla: 15,8 → 17 FPS tras el revert del stream compacto,
+con caídas que coinciden con el ruido de audio. Su conclusión, tras probar todas
+las fases de este documento en una sesión anterior: **no es trabajo de render del
+juego, es el manejo de recursos del guest y sus hilos**. Ya se probaron el stream
+compacto (Fase 1; ver `backups/fase1-compact-vertices-WIP-20261103.patch`:
+`canonical` 109 → 36,8 MB y `flush` 8,4 → 3,8 ms, sin mejora de FPS),
+`PS3_KICKWAIT=0` (medido: no gana FPS y convierte la espera en spin de 73k
+iteraciones/s), la caché de vértices, los blits NV3089 y la higiene de D3D12. No
+volver a proponerlas como solución al ruido ni a las caídas.
+
+**HUD, cartas y cinemáticas: resuelto el 03/11.** No era el render ni el SPU:
+las tres capas desaparecían porque el juego se lanzaba con stderr redirigido,
+lo que activa el log verboso y ahoga los hilos del guest. Con `PS3_VERBOSE=0`
+la batalla muestra HUD, cartas y cinemáticas. Detalle y reglas de validación en
+[HUD_CINEMATICS.md](HUD_CINEMATICS.md).
+
+El resto de este archivo es el handoff anterior del 02/11 y queda como histórico.
+Sus comandos incompatibles con las restricciones actuales no deben ejecutarse.
+
+## Handoff histórico del 02/11/2026
+
+> Leer primero [AUDIO_MENU_GUARDRAILS.md](AUDIO_MENU_GUARDRAILS.md): restricciones
+> del usuario y hallazgos del 03/11/2026. Sustituyen los comandos incompatibles
+> de este handoff, incluido `pipeline.py --only patch`. El bloqueo global SPU
+> recuperó sonido y menú, pero dejó la carga esperando: no es la solución final.
 
 ## Estado vigente
 
