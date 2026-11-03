@@ -9,6 +9,22 @@ Leer [HUD_CINEMATICS.md](HUD_CINEMATICS.md) y
 cuatro palabras en el buzón. Las pruebas de regresión pasan. No usar
 `SPU_CH_BLOCK=1` global: bloquea trabajos SPURS.
 
+**Compilar hoy:** `tools/build.py` y `tools/pipeline.py` se retiraron. La build de
+Release se configura una vez y luego basta ninja:
+
+```powershell
+$env:PATH = "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\Llvm\x64\bin;$env:PATH"
+.\.venv\Lib\site-packages\cmake\data\bin\cmake.exe -S bakugan-recomp -B bakugan-recomp\build -G Ninja `
+  -DCMAKE_BUILD_TYPE=Release -DCMAKE_MAKE_PROGRAM=.venv\Scripts\ninja.exe `
+  -DCMAKE_C_COMPILER=clang-cl -DCMAKE_CXX_COMPILER=clang-cl
+.\.venv\Scripts\ninja.exe -C bakugan-recomp\build
+.\tools\run.ps1
+```
+
+Las flags de link de Release apuntaban el `.map` a `diagnostics/performance/...`,
+que ya no existe: cualquier enlace fallaba con "cannot open ... release.map". Se
+devolvieron a `/INCREMENTAL:NO`.
+
 **Rendimiento: cerrado por el usuario el 03/11, no reabrirlo con las mismas
 ideas.** Medido en batalla: 15,8 → 17 FPS tras el revert del stream compacto,
 con caídas que coinciden con el ruido de audio. Su conclusión, tras probar todas
