@@ -12,22 +12,23 @@
 <img src="https://img.shields.io/badge/graphics-Direct3D%2012-107C10?style=flat-square" alt="Graphics: Direct3D 12">
 <img src="https://img.shields.io/badge/title-BLES00758-c0392b?style=flat-square" alt="Title: BLES00758">
 <img src="https://img.shields.io/badge/license-MIT-2ea44f?style=flat-square" alt="License: MIT">
-<img src="https://img.shields.io/badge/status-Battle%20Arena%20gameplay%20fixed-green?style=flat-square" alt="Aquos reflections and shadows corrected; performance pending">
+<img src="https://img.shields.io/badge/status-playable%20end%20to%20end-yellow?style=flat-square" alt="Playable end to end, performance limited by the engine">
 </p>
 
-<p><a href="README.es.md">Español</a> · <a href="docs/STATUS.md">Status</a> · <a href="docs/VIDEO.md">Video pipeline</a> · <a href="docs/ARCHITECTURE.md">Architecture</a> · <a href="CONTRIBUTING.md">Contributing</a></p>
+<p><a href="README.es.md">Español</a> · <a href="docs/STATUS.md">Status</a> · <a href="docs/ARCHITECTURE.md">Architecture</a> · <a href="docs/PERFORMANCE.md">Performance</a> · <a href="CONTRIBUTING.md">Contributing</a></p>
 
 </div>
 
-> **2026-11-01 — Aquos reflections and shadows corrected.** Falling water, rain,
-> reflections and dark shadows are confirmed by the user. Performance is the
-> current priority: Aquos gameplay is around 12–15 FPS, loading still stutters,
-> with audio crackle under load. FIFO recycling was fixed; the user's latest
-> Aquos test had no black flashes. The original 30 FPS cap is preserved;
-> sustained 30 FPS has not been achieved.
-> [Current status and next steps](docs/NEXT_SESSION.md) · [Measurements](docs/PERFORMANCE_2026-11-01.md).
+> **2026-11-03 — the whole game is playable.** Story and battles can be played
+> start to finish with HUD, cards, character cinematics, shadows and reflections.
+> **No release yet:** the save system is incomplete and the controller is
+> simulated rather than mapped from the guest's input library. The remaining
+> problem is performance — 16–17 FPS in battle, with audio crackle that follows
+> the frame time. It is a limitation of the port's engine work, not of the game.
+> [Status](docs/STATUS.md) · [What was measured](docs/PERFORMANCE.md) ·
+> [What not to touch](docs/GUARDRAILS.md).
 
-[Bakugan: Battle Brawlers](https://en.wikipedia.org/wiki/Bakugan:_Battle_Brawlers) (2009) was never ported to PC. This project lifts the game's **PPU (CPU) and SPU (DSP) code to C++ ahead of time** with [ps3recomp](https://github.com/sp00nznet/ps3recomp) and links it against a small HLE runtime, producing an ordinary `.exe` that renders through Direct3D 12. Menus reach 30 FPS; detailed Aquos gameplay currently runs around 12–15 FPS, with further performance work pending.
+[Bakugan: Battle Brawlers](https://en.wikipedia.org/wiki/Bakugan:_Battle_Brawlers) (2009) was never ported to PC. This project lifts the game's **PPU (CPU) and SPU (DSP) code to C++ ahead of time** with [ps3recomp](https://github.com/sp00nznet/ps3recomp) and links it against a small HLE runtime, producing an ordinary `.exe` that renders through Direct3D 12. The whole game is playable end to end; menus hold 30 FPS and battles run at 16–17 FPS, which is where the remaining work is.
 
 Lifted code is compiled ahead of time; dynamic SPU jobs without a matching recompiled image can use the runtime fallback.
 
@@ -52,20 +53,25 @@ Lifted code is compiled ahead of time; dynamic SPU jobs without a matching recom
 | In-game keyboard (name entry) and keyboard/XInput pad | ✅ |
 | Music — `SNDP` PCM scores mixed by the SPU, plus FMV AAC | ✅ |
 | Battle Arena — player/CPU turns, field and card textures fixed | ✅ |
+| Story and battles playable end to end | ✅ |
+| HUD, cards, character cinematics, shadows and reflections | ✅ |
 | *Known defect:* mode-select "gate" — 2D layers behind the portrait overlap | ⚠️ |
-| **3D scene** — Aquos reflections and shadows corrected; other arenas need validation | ⚠️ |
-| **Gameplay** — tutorial and story require validation | ⚠️ |
+| **Performance** — 16–17 FPS in battle; audio crackle follows the frame time | ⚠️ |
+| **Save data** — loading works, writing a save is incomplete | ❌ |
+| **Controller** — XInput pad is simulated, not mapped from the guest library | ❌ |
 | **Sound effects** — ATRAC3 in `SOUND/*.PAST` | ❌ |
 
-**Battle Arena is playable with corrected field and card textures. Performance, audio under load, prolonged stability, and other-arena validation remain.**
+**The game is playable end to end. No release until save writing and real controller mapping are finished; performance is the third blocker.**
 
 ## Help wanted
 
-These are the walls we are stuck on. Each one is a self-contained problem with a measurement already done — the details are in [`docs/STATUS.md`](docs/STATUS.md) and [`docs/NEXT_SESSION.md`](docs/NEXT_SESSION.md).
+These are the walls we are stuck on. Each one is a self-contained problem with a measurement already done — the details are in [`docs/STATUS.md`](docs/STATUS.md) and [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md).
 
-1. **Performance.** Reduce loading stalls and reach sustained 30 FPS while preserving effects and complete frames. See [`docs/NEXT_SESSION.md`](docs/NEXT_SESSION.md).
-2. **Audio leftovers.** Menu scores and the SPU mixer work; the `.PAST` effects are ATRAC3 and still silent, and a few cuts are under review. `libs/audio/`.
-3. **Testers.** Does it boot on your GPU/driver? A `run.log` and one sentence is enough to open an issue.
+1. **Performance.** Reduce loading stalls and reach sustained 30 FPS while preserving effects and complete frames. What has already been measured, and what it ruled out, is in [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md).
+2. **Save data.** Loading a save works; writing one is incomplete.
+3. **Controller.** The pad is simulated from the keyboard path instead of being mapped from the guest's input library.
+4. **Audio leftovers.** Menu scores and the SPU mixer work; the `.PAST` effects are ATRAC3 and still silent, and a few cuts are under review. `libs/audio/`.
+5. **Testers.** Does it boot on your GPU/driver? A `run.log` and one sentence is enough to open an issue.
 
 Partial work, wrong guesses and "this is how RPCS3 does it" are all welcome — open an issue first if you plan something large.
 
@@ -125,7 +131,7 @@ git -C ps3recomp-src checkout a6d76c8
 | `bakugan-recomp/` | The port: entry point, HLE stubs, D3D12 movie path, CMake build |
 | `patches/` | Our changes to the ps3recomp toolkit, applied by the pipeline |
 | `tools/` | Pipeline, build, launch and diagnostic scripts |
-| `docs/` | Status, video pipeline, architecture |
+| `docs/` | Status, architecture, guardrails, performance; `docs/legacy/` keeps the earlier handoffs |
 | `ps3recomp-src/`, `game/`, `analysis/`, `bakugan-recomp/recompiled/` | Generated or upstream — **not** versioned |
 
 ## Diagnostics
