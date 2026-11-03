@@ -52,6 +52,44 @@ retrato y joystick visibles, 1598 draws).
    aviso de guardado audible, menú, primera cinemática con imagen y audio,
    HUD/cartas/sombras/efectos en batalla. Solo entonces mirar FPS.
 
+## Pantalla negra o blanca: qué no tocar
+
+Tres veces en un día se rompió la imagen entera por el mismo tipo de error: un
+camino nuevo que **deja de registrar o de rellenar draws** sin dar ningún error.
+Antes de investigar nada, mira `[PERF] ... draws N`: en batalla son ~1750. Si el
+número se hunde, el fallo es de registro, no de shaders.
+
+1. **No partir una cadena `if/else if/…/else`.** Insertar código entre el último
+   `else if` y el `else` de "primitiva no soportada" hizo que ese `else`
+   (`return;`) se comiera **todos** los draws que no fueran a la ruta nueva:
+   pantalla negra, geometría suelta y un FPS que no significaba nada (97 % de
+   draws perdidos).
+2. **Layout del staging de vértices**: `mask`/`slot_off`, `dr->vb_stride`,
+   `gpu_input_mask → gpu_stride` y los offsets deben cambiar **los cuatro a la
+   vez**. Si el fill escribe compacto y la subida lee canónico (o al revés), cada
+   vértice se lee desplazado: negro total, sin error en el log.
+3. **`GPU_VTX=1` no se usa todavía.** El path de decodificación en GPU
+   (`gpu_vtx_*`) elimina el dispositivo D3D12 en el primer cuadro con draws
+   elegibles: `[GPU_VTX] device removed`, y a partir de ahí todo PSO devuelve
+   `0x887A0005` y la pantalla queda blanca o negra. Apagado por defecto; no
+   activarlo hasta que `[GPUV] exec/present` diga que el dispositivo sobrevive.
+4. **Punteros del caché de shaders**: nunca `free()` de lo que devuelve el
+   contenedor; el juego se cierra en silencio (~1 s tras el primer draw, sin
+   mensaje).
+
+Un fallo del dispositivo no perdona: si `Present` o `ExecuteCommandLists`
+devuelven `0x887A0005`, todo lo que se dibuje después es basura aunque el juego
+siga corriendo y subiendo contadores. Por eso el backend registra el primer
+error de ejecución/presente con la etiqueta `[GPUV]`.
+
+**Para diagnosticar un fallo de GPU hace falta la capa de validación**, que no
+viene con Windows: `D3D12SDKLayers.dll` solo existe tras instalar la
+característica opcional *Graphics Tools* (`Add-WindowsCapability -Online -Name
+"Tools.Graphics.DirectX~~~~0.0.1.0"`, requiere administrador). Sin ella,
+`D3D12_DBG=1` imprime "Debug layer requested but unavailable" y no hay ningún
+mensaje del validador. Con ella, añadir `D3D12_GPU_VALIDATION=1` para que el
+driver señale la lectura del shader que tumba el dispositivo.
+
 ## Caché de shaders
 
 Un solo fichero: `shadercache/fp_v2.cache`, registros `[u64 hash del HLSL][u32
@@ -67,11 +105,9 @@ un puntero dentro del contenedor. Liberarlo corrompe el heap y el juego se cierr
 en silencio (~1 s después del primer draw, sin mensaje). Fue exactamente el
 fallo al revertir la Fase 1.
 
-## Pantalla negra: qué no tocar
+## Pantalla negra: la tabla del staging de vértices
 
-El negro total de hoy no vino del render ni del SPU: vino de **desalinear el
-layout del staging de vértices**. Cuatro cosas describen el mismo run y tienen
-que coincidir siempre:
+Cuatro datos describen el mismo run y tienen que coincidir siempre:
 
 | Dato | Dónde | Quién lo lee |
 |---|---|---|
@@ -80,19 +116,14 @@ que coincidir siempre:
 | `dr->gpu_input_mask` → `dr->gpu_stride` | `vp_upload_compact_frame` | subida y VBV de D3D12 |
 | offsets de `s_d3d.vp_vb_offset` | cada `upload_*` | siguiente draw |
 
-Si el fill escribe compacto y la subida lee con el stride canónico (o al revés),
-cada vértice se decodifica desplazado: **toda la pantalla en negro**, sin error
-en el log. Por eso no se deja un interruptor que cambie solo un lado del layout;
-el intento `VP_STAGE=0` hizo justo eso. Si se retoma la Fase 1, cambiar los
-cuatro a la vez y validar con `VPCHK=1`.
+Por eso no se deja un interruptor que cambie solo un lado del layout; el intento
+`VP_STAGE=0` hizo justo eso. Si se retoma la Fase 1, cambiar los cuatro a la vez
+y validar con `VPCHK=1`.
 
 El trabajo de la Fase 1 quedó guardado fuera de main: `backups/` contiene
 `fase1-compact-vertices-WIP-20261103.patch` y el fichero completo. Medido con
 él: `canonical` 109 → 36,8 MB/cuadro y `vertex flush` 8,4 → 3,8 ms, con `VPCHK`
 en 0 desviaciones; el A/B de FPS contra el mismo sitio no llegó a cerrarse.
-
-También negro: cualquier camino que deje los draws sin PSO. Un bytecode de
-caché inválido daba PSO nulo en silencio; por eso el caché ahora valida.
 
 ## Evidencia local
 
