@@ -42,6 +42,18 @@ compacto (Fase 1; ver `backups/fase1-compact-vertices-WIP-20261103.patch`:
 iteraciones/s), la caché de vértices, los blits NV3089 y la higiene de D3D12. No
 volver a proponerlas como solución al ruido ni a las caídas.
 
+**Decodificación de vértices en GPU (`GPU_VTX`): implementada y medida el 03/11.**
+Funciona y la imagen es correcta (tras arreglar `ALLOW_UNORDERED_ACCESS` en el
+buffer de salida — sin él el runtime elimina el dispositivo con
+`DXGI_ERROR_INVALID_CALL` — y el intercambio de componentes `be16lo`/`be16hi` de
+los atributos half/s16). **No mejora el FPS**: 315 de ~900 strips van a la GPU y
+el buffer de origen se llena cada cuadro con **64 MB de rangos crudos**, más
+bytes que los 36 MB del stream compacto que sustituye; `attr` baja 2 ms y el
+resto no se mueve (15,1–15,8 fps). Para que este camino pueda ganar hace falta un
+**espejo persistente de la memoria del guest en VRAM, actualizado solo por las
+páginas escritas** (ya existe el contador de generación por página), de modo que
+el *gather* lea del espejo sin copia por draw. Sin eso, no insistir.
+
 **HUD, cartas y cinemáticas: resuelto el 03/11.** No era el render ni el SPU:
 las tres capas desaparecían porque el juego se lanzaba con stderr redirigido,
 lo que activa el log verboso y ahoga los hilos del guest. Con `PS3_VERBOSE=0`
