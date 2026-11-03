@@ -5,6 +5,12 @@
 Leer [HUD_CINEMATICS.md](HUD_CINEMATICS.md) y
 [AUDIO_MENU_GUARDRAILS.md](AUDIO_MENU_GUARDRAILS.md).
 
+**Siguiente paso acordado:** evaluar PS3Recomp **v0.18.0** en un worktree aparte,
+sin tocar `test`. El prompt completo y el estado de partida están en
+[UPSTREAM_V018_EVAL.md](UPSTREAM_V018_EVAL.md). El toolkit va 380 commits por
+detrás y upstream ya trae captura de RenderDoc integrada, caché de vértices por
+draw y el arreglo de los SRV que pisaban el heap.
+
 **WIP sin commit:** espera de canales SPU solo para grupos LV2 y admisión de
 cuatro palabras en el buzón. Las pruebas de regresión pasan. No usar
 `SPU_CH_BLOCK=1` global: bloquea trabajos SPURS.
