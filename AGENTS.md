@@ -8,7 +8,10 @@ This workspace builds a native Windows port of **Bakugan: Battle Brawlers**, PS3
 - `ps3recomp-src/`: nested toolkit checkout; `runtime/` implements CPU support, `libs/` contains HLE modules, and `tools/` contains lifters and analysis utilities.
 - `tools/`: project pipeline, build, launch, and diagnostic scripts.
 - `patches/`: toolkit patches applied by the pipeline. Preserve reusable toolkit fixes here when needed for reproducibility.
-- `docs/STATUS.md`: technical progress and known issues.
+- `docs/STATUS.md`: technical progress and known issues. Read it first, then
+  `docs/ARCHITECTURE.md` (how the code works), `docs/GUARDRAILS.md` (what not to
+  touch and what breaks the image) and `docs/PERFORMANCE.md` (what was measured).
+  `docs/legacy/` keeps the earlier handoffs; their commands may be superseded.
 - `game/`, `analysis/`, `bakugan-recomp/recompiled/`, and `bakugan-recomp/spu/`: generated inputs and outputs. Change generators or handwritten sources rather than editing lifted code.
 
 ## Build, Test, and Development Commands
@@ -33,7 +36,7 @@ Toolkit tests use CMake/CTest and standalone Python checks named `test_*.py`; na
 
 ## Commit & Pull Request Guidelines
 
-The official repository is `https://github.com/Mauryln/Bakugan-Battle-Brawlers-PS3-recomp`. Its initial history is insufficient to establish a commit-message convention; use concise imperative subjects. Keep PRs focused, describe behavior changes, link relevant issues, and report validation commands. Include before/after screenshots for rendering changes. Read `docs/NEXT_SESSION.md` before resuming the current audio/rendering investigation.
+The official repository is `https://github.com/Mauryln/Bakugan-Battle-Brawlers-PS3-recomp`. Its initial history is insufficient to establish a commit-message convention; use concise imperative subjects. Keep PRs focused, describe behavior changes, link relevant issues, and report validation commands. Include before/after screenshots for rendering changes. Read `docs/STATUS.md` before resuming the current rendering or performance investigation; the older handoff is `docs/legacy/NEXT_SESSION.md`.
 
 ## Game Data & Secrets
 

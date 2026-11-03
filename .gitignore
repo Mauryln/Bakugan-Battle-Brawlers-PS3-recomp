@@ -12,6 +12,9 @@ pictures/
 bakugan-recomp/recompiled/
 bakugan-recomp/spu/
 bakugan-recomp/build/
+# Worktree/evaluación de otra base del toolkit (v0.18.0 y siguientes)
+bakugan-recomp/build-*/
+bakugan-recomp/recompiled-*/
 *.bmp
 dump_tex.bin
 dump_dest.bin
