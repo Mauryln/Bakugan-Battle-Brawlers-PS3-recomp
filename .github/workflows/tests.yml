@@ -1,6 +1,6 @@
 # The game itself needs a copyrighted disc dump and a full toolkit checkout, so
-# it cannot be built here. What can run is the part that decides whether our
-# patch series still applies and whether the tooling still parses.
+# it cannot be built here. Check tooling and the NV3089 regression fixture
+# directly from the committed patch, without applying experimental patches.
 name: tests
 
 on:
@@ -17,5 +17,6 @@ jobs:
           python-version: "3.12"
       - name: Compile every script
         run: python -m compileall -q tools
-      - name: Patch series applies cleanly
-        run: python tools/test_pipeline_patches.py
+      - name: Test NV3089 scaled rows from the committed patch
+        shell: pwsh
+        run: .\tools\test_gcm_scaled_rows.ps1 -FromPatch

@@ -3,7 +3,7 @@
     Compile and test the real NV3089 scaled-row helper without game data.
 #>
 [CmdletBinding()]
-param()
+param([switch]$FromPatch)
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 $source = Join-Path $root 'ps3recomp-src/libs/video/cellGcmSys.c'
@@ -16,7 +16,21 @@ if (-not $vs) { throw 'Visual Studio C++ tools not found' }
 $clang = Join-Path $vs 'VC/Tools/Llvm/x64/bin/clang-cl.exe'
 $vcvars = Join-Path $vs 'VC/Auxiliary/Build/vcvars64.bat'
 if (-not (Test-Path $clang)) { throw "clang-cl not found: $clang" }
-$text = Get-Content -LiteralPath $source -Raw
+if ($FromPatch) {
+    # CI has no toolkit checkout. Test the helper shipped in our committed
+    # patch, including context lines, without applying any patch series.
+    $patch = Join-Path $root 'patches/0051-nv3089-scaled-rows.patch'
+    $newSide = foreach ($line in Get-Content -LiteralPath $patch) {
+        if ($line.StartsWith('+') -and -not $line.StartsWith('+++')) {
+            $line.Substring(1)
+        } elseif ($line.StartsWith(' ')) {
+            $line.Substring(1)
+        }
+    }
+    $text = $newSide -join "`n"
+} else {
+    $text = Get-Content -LiteralPath $source -Raw
+}
 $start = $text.IndexOf('static int gcm_scaled_row_copy(')
 if ($start -lt 0) { throw 'Scaled-row helper not found' }
 $end = $text.IndexOf('/* rsx_d3d12_backend.c:', $start)
