@@ -19,16 +19,16 @@
 
 </div>
 
-> **2026-11-03 — the whole game is playable.** Story and battles can be played
-> start to finish with HUD, cards, character cinematics, shadows and reflections.
-> **No release yet:** the save system is incomplete and the controller is
-> simulated rather than mapped from the guest's input library. The remaining
-> problem is performance — 16–17 FPS in battle, with audio crackle that follows
-> the frame time. It is a limitation of the port's engine work, not of the game.
-> [Status](docs/STATUS.md) · [What was measured](docs/PERFORMANCE.md) ·
-> [What not to touch](docs/GUARDRAILS.md).
+> **2026-11-06 — major battle performance improvement.** Measured arena scenes
+> now run at roughly **27–28 FPS**, compared with the earlier **16–17 FPS** reference.
+> Coherent NV3089 row copies reduce CPU work while preserving the visible scene,
+> water and HUD in the checked captures.
+> **No release yet:** save writing and real controller mapping remain incomplete,
+> and sustained 30 FPS is still a target. The latest optimization has not yet
+> been validated through a complete post-launch duel or across every arena.
+> [Measured improvement](#recent-performance-improvements) · [Status](docs/STATUS.md).
 
-[Bakugan: Battle Brawlers](https://en.wikipedia.org/wiki/Bakugan:_Battle_Brawlers) (2009) was never ported to PC. This project lifts the game's **PPU (CPU) and SPU (DSP) code to C++ ahead of time** with [ps3recomp](https://github.com/sp00nznet/ps3recomp) and links it against a small HLE runtime, producing an ordinary `.exe` that renders through Direct3D 12. The whole game is playable end to end; menus hold 30 FPS and battles run at 16–17 FPS, which is where the remaining work is.
+[Bakugan: Battle Brawlers](https://en.wikipedia.org/wiki/Bakugan:_Battle_Brawlers) (2009) was never ported to PC. This project lifts the game's **PPU (CPU) and SPU (DSP) code to C++ ahead of time** with [ps3recomp](https://github.com/sp00nznet/ps3recomp) and links it against a small HLE runtime, producing an ordinary `.exe` that renders through Direct3D 12. The whole game is playable end to end; menus hold 30 FPS and recent battle reference scenes reach roughly 27–28 FPS. Sustained 30 FPS and frame-time consistency remain the performance goals.
 
 Lifted code is compiled ahead of time; dynamic SPU jobs without a matching recompiled image can use the runtime fallback.
 
@@ -56,12 +56,45 @@ Lifted code is compiled ahead of time; dynamic SPU jobs without a matching recom
 | Story and battles playable end to end | ✅ |
 | HUD, cards, character cinematics, shadows and reflections | ✅ |
 | *Known defect:* mode-select "gate" — 2D layers behind the portrait overlap | ⚠️ |
-| **Performance** — 16–17 FPS in battle; audio crackle follows the frame time | ⚠️ |
+| **Performance** — ~27–28 FPS in measured battle scenes, up from the historical ~16–17 FPS; sustained 30 FPS pending | ⚠️ |
 | **Save data** — loading works, writing a save is incomplete | ❌ |
 | **Controller** — XInput pad is simulated, not mapped from the guest library | ❌ |
 | **Sound effects** — ATRAC3 in `SOUND/*.PAST` | ❌ |
 
 **The game is playable end to end. No release until save writing and real controller mapping are finished; performance is the third blocker.**
+
+## Recent performance improvements
+
+The historical 16–17 FPS reference and the latest 27–28 FPS observations come
+from different runs; they describe progress, not a controlled percentage gain.
+The isolated NV3089 comparison used the **same scene, character, camera and
+process**, switching optimized/original/optimized:
+
+| Path | FPS | Mean frame time |
+|---|---:|---:|
+| Original | 23.09 | 43.31 ms |
+| Optimized, first window | 27.27 | 36.67 ms |
+| Optimized, repeat window | 27.05 | 36.97 ms |
+
+The two optimized windows average **27.16 FPS / 36.82 ms**, about **15% less frame
+time and 17.6% more FPS** than the original path in that comparison. NV3089 CPU
+work fell from approximately **6.03 to 1.42 ms per flip**. Copies preserve clipping,
+forward order for overlapping ranges and SPU reservation notifications; unsupported
+cases retain the original path. No draws, shaders or effects were deliberately removed.
+
+Captures retained the normal battle draw signature (roughly 1750 operations),
+with scene geometry, characters, water and HUD visible; audio was confirmed normal
+in the reviewed runs. This is bounded validation, not proof for all arenas,
+every card/effect or a complete duel. **30 FPS is not yet stable.**
+
+The implementation is archived in [patch 0051](patches/0051-nv3089-scaled-rows.patch).
+Set `NV3089_SCALED_ROWS=0` before launching to restore the original copy path.
+The standalone regression test covers 10000 overlapping rows, 1000 clipped blits,
+address bounds and coherent fallbacks. Run it without a toolkit checkout or game data:
+
+```powershell
+.\tools\test_gcm_scaled_rows.ps1 -FromPatch
+```
 
 ## Help wanted
 
@@ -97,30 +130,30 @@ iso/*.iso  ──extract_iso──▶  game/  ──EBOOT decrypt──▶  EBOO
 
 ## Build it
 
-Requirements: Windows 10/11 x64 with Direct3D 12, Python 3.10+, and **Visual Studio 2022 Build Tools** with *Desktop development with C++* and the *C++ Clang Compiler for Windows* component. About 15 GB free.
+Requirements: Windows 10/11 x64 with Direct3D 12, CMake/Ninja, and Visual Studio
+Build Tools with **clang-cl** and the x64 Windows SDK. `cl` is not supported.
+You must provide your own disc dump, decrypted `EBOOT.elf`, generated lifts and
+compatible local toolkit checkout; these inputs are not shipped here.
+
+For an existing configured Release tree:
 
 ```powershell
-# 1. Your own disc dump
-#    put "Bakugan - Battle Brawlers (Europe).iso" in iso/
-
-# 2. Python environment
-python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r ps3recomp-src\requirements.txt
-.\.venv\Scripts\python.exe -m pip install cmake ninja
-
-# 3. The toolkit, pinned to the commit our patches apply to
-git clone https://github.com/sp00nznet/ps3recomp.git ps3recomp-src
-git -C ps3recomp-src checkout a6d76c8
-
-# 4. Regenerate everything (ISO -> ELF -> analysis -> lifts -> HLE table)
-.\.venv\Scripts\python.exe tools\pipeline.py
-
-# 5. Compile and run
-.\.venv\Scripts\python.exe tools\build.py
+.\.venv\Scripts\ninja.exe -C bakugan-recomp\build
 .\tools\run.ps1
 ```
 
-`pipeline.py` also applies [`patches/`](patches) to the toolkit checkout, so step 3 is enough to reproduce our runtime changes. Use `--only <step>` for a single stage or `--force` to redo everything; the step list prints on `--help`.
+For a prepared source tree that needs initial configuration, use an x64 Visual
+Studio developer environment with `clang-cl`, CMake and Ninja on PATH:
+
+```powershell
+cmake -S bakugan-recomp -B bakugan-recomp/build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=clang-cl -DCMAKE_CXX_COMPILER=clang-cl
+cmake --build bakugan-recomp/build
+```
+
+The former `tools/pipeline.py` and `tools/build.py` scripts are no longer shipped;
+there is currently no one-command ISO-to-build pipeline in this repository.
+Do not apply every toolkit patch indiscriminately: experimental I/O patch 0049
+is not an accepted part of the healthy reference.
 
 **Controls:** `X` / Space = Cross (confirm) · `C` `Z` `S` = Circle / Square / Triangle · arrows = D-pad · `Enter` = Start · `Q` `E` = L1/R1 · `1` `2` = L2/R2.
 
@@ -129,8 +162,8 @@ git -C ps3recomp-src checkout a6d76c8
 | Path | What it is |
 |---|---|
 | `bakugan-recomp/` | The port: entry point, HLE stubs, D3D12 movie path, CMake build |
-| `patches/` | Our changes to the ps3recomp toolkit, applied by the pipeline |
-| `tools/` | Pipeline, build, launch and diagnostic scripts |
+| `patches/` | Archived toolkit changes; review accepted patches and their prerequisites individually |
+| `tools/` | Launch, regression-test and diagnostic tools |
 | `docs/` | Status, architecture, guardrails, performance; `docs/legacy/` keeps the earlier handoffs |
 | `ps3recomp-src/`, `game/`, `analysis/`, `bakugan-recomp/recompiled/` | Generated or upstream — **not** versioned |
 
