@@ -1,0 +1,139 @@
+diff --git a/libs/video/cellGcmSys.c b/libs/video/cellGcmSys.c
+index 0460064..8aedda8 100644
+--- a/libs/video/cellGcmSys.c
++++ b/libs/video/cellGcmSys.c
+@@ -1058,6 +1058,71 @@ static void gcm_row_copy(u32 d, u32 s, u32 n)
+     spu_lockline_unlock();
+ }
+ 
++static u64 s_scaled_rows = 0, s_scaled_pixels = 0;
++
++static int nv3089_scaled_rows_on(void)
++{
++    static int enabled = -1;
++    static const char* gate;
++    static u32 polls = 0;
++    if (enabled < 0) {
++        const char* e = getenv("NV3089_SCALED_ROWS");
++        enabled = !e || atoi(e) != 0;
++        gate = getenv("NV3089_SCALED_ROWS_GATE");
++    }
++    if (gate && (polls++ & 127u) == 0) {
++        FILE* f = fopen(gate, "rb");
++        int next = f != NULL;
++        if (f) fclose(f);
++        if (next != enabled) fprintf(stderr, "[NV3089 rows] enabled=%d\n", next);
++        enabled = next;
++    }
++    return enabled;
++}
++
++/* Same forward pixel order even for overlapping rows. As for DMA PUT, lock
++ * reserved rows and recheck afterwards for reservations created during a copy.
++ * Keep per-pixel PPU reservation/watch handling on its original path.
++ * shortcut: rows above 2048 pixels fall back, until longer lock holds are profiled. */
++static int gcm_scaled_row_copy(u64 d, u64 s, u32 pixels, u32 step)
++{
++    extern u8* vm_base;
++    if (!pixels) return 1;
++    if (pixels > 2048u || (step != 4u && step != 8u) ||
++        d + (u64)pixels * 4u > 0x100000000ull ||
++        s + (u64)(pixels - 1u) * step + 4u > 0x100000000ull ||
++        g_resv_store_active > 0 || g_ww_hi > g_ww_lo) return 0;
++    const u32 first = (u32)d & ~127u;
++    const u32 last = (u32)(d + (u64)pixels * 4u - 1u) & ~127u;
++    int reserved = 0;
++    for (u32 line = first; ; line += 128u) {
++        if (spu_coh_is_reserved(line)) { reserved = 1; break; }
++        if (line == last) break;
++    }
++    if (reserved) spu_lockline_lock();
++    if (g_resv_store_active > 0) {
++        if (reserved) spu_lockline_unlock();
++        return 0;
++    }
++    for (u32 x = 0; x < pixels; ++x) {
++        u32 pixel;
++        memcpy(&pixel, vm_base + s + (u64)x * step, 4);
++        memcpy(vm_base + d + (u64)x * 4u, &pixel, 4);
++    }
++    for (u32 line = first; ; line += 128u) {
++        if (spu_coh_is_reserved(line) || g_resv_store_active > 0) {
++            if (!reserved) spu_lockline_lock();
++            spu_coh_notify_write(line);
++            if (!reserved) spu_lockline_unlock();
++        }
++        if (line == last) break;
++    }
++    if (reserved) spu_lockline_unlock();
++    s_scaled_rows++;
++    s_scaled_pixels += pixels;
++    return 1;
++}
++
+ /* rsx_d3d12_backend.c: this backend keeps render targets on the GPU, so the
+  * only way a resolved copy can be sampled is to redirect it to the target. */
+ void rsx_d3d12_backend_alias_resolve(u32 dst_off, u32 src_off);
+@@ -1253,6 +1318,8 @@ static void nv3089_blit(void)
+      * per-pixel copy, which is what the PPU store watches see. */
+     static int rowcopy = -1;
+     if (rowcopy < 0) { const char* e = getenv("NV3089_ROWCOPY"); rowcopy = e ? atoi(e) : 1; }
++    const int scaled_rows = rowcopy && bpp == 4u && nv3089_scaled_rows_on() &&
++        (s_nv3089.ds_dx == 0x100000u || s_nv3089.ds_dx == 0x200000u);
+     if (rowcopy && s_nv3089.ds_dx == 0x100000u && s_nv3089.dt_dy == 0x100000u) {
+         /* the source start in whole texels: IMAGE_IN_POINT is 12.4 */
+         const u32 sx0 = (u32)(nv3089_origin(u0) >> 20), sy0 = (u32)(nv3089_origin(v0) >> 20);
+@@ -1276,6 +1343,16 @@ static void nv3089_blit(void)
+         if (dy < cy0 || dy >= cy1) continue;
+         u64 sv = nv3089_origin(v0) + (u64)y * s_nv3089.dt_dy;
+         u32 sy = (u32)(sv >> 20);
++        if (scaled_rows) {
++            u32 xa = out_x < cx0 ? cx0 - out_x : 0, xb = out_w;
++            if ((u64)out_x + xb > cx1) xb = cx1 > out_x ? cx1 - out_x : 0;
++            if (xa >= xb) continue;
++            u32 step = (s_nv3089.ds_dx >> 20) * 4u;
++            u64 sx = (nv3089_origin(u0) >> 20) + (u64)xa * (step / 4u);
++            u64 sa = (u64)src + (u64)sy * in_pitch + sx * 4u;
++            u64 da = (u64)dst + (u64)dy * dst_pitch + (u64)(out_x + xa) * 4u;
++            if (gcm_scaled_row_copy(da, sa, xb - xa, step)) continue;
++        }
+         for (u32 x = 0; x < out_w; x++) {
+             u32 dx = out_x + x;
+             if (dx < cx0 || dx >= cx1) continue;
+@@ -1417,7 +1494,35 @@ static void gcm_2d_method(u32 subch, u32 method, u32 data)
+         case 0x0400: s_nv3089.in_sz     = data; return;
+         case 0x0404: s_nv3089.in_fmt    = data; return;
+         case 0x0408: s_nv3089.in_off    = data; return;
+-        case 0x040C: s_nv3089.in_uv     = data; nv3089_blit(); return;
++        case 0x040C: {
++            s_nv3089.in_uv = data;
++            static int measure = -1;
++            if (measure < 0) { const char* e = getenv("PERF_BLIT"); measure = e && atoi(e) != 0; }
++            if (!measure) { nv3089_blit(); return; }
++            static u64 start = 0, elapsed = 0, scaled_elapsed = 0;
++            static u32 calls = 0, scaled_calls = 0, flips = 0;
++            u64 before = get_timestamp_ns();
++            if (!start) { start = before; flips = s_flip_request_count; }
++            nv3089_blit();
++            u64 after = get_timestamp_ns(), duration = after - before;
++            elapsed += duration;
++            calls++;
++            if (s_nv3089.ds_dx != 0x100000u || s_nv3089.dt_dy != 0x100000u) {
++                scaled_elapsed += duration;
++                scaled_calls++;
++            }
++            if (after - start >= 2000000000ull) {
++                fprintf(stderr, "[BLIT perf] wall_ms=%.3f total_ms=%.3f scaled_ms=%.3f calls=%u scaled_calls=%u flips=%u rows=%llu pixels=%llu\n",
++                        (double)(after - start) / 1e6, (double)elapsed / 1e6,
++                        (double)scaled_elapsed / 1e6, calls, scaled_calls,
++                        s_flip_request_count - flips,
++                        (unsigned long long)s_scaled_rows, (unsigned long long)s_scaled_pixels);
++                start = after; flips = s_flip_request_count;
++                elapsed = scaled_elapsed = 0; calls = scaled_calls = 0;
++                s_scaled_rows = s_scaled_pixels = 0;
++            }
++            return;
++        }
+         }
+         return;
+     }
