@@ -223,6 +223,8 @@ static void present_timed(void)
     s_pres_n++;
 }
 static double s_pump_s = 0.0;
+extern "C" int cellAudioQuit(void);
+
 static int pump_timed(void)
 {
     if (s_qpc_freq2 == 0.0) { LARGE_INTEGER f; QueryPerformanceFrequency(&f); s_qpc_freq2 = (double)f.QuadPart; }
@@ -230,6 +232,14 @@ static int pump_timed(void)
     int r = rsx_backend_pump();
     QueryPerformanceCounter(&b);
     s_pump_s += (double)(b.QuadPart - a.QuadPart) / s_qpc_freq2;
+#ifdef _WIN32
+    if (r != 0) {
+        fprintf(stderr, "[shutdown] window closed; stopping host audio\n");
+        cellAudioQuit();
+        fflush(NULL);
+        ExitProcess(0);
+    }
+#endif
     return r;
 }
 
