@@ -248,8 +248,14 @@ set_target_properties(${PROJECT_NAME} PROPERTIES LINKER_LANGUAGE CXX)
 # anything a POSIX linker can find; the D3D12 backend's own imports come in
 # through the #pragma comment(lib) in libs/video/rsx_d3d12_backend.c.
 if(WIN32)
-    target_sources(${PROJECT_NAME} PRIVATE video_decoder.cpp movie_audio.cpp movie_video.cpp sail_video.cpp)
+    target_sources(${PROJECT_NAME} PRIVATE video_decoder.cpp movie_audio.cpp movie_video.cpp sail_video.cpp output_upscale.cpp)
+    file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/shaders/fsr1")
+    configure_file(output_upscale.hlsl "${CMAKE_CURRENT_BINARY_DIR}/shaders/fsr1/present.hlsl" COPYONLY)
+    foreach(FSR_FILE ffx_a.h ffx_fsr1.h LICENSE.txt)
+        configure_file("third_party/fsr1/${FSR_FILE}" "${CMAKE_CURRENT_BINARY_DIR}/shaders/fsr1/${FSR_FILE}" COPYONLY)
+    endforeach()
     target_link_libraries(${PROJECT_NAME} PRIVATE
+        d3d12 dxgi d3dcompiler
         mfplat mfreadwrite mfuuid ole32
         dbghelp
         user32

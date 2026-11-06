@@ -19,6 +19,12 @@
 
 </div>
 
+> **New: FSR 1 output at 1080p.** Official AMD EASU + RCAS upscale the complete
+> 720p frame to 1080p. Windowed output fits the monitor; borderless mode and
+> per-monitor DPI handling are available. The checked arena averaged **28.02 FPS**;
+> this improves output resolution, with **no demonstrated FPS increase**.
+> [Usage and limits](docs/FSR.md) · [Session results](docs/SESSION_20261106_FSR.md).
+>
 > **2026-11-06 — major battle performance improvement.** Measured arena scenes
 > now run at roughly **27–28 FPS**, compared with the earlier **16–17 FPS** reference.
 > Coherent NV3089 row copies reduce CPU work while preserving the visible scene,

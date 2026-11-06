@@ -19,6 +19,12 @@
 
 </div>
 
+> **Nuevo: salida FSR 1 a 1080p.** EASU + RCAS oficiales de AMD reescalan el
+> cuadro completo de 720p a 1080p. La ventana se ajusta al monitor e incluye modo
+> sin bordes y gestión de DPI. La arena medida promedió **28,02 FPS**:
+> mejora la resolución de salida, **sin aumento demostrado de FPS**.
+> [Uso y límites](docs/FSR.md) · [Resultados de sesión](docs/SESSION_20261106_FSR.md).
+>
 > **06/11/2026 — gran mejora de rendimiento en batalla.** Las escenas de arena
 > medidas alcanzan aproximadamente **27–28 FPS**, frente a la referencia anterior
 > de **16–17 FPS**. Las copias coherentes por filas de NV3089 reducen trabajo CPU

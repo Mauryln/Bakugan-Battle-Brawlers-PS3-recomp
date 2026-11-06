@@ -128,6 +128,7 @@ unsigned cellGcm_flip_request_count(void);
  * toolkit's boot harness make. All three expose the same three entry points,
  * so the frame clock below is backend-agnostic. */
 #if defined(_WIN32)
+#include "output_upscale.h"
 extern "C" int  rsx_d3d12_backend_init(uint32_t w, uint32_t h, const char* title);
 extern "C" void rsx_d3d12_backend_present(void);
 extern "C" int  rsx_d3d12_backend_pump_messages(void);
@@ -731,6 +732,7 @@ int main(int argc, char** argv)
     /* Install the guest-callback hook, then start the frame clock. It no-ops
      * until the title registers its vblank and flip handlers during init. */
     g_ps3_guest_caller = harness_guest_caller;
+    if (bakugan_output_configure() != 0) return 1;
     CreateThread(NULL, 4u * 1024 * 1024, frame_clock, NULL, 0, NULL);
     CreateThread(NULL, 256u * 1024, debug_dump_tex, NULL, 0, NULL);
     CreateThread(NULL, 256u * 1024, debug_watch_tex, NULL, 0, NULL);
