@@ -224,27 +224,47 @@ static void present_timed(void)
     /* Opt-in whole guest-frame intervals, including waits and Present. Keep
      * samples in memory: one summary per 120 frames avoids per-frame logging. */
     static int metrics = -1;
-    if (metrics < 0) { const char* e = getenv("FRAME_METRICS"); metrics = e && atoi(e) != 0; }
-    if (metrics) {
+    static FILE* frame_times = NULL;
+    if (metrics < 0) {
+        const char* e = getenv("FRAME_METRICS"); metrics = e && atoi(e) != 0;
+        const char* path = getenv("FRAME_TIMES");
+        if (path && *path) {
+            frame_times = fopen(path, "wb");
+            if (frame_times) fwrite("FTIME01", 1, 8, frame_times);
+            else fprintf(stderr, "[FRAME times] cannot open %s\n", path);
+        }
+    }
+    if (metrics || frame_times) {
         static double previous = 0.0, intervals[120];
+        static double raw[120][2]; /* QPC end in milliseconds, interval in milliseconds */
         static unsigned count = 0;
         double now_ms = (double)b.QuadPart * 1000.0 / s_qpc_freq2;
-        if (previous > 0.0) intervals[count++] = now_ms - previous;
+        if (previous > 0.0) {
+            intervals[count] = now_ms - previous;
+            raw[count][0] = now_ms;
+            raw[count][1] = intervals[count];
+            count++;
+        }
         previous = now_ms;
         if (count == 120) {
-            double sum = 0.0;
-            for (unsigned i = 0; i < count; ++i) {
-                sum += intervals[i];
-                double value = intervals[i];
-                unsigned j = i;
-                while (j && intervals[j - 1] > value) {
-                    intervals[j] = intervals[j - 1];
-                    --j;
+            /* One buffered batch; preserve chronological individual samples
+             * before sorting. Shutdown's fflush(NULL) commits complete batches. */
+            if (frame_times) fwrite(raw, sizeof(raw[0]), count, frame_times);
+            if (metrics) {
+                double sum = 0.0;
+                for (unsigned i = 0; i < count; ++i) {
+                    sum += intervals[i];
+                    double value = intervals[i];
+                    unsigned j = i;
+                    while (j && intervals[j - 1] > value) {
+                        intervals[j] = intervals[j - 1];
+                        --j;
+                    }
+                    intervals[j] = value;
                 }
-                intervals[j] = value;
+                fprintf(stderr, "[FRAME metrics] n=120 mean_ms=%.3f p50_ms=%.3f p95_ms=%.3f p99_ms=%.3f min_ms=%.3f max_ms=%.3f\n",
+                        sum / count, intervals[59], intervals[113], intervals[118], intervals[0], intervals[119]);
             }
-            fprintf(stderr, "[FRAME metrics] n=120 mean_ms=%.3f p50_ms=%.3f p95_ms=%.3f p99_ms=%.3f min_ms=%.3f max_ms=%.3f\n",
-                    sum / count, intervals[59], intervals[113], intervals[118], intervals[0], intervals[119]);
             count = 0;
         }
     }
