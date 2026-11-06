@@ -221,6 +221,33 @@ static void present_timed(void)
     QueryPerformanceCounter(&b);
     s_pres_s += (double)(b.QuadPart - a.QuadPart) / s_qpc_freq2;
     s_pres_n++;
+    /* Opt-in whole guest-frame intervals, including waits and Present. Keep
+     * samples in memory: one summary per 120 frames avoids per-frame logging. */
+    static int metrics = -1;
+    if (metrics < 0) { const char* e = getenv("FRAME_METRICS"); metrics = e && atoi(e) != 0; }
+    if (metrics) {
+        static double previous = 0.0, intervals[120];
+        static unsigned count = 0;
+        double now_ms = (double)b.QuadPart * 1000.0 / s_qpc_freq2;
+        if (previous > 0.0) intervals[count++] = now_ms - previous;
+        previous = now_ms;
+        if (count == 120) {
+            double sum = 0.0;
+            for (unsigned i = 0; i < count; ++i) {
+                sum += intervals[i];
+                double value = intervals[i];
+                unsigned j = i;
+                while (j && intervals[j - 1] > value) {
+                    intervals[j] = intervals[j - 1];
+                    --j;
+                }
+                intervals[j] = value;
+            }
+            fprintf(stderr, "[FRAME metrics] n=120 mean_ms=%.3f p50_ms=%.3f p95_ms=%.3f p99_ms=%.3f min_ms=%.3f max_ms=%.3f\n",
+                    sum / count, intervals[59], intervals[113], intervals[118], intervals[0], intervals[119]);
+            count = 0;
+        }
+    }
 }
 static double s_pump_s = 0.0;
 extern "C" int cellAudioQuit(void);
