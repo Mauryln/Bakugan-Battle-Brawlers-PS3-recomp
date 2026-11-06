@@ -1,0 +1,187 @@
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -6706,180 +6706,184 @@
+ 
+ /* Upload `count` sequential vertices [first, first+count). Returns the count
+  * actually written (clamped to the remaining per-frame buffer). */
+ static u32 upload_vertices_from_rsx(u32 first, u32 count)
+ {
+     BasicVertex* verts = (BasicVertex*)((u8*)s_d3d.vb_mapped + s_d3d.vb_offset);
+     u32 max_verts = (MAX_VERTICES * VERTEX_STRIDE - s_d3d.vb_offset) / sizeof(BasicVertex);
+     if (count > max_verts) count = max_verts;
+     const rsx_state* state = s_d3d.current_rsx_state;
+     for (u32 i = 0; i < count; i++)
+         read_rsx_vertex(state, first + i, &verts[i]);
+     s_d3d.vb_offset += count * sizeof(BasicVertex);
+     return count;
+ }
+ 
+ /* Upload RSX QUADS (prim 8) as a triangle list: each 4-vertex quad v0..v3
+  * (perimeter winding) splits into triangles (v0,v1,v2) and (v0,v2,v3).
+  * D3D12 has no quad topology, so this expansion is how quads render at all.
+  * Returns the number of triangle-list vertices emitted (6 per quad). */
+ static u32 upload_quads_from_rsx(u32 first, u32 count)
+ {
+     const rsx_state* state = s_d3d.current_rsx_state;
+     u32 quads = count / 4;
+     u32 max_verts = (MAX_VERTICES * VERTEX_STRIDE - s_d3d.vb_offset) / sizeof(BasicVertex);
+     if (quads * 6 > max_verts) quads = max_verts / 6;
+     BasicVertex* verts = (BasicVertex*)((u8*)s_d3d.vb_mapped + s_d3d.vb_offset);
+     u32 o = 0;
+     for (u32 q = 0; q < quads; q++) {
+         BasicVertex c[4];
+         for (u32 k = 0; k < 4; k++)
+             read_rsx_vertex(state, first + q * 4 + k, &c[k]);
+         verts[o++] = c[0]; verts[o++] = c[1]; verts[o++] = c[2];
+         verts[o++] = c[0]; verts[o++] = c[2]; verts[o++] = c[3];
+     }
+     s_d3d.vb_offset += o * sizeof(BasicVertex);
+     return o;
+ }
+ 
+ /* Upload RSX QUADS as raw float4 attrib0 (byte-swapped) into vp_vb, expanded
+  * to a triangle list (6 verts/quad). The decompiled vertex shader does the
+  * transform. Returns emitted vertex count. */
+ /* Generic VP vertex: all 16 RSX vertex attributes, each converted to a float4
+  * slot -- 256 bytes/vertex, input layout ATTRi @ i*16. Apps place attributes at
+  * arbitrary indices (tiny3d: pos=a0 colour=a3 tex=a8; SDK gcm samples: pos=a0
+  * colour=a1 tex=a2; dbgfont: a0..a2), so a hardcoded pos+colour pair can't
+  * cover them: every enabled attrib is fetched from guest memory and converted
+  * by its RSX type; disabled slots read (0,0,0,1). */
+ typedef struct { float v[4]; } VPSlot;
+ #define VP_VERT_STRIDE (16 * sizeof(VPSlot))   /* 256 */
+ 
+ 
+ void rsx_vtx_pos_dbg(const rsx_state* state, const float* v, u32 n);
+ 
+ /* Fill all 16 attribute slots for one vertex. The per-attribute work lives in
+  * rsx_vertex_fetch.c so the Metal and null backends read guest vertices the
+  * same way this one does, rather than each porting the logic again. */
+ typedef struct {
+     const rsx_state* state;
+     float defaults[16][4];
+     const u8* base[16];
+     u8 active[16];
+     u32 count;
+     u32 mask;          /* slots the draw's VS reads; 0xFFFF = all 16 */
+     u8 m_attrs[16];
+     u8 slot_off[16];   /* compact position of slot i within the used stride */
+     u8 fallback[16];   /* instanced attribute: needs the per-vertex divisor */
+     rsx_vertex_desc desc[16];
+     u32 m_count;
+ } VPVertexFetchPlan;
+ static VPVertexFetchPlan s_vertex_fetch_plan;
+ /* PS3_CANARY_COPY64=1: write only 64 of each vertex's 256 canonical bytes.
+  * Renders garbage on purpose; it prices the canonical write that a compact
+  * stream would remove, without building the compact stream first. */
+ static u32 s_vp_copy_bytes = 0;
+ 
+ static void vp_prepare_vertex_fetch(const rsx_state* state, u32 mask)
+ {
+     s_vertex_fetch_plan.state = state;
+     s_vertex_fetch_plan.count = 0;
+     s_vertex_fetch_plan.m_count = 0;
+     s_vertex_fetch_plan.mask = mask;
+     if (!s_vp_copy_bytes)
+         s_vp_copy_bytes = getenv("PS3_CANARY_COPY64") ? 64u : (u32)(sizeof(VPSlot) * 16);
+     if (!state) return;
+     memcpy(s_vertex_fetch_plan.defaults, state->vertex_data4f,
+            sizeof(s_vertex_fetch_plan.defaults));
+     for (u32 i = 0; i < 16; ++i) {
+         if (state->vertex_attribs[i].enabled && state->vertex_attribs[i].stride) {
+             s_vertex_fetch_plan.base[i] = rsx_attrib_base(state, (int)i);
+             s_vertex_fetch_plan.active[s_vertex_fetch_plan.count++] = (u8)i;
++        } else {
++            /* Disabled/zero-stride arrays read constant registers, never the
++             * array address retained from the preceding draw. */
++            s_vertex_fetch_plan.base[i] = NULL;
+         }
+         if (mask & (1u << i)) {
+             const rsx_vertex_attrib* a = &state->vertex_attribs[i];
+             s_vertex_fetch_plan.desc[i].base   = s_vertex_fetch_plan.base[i];
+             s_vertex_fetch_plan.desc[i].stride = a->stride;
+             s_vertex_fetch_plan.desc[i].type   = a->type;
+             s_vertex_fetch_plan.desc[i].n      = a->size ? (a->size > 4 ? 4 : a->size) : 4;
+             s_vertex_fetch_plan.fallback[i]    = (a->frequency > 1);
+             s_vertex_fetch_plan.slot_off[i] = (u8)s_vertex_fetch_plan.m_count;
+             s_vertex_fetch_plan.m_attrs[s_vertex_fetch_plan.m_count++] = (u8)i;
+         }
+     }
+ }
+ 
+ /* The mask vp_upload_compact_frame packs with: the vertex program's attribute
+  * set, or all 16 when the draw has no fragment program and renders through the
+  * 256-byte base pipeline instead. Decided here and stored in the draw record so
+  * the fill and the pack can never disagree. */
+ static u32 vp_draw_input_mask(const rsx_state* state)
+ {
+     /* NOT memoised: the mask comes from the vertex program, so keying a cache
+      * on shader_program (the fragment program) hands one VS's mask to another
+      * with the same FP -- that rendered broken geometry and rainbow filters. */
+     if (!state || !state->shader_program) return 0xFFFFu;
+     int vs = vp_get_vs(state);
+     if (vs < 0 || vs >= s_d3d.vp_vs_n) return 0xFFFFu;
+     return s_d3d.vp_vs[vs].input_mask;
+ }
+ 
+ static void vp_fetch_vertex(const rsx_state* state, u32 vi, VPSlot* out16)
+ {
+     if (s_vertex_fetch_plan.state != state) vp_prepare_vertex_fetch(state, 0xFFFFu);
+     static u32 s_samp = 0;
+     int sp = perf_on() && ((s_samp++ & 31u) == 0);
+     double t0 = sp ? perf_now() : 0.0;
+     if (s_vertex_fetch_plan.mask != 0xFFFFu) {
+         /* Compact fill: only the slots the vertex program reads are written.
+          * rsx_fetch_attrib_inl writes the constant register for a disabled
+          * array, so every mask slot still ends up with exactly the value the
+          * 256-byte fill would have produced. The pack is driven by the same
+          * mask (recorded in the draw record), so the unused slots are never
+          * read. */
+         for (u32 n = 0; n < s_vertex_fetch_plan.m_count; ++n) {
+             u32 i = s_vertex_fetch_plan.m_attrs[n];
+             float* dst = out16[s_vertex_fetch_plan.slot_off[i]].v;
+             if (s_vertex_fetch_plan.fallback[i])
+                 rsx_fetch_attrib_inl(state, (int)i, vi, dst,
+                                      s_vertex_fetch_plan.base[i]);
+             else
+                 rsx_fetch_desc(state, (int)i, vi, &s_vertex_fetch_plan.desc[i], dst);
+         }
+         if (sp) s_perf_vattr += (perf_now() - t0) * 32.0;
+         return;
+     }
+     /* Full fill: the base pipeline reads all 16 slots. */
+     memcpy(out16, s_vertex_fetch_plan.defaults, s_vp_copy_bytes);
+     double t1 = sp ? perf_now() : 0.0;
+     for (u32 n = 0; n < s_vertex_fetch_plan.count; ++n) {
+         u32 i = s_vertex_fetch_plan.active[n];
+         rsx_fetch_attrib_inl(state, (int)i, vi, out16[i].v,
+                              s_vertex_fetch_plan.base[i]);
+     }
+     if (sp) {
+         double t2 = perf_now();
+         s_perf_vdef += (t1 - t0) * 32.0;
+         s_perf_vattr += (t2 - t1) * 32.0;
+     }
+ }
+ 
+ /* Four vertices in one pass. Only the compact path batches; the full fill keeps
+  * the per-vertex form because it is the rare fallback. Values are identical to
+  * four vp_fetch_vertex() calls -- VPCHK checks every one of them. */
+ static void vp_fetch_vertex4(const rsx_state* state, const u32 vi[4], VPSlot* out)
+ {
+     if (s_vertex_fetch_plan.state != state) vp_prepare_vertex_fetch(state, 0xFFFFu);
+     if (s_vertex_fetch_plan.mask == 0xFFFFu) {
+         for (u32 q = 0; q < 4; ++q) vp_fetch_vertex(state, vi[q], out + q * 16);
+         return;
+     }
+     for (u32 n = 0; n < s_vertex_fetch_plan.m_count; ++n) {
+         u32 i = s_vertex_fetch_plan.m_attrs[n];
+         u32 so = s_vertex_fetch_plan.slot_off[i];
+         if (s_vertex_fetch_plan.fallback[i] ||
+             s_vertex_fetch_plan.desc[i].type != 2u ||
+             s_vertex_fetch_plan.desc[i].n != 4u) {
+             for (u32 q = 0; q < 4; ++q) {
+                 float* dst = out[q * 16 + so].v;
+                 if (s_vertex_fetch_plan.fallback[i])
+                     rsx_fetch_attrib_inl(state, (int)i, vi[q], dst,
+                                          s_vertex_fetch_plan.base[i]);

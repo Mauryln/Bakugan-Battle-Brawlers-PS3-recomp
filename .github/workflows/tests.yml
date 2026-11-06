@@ -20,3 +20,6 @@ jobs:
       - name: Test NV3089 scaled rows from the committed patch
         shell: pwsh
         run: .\tools\test_gcm_scaled_rows.ps1 -FromPatch
+      - name: Test disabled vertex descriptors from the committed patch
+        shell: pwsh
+        run: .\tools\test_vertex_fetch_plan.ps1 -FromPatch
