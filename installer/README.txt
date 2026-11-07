@@ -67,6 +67,8 @@ ESTADO Y LÍMITES
 
 CRÉDITOS
 --------
+Gracias a ps3recomp (Ned Heller / sp00nznet) por el toolkit de recompilación
+PPU/SPU y el runtime HLE: https://github.com/sp00nznet/ps3recomp (MIT).
 RPCS3 portable (GPLv2) incluido únicamente para `rpcs3.exe --decrypt`.
 Fuente: https://github.com/RPCS3/rpcs3
 SDL3, FSR1 y el resto de componentes mantienen sus licencias.

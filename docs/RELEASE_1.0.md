@@ -82,6 +82,12 @@ Ajustes: `%LOCALAPPDATA%\BakuganRecomp\player.ini`
 - Caché de shaders validada incluida en el instalador; el juego escribe log en
   `%LOCALAPPDATA%\BakuganRecomp\BakuganRecomp.log`.
 
+## Gracias
+
+A **ps3recomp** (Ned Heller / sp00nznet) por el toolkit de recompilación PPU/SPU
+y el runtime HLE sobre el que se construye este port. Sin ese trabajo este
+proyecto no existiría. <https://github.com/sp00nznet/ps3recomp> (MIT).
+
 ## Créditos
 
 RPCS3 (GPLv2): <https://github.com/RPCS3/rpcs3>  
