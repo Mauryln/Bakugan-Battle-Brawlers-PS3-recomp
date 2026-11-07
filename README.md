@@ -42,7 +42,7 @@
 > been validated through a complete post-launch duel or across every arena.
 > [Measured improvement](#recent-performance-improvements) · [Status](docs/STATUS.md).
 
-[Bakugan: Battle Brawlers](https://en.wikipedia.org/wiki/Bakugan:_Battle_Brawlers) (2009) was never ported to PC. This project lifts the game's **PPU (CPU) and SPU (DSP) code to C++ ahead of time** with [ps3recomp](https://github.com/sp00nznet/ps3recomp) and links it against a small HLE runtime, producing an ordinary `.exe` that renders through Direct3D 12. The whole game is playable end to end; menus hold 30 FPS and recent battle reference scenes reach roughly 27–28 FPS. Sustained 30 FPS and frame-time consistency remain the performance goals.
+[Bakugan: Battle Brawlers](https://en.wikipedia.org/wiki/Bakugan:_Battle_Brawlers) (2009) was never ported to PC. This project lifts the game's **PPU (CPU) and SPU (DSP) code to C++ ahead of time** with [ps3recomp](https://github.com/sp00nznet/ps3recomp) and links it against a small HLE runtime, producing an ordinary `.exe` that renders through Direct3D 12. The whole game is playable end to end; menus hold 30 FPS and the latest fixed-arena comparison averaged 29.30 FPS with parallel vertex uploads. Sustained 30 FPS and frame-time consistency remain the performance goals.
 
 Lifted code is compiled ahead of time; dynamic SPU jobs without a matching recompiled image can use the runtime fallback.
 
@@ -70,7 +70,7 @@ Lifted code is compiled ahead of time; dynamic SPU jobs without a matching recom
 | Story and battles playable end to end | ✅ |
 | HUD, cards, character cinematics, shadows and reflections | ✅ |
 | *Known defect:* mode-select "gate" — 2D layers behind the portrait overlap | ⚠️ |
-| **Performance** — ~27–28 FPS in measured battle scenes, up from the historical ~16–17 FPS; sustained 30 FPS pending | ⚠️ |
+| **Performance** — 29.30 FPS in the latest fixed-arena pack comparison, versus the historical ~16–17 FPS; sustained 30 FPS pending | ⚠️ |
 | **Save data** — loading works, writing a save is incomplete | ❌ |
 | **Controller** — XInput pad is simulated, not mapped from the guest library | ❌ |
 | **Sound effects** — ATRAC3 in `SOUND/*.PAST` | ❌ |
@@ -79,7 +79,22 @@ Lifted code is compiled ahead of time; dynamic SPU jobs without a matching recom
 
 ## Recent performance improvements
 
-The historical 16–17 FPS reference and the latest 27–28 FPS observations come
+The current build retains these changes together:
+
+| Change | Current behavior | Evidence |
+|---|---|---|
+| NV3089 row copies | Less serial CPU work for supported blits | Controlled comparison below |
+| Parallel vertex uploads | Two workers pack closed staging while the owner prepares materials | Walker CPU **80.1% → 69.0% of one core**, FPS **28.71 → 29.30**, p95 **41.51 → 40.41 ms**, p99 **46.23 → 44.97 ms** |
+| Debug-filter lookup cache | Avoid repeated `getenv` calls for an absent/negative filter | 32 option/mode regression cases; additional combined FPS effect unmeasured |
+| Deferred strip `last` copy | Recover the already-emitted block only when a cut consumes it | 172032 packet comparisons with identical bytes; additional combined FPS effect unmeasured |
+| FSR 1 output | Complete 720p frame upscaled to 1080p, with monitor-fitting windows | Resolution improvement; no demonstrated FPS gain |
+
+The upload figures come from eight balanced 30-second windows in one process,
+before the two small follow-up changes. The final combination is built and retained;
+**its extra gains have not been measured, and stable 30 FPS is still pending**.
+[Full results, tests and rollback options](docs/SESSION_20261107_WALKER.md).
+
+The historical 16–17 FPS reference and the earlier 27–28 FPS observations come
 from different runs; they describe progress, not a controlled percentage gain.
 The isolated NV3089 comparison used the **same scene, character, camera and
 process**, switching optimized/original/optimized:

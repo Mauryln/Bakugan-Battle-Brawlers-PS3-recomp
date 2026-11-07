@@ -42,7 +42,7 @@
 > duelo completo posterior al lanzamiento ni en todas las arenas.
 > [Mejora medida](#mejoras-recientes-de-rendimiento) · [Estado](docs/STATUS.md).
 
-[Bakugan: Battle Brawlers](https://es.wikipedia.org/wiki/Bakugan:_Battle_Brawlers) (2009) nunca salió en PC. Este proyecto levanta el código **PPU (CPU) y SPU (DSP)** del juego a C++ de forma estática con [ps3recomp](https://github.com/sp00nznet/ps3recomp) y lo enlaza contra un runtime HLE pequeño: el resultado es un `.exe` normal que dibuja por Direct3D 12. El juego completo es jugable; los menús van a 30 FPS y las escenas recientes de referencia en batalla rondan 27–28 FPS. Queda alcanzar 30 FPS sostenidos y reducir los tirones.
+[Bakugan: Battle Brawlers](https://es.wikipedia.org/wiki/Bakugan:_Battle_Brawlers) (2009) nunca salió en PC. Este proyecto levanta el código **PPU (CPU) y SPU (DSP)** del juego a C++ de forma estática con [ps3recomp](https://github.com/sp00nznet/ps3recomp) y lo enlaza contra un runtime HLE pequeño: el resultado es un `.exe` normal que dibuja por Direct3D 12. El juego completo es jugable; los menús van a 30 FPS y la comparación más reciente de arena fija promedió 29,30 FPS con subida paralela de vértices. Queda alcanzar 30 FPS sostenidos y reducir los tirones.
 
 El código levantado se compila por adelantado; los trabajos SPU dinámicos sin imagen recompilada pueden usar el fallback del runtime.
 
@@ -70,7 +70,7 @@ El código levantado se compila por adelantado; los trabajos SPU dinámicos sin 
 | Historia y batallas jugables de principio a fin | ✅ |
 | HUD, cartas, cinemáticas de personajes, sombras y reflejos | ✅ |
 | *Defecto conocido:* el "gate" del selector de modo — las capas 2D tras el retrato se solapan | ⚠️ |
-| **Rendimiento** — ~27–28 FPS en escenas de batalla medidas, frente a ~16–17 FPS históricos; 30 FPS sostenidos pendientes | ⚠️ |
+| **Rendimiento** — 29,30 FPS en la última comparación de pack en arena fija, frente a ~16–17 FPS históricos; 30 FPS sostenidos pendientes | ⚠️ |
 | **Guardado** — cargar funciona, escribir la partida está incompleto | ❌ |
 | **Control** — el pad XInput se simula, no se traduce desde la librería del juego | ❌ |
 | **Efectos de sonido** — ATRAC3 en `SOUND/*.PAST` | ❌ |
@@ -79,7 +79,23 @@ El código levantado se compila por adelantado; los trabajos SPU dinámicos sin 
 
 ## Mejoras recientes de rendimiento
 
-La referencia histórica de 16–17 FPS y las observaciones recientes de 27–28 FPS
+La build actual conserva estas mejoras juntas:
+
+| Cambio | Comportamiento actual | Evidencia |
+|---|---|---|
+| Copias por filas NV3089 | Menos trabajo CPU serial en blits compatibles | Comparación controlada más abajo |
+| Subida paralela de vértices | Dos trabajadores preparan el staging cerrado mientras el dueño prepara materiales | CPU del walker **80,1% → 69,0% de un núcleo**, FPS **28,71 → 29,30**, p95 **41,51 → 40,41 ms**, p99 **46,23 → 44,97 ms** |
+| Caché del filtro de depuración | Evita consultas repetidas a `getenv` cuando el filtro está ausente o es negativo | 32 casos de opciones/modos; aumento adicional combinado de FPS sin medir |
+| Copia diferida de `last` en tiras | Recupera el bloque ya emitido sólo cuando un corte lo necesita | 172032 paquetes con bytes idénticos; aumento adicional combinado de FPS sin medir |
+| Salida FSR 1 | Cuadro completo de 720p reescalado a 1080p y ventana ajustada al monitor | Mejora de resolución; sin aumento demostrado de FPS |
+
+Las cifras de subida corresponden a ocho ventanas balanceadas de 30 segundos en
+el mismo proceso, anteriores a las dos adiciones pequeñas. La combinación final
+está compilada y conservada; **su ganancia adicional no está medida y siguen
+pendientes los 30 FPS estables**.
+[Resultados completos, pruebas y opciones de rollback](docs/SESSION_20261107_WALKER.md).
+
+La referencia histórica de 16–17 FPS y las observaciones anteriores de 27–28 FPS
 proceden de ejecuciones diferentes: muestran avance, no un porcentaje A/B.
 La comparación aislada de NV3089 mantuvo **escena, personaje, cámara y proceso**,
 alternando optimizado/original/optimizado:
