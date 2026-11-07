@@ -37,7 +37,7 @@
 > now run at roughly **27–28 FPS**, compared with the earlier **16–17 FPS** reference.
 > Coherent NV3089 row copies reduce CPU work while preserving the visible scene,
 > water and HUD in the checked captures.
-> **No release yet:** save writing and real controller mapping remain incomplete,
+> **No release yet:** real controller mapping remains incomplete,
 > and sustained 30 FPS is still a target. The latest optimization has not yet
 > been validated through a complete post-launch duel or across every arena.
 > [Measured improvement](#recent-performance-improvements) · [Status](docs/STATUS.md).
@@ -71,11 +71,19 @@ Lifted code is compiled ahead of time; dynamic SPU jobs without a matching recom
 | HUD, cards, character cinematics, shadows and reflections | ✅ |
 | *Known defect:* mode-select "gate" — 2D layers behind the portrait overlap | ⚠️ |
 | **Performance** — 29.30 FPS in the latest fixed-arena pack comparison, versus the historical ~16–17 FPS; sustained 30 FPS pending | ⚠️ |
-| **Save data** — loading works, writing a save is incomplete | ❌ |
+| **Save data** — new game, manual saves (one slot each), load picker, system data | ✅ |
 | **Controller** — XInput pad is simulated, not mapped from the guest library | ❌ |
 | **Sound effects** — ATRAC3 in `SOUND/*.PAST` | ❌ |
 
-**The game is playable end to end. No release until save writing and real controller mapping are finished; performance is the third blocker.**
+**The game is playable end to end. No release until real controller mapping is finished; performance is the second blocker.**
+
+Saves live in `%LOCALAPPDATA%\BakuganRecomp\dev_hdd0\home\00000001\savedata`
+(set `PS3_GAMEDATA_ROOT` to override). The first launch copies the old
+`./gamedata` tree there once. `cellSaveDataListSave2` gives every manual save
+its own `...-NN` slot, `cellSaveDataFixedSave2` checkpoints update the current
+slot, and the system data keeps its fixed directory. Loading uses a native
+picker window (`PS3_SAVEDATA_UI=0` restores the headless defaults); the
+list/fixed delete entry points share the same callback flow.
 
 ## Recent performance improvements
 
@@ -130,10 +138,9 @@ address bounds and coherent fallbacks. Run it without a toolkit checkout or game
 These are the walls we are stuck on. Each one is a self-contained problem with a measurement already done — the details are in [`docs/STATUS.md`](docs/STATUS.md) and [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md).
 
 1. **Performance.** Reduce loading stalls and reach sustained 30 FPS while preserving effects and complete frames. What has already been measured, and what it ruled out, is in [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md).
-2. **Save data.** Loading a save works; writing one is incomplete.
-3. **Controller.** The pad is simulated from the keyboard path instead of being mapped from the guest's input library.
-4. **Audio leftovers.** Menu scores and the SPU mixer work; the `.PAST` effects are ATRAC3 and still silent, and a few cuts are under review. `libs/audio/`.
-5. **Testers.** Does it boot on your GPU/driver? A `run.log` and one sentence is enough to open an issue.
+2. **Controller.** The pad is simulated from the keyboard path instead of being mapped from the guest's input library.
+3. **Audio leftovers.** Menu scores and the SPU mixer work; the `.PAST` effects are ATRAC3 and still silent, and a few cuts are under review. `libs/audio/`.
+4. **Testers.** Does it boot on your GPU/driver? A `run.log` and one sentence is enough to open an issue.
 
 Partial work, wrong guesses and "this is how RPCS3 does it" are all welcome — open an issue first if you plan something large.
 
