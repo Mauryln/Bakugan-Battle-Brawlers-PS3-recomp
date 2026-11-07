@@ -28,9 +28,61 @@ struct fsr_output {
     ID3D12Resource* outputs[2]{};
     UINT srv_step{}, rtv_step{}, constants[24]{};
     UINT width = 1920, height = 1080;
+    float sharpness = 0.5f;
     D3D12_RESOURCE_STATES intermediate_state = D3D12_RESOURCE_STATE_COMMON;
 };
 fsr_output output;
+
+static void monitor_size(u32* width, u32* height)
+{
+    *width = 0; *height = 0;
+    DEVMODEW mode{};
+    mode.dmSize = sizeof mode;
+    if (EnumDisplaySettingsW(nullptr, ENUM_CURRENT_SETTINGS, &mode)) {
+        *width = mode.dmPelsWidth;
+        *height = mode.dmPelsHeight;
+    }
+    if (!*width || !*height) { *width = 1920; *height = 1080; }
+}
+
+/* Native means "the monitor's vertical resolution, 16:9". The game presents
+ * 16:9, so a narrower-than-monitor output keeps the aspect and leaves the
+ * window smaller instead of stretching the picture. */
+static void configure_output_size(u32* width, u32* height)
+{
+    u32 monitor_w = 0, monitor_h = 0;
+    monitor_size(&monitor_w, &monitor_h);
+    u32 wanted = 0;
+    const char* value = std::getenv("PS3_OUTPUT");
+    if (value && *value && _stricmp(value, "native") && _stricmp(value, "auto")) {
+        if (!_stricmp(value, "1080p")) wanted = 1080;
+        else if (!_stricmp(value, "1440p")) wanted = 1440;
+        else if (!_stricmp(value, "2160p") || !_stricmp(value, "4k")) wanted = 2160;
+        else wanted = (u32)atoi(value);
+    }
+    if (!wanted) wanted = monitor_h;
+    if (wanted < 480) wanted = 480;
+    if (wanted > 8192) wanted = 8192;
+    if (wanted & 1) wanted++;
+    u32 w = (wanted * 16u + 8u) / 9u;
+    if (w & 1) w++;
+    if (monitor_w && w > monitor_w) {
+        w = monitor_w & ~1u;
+        wanted = ((w * 9u + 8u) / 16u) & ~1u;
+    }
+    *width = w; *height = wanted;
+}
+
+static int internal_height_from_env(void)
+{
+    const char* value = std::getenv("PS3_INTERNAL");
+    int height = 720;
+    if (value && *value) {
+        int parsed = atoi(value);
+        if (parsed >= 480 && parsed <= 2160) height = parsed;
+    }
+    return height;
+}
 
 bool failed(HRESULT hr, const char* operation) {
     if (SUCCEEDED(hr)) return false;
@@ -152,7 +204,7 @@ int initialize(void*, void* device, void*, u32 input_width, u32 input_height) {
     FsrEasuCon(output.constants, output.constants + 4, output.constants + 8, output.constants + 12,
         float(input_width), float(input_height), float(input_width), float(input_height),
         float(output.width), float(output.height));
-    FsrRcasCon(output.constants + 16, 0.5f);
+    FsrRcasCon(output.constants + 16, output.sharpness);
     output.constants[20] = output.width; output.constants[21] = output.height;
     std::fprintf(stderr, "[FSR1] EASU+RCAS ready: %ux%u -> %ux%u, FP32\n",
                  input_width, input_height, output.width, output.height);
@@ -214,16 +266,48 @@ int bakugan_output_configure() {
         std::strcmp(window_mode, "borderless")) {
         std::fprintf(stderr, "[OUTPUT] PS3_WINDOW_MODE must be windowed or borderless\n"); return -1;
     }
-    const char* render_height = std::getenv("PS3_RENDER_HEIGHT");
-    if (render_height && *render_height && std::strcmp(render_height, "720")) {
-        std::fprintf(stderr, "[OUTPUT] 540p virtual mode disabled: title HUD retains 720p coordinates. Use 720p.\n");
-        return -1;
-    }
+
+    configure_output_size(&output.width, &output.height);
+
+    int internal_height = internal_height_from_env();
     const char* setting = std::getenv("PS3_FSR");
-    if (!setting || !*setting || !std::strcmp(setting, "0")) return 0;
-    if (std::strcmp(setting, "1") && std::strcmp(setting, "fsr1")) {
-        std::fprintf(stderr, "[FSR1] PS3_FSR must be 0 or fsr1\n"); return -1;
+    int enable = output.height > (UINT)internal_height;
+    if (setting && *setting) {
+        if (!std::strcmp(setting, "0") || !_stricmp(setting, "off"))
+            enable = 0;
+        else if (!std::strcmp(setting, "1") || !_stricmp(setting, "fsr1") ||
+                 !_stricmp(setting, "on"))
+            enable = 1;
+        else if (!_stricmp(setting, "auto"))
+            enable = output.height > (UINT)internal_height;
+        else {
+            std::fprintf(stderr, "[FSR1] PS3_FSR must be auto, on, off or fsr1\n");
+            return -1;
+        }
     }
+    if (!enable) {
+        if (output.height > (UINT)internal_height) {
+            /* Native output above the internal raster would leave the title's
+             * 720p frame in a corner. Clamp it: native means "no upscaler", not
+             * "bigger window than the renderer covers". */
+            output.height = (UINT)internal_height;
+            output.width = (UINT)((internal_height * 16 + 8) / 9) & ~1u;
+            std::fprintf(stderr, "[OUTPUT] native output clamped to %ux%u; "
+                                 "use PS3_FSR=fsr1 for a larger presentation\n",
+                         output.width, output.height);
+        }
+        std::fprintf(stderr, "[OUTPUT] native %ux%u\n", output.width, output.height);
+        return 0;
+    }
+
+    const char* sharpness = std::getenv("PS3_FSR_SHARPNESS");
+    if (sharpness && *sharpness) {
+        output.sharpness = (float)atof(sharpness);
+        if (output.sharpness < 0.0f) output.sharpness = 0.0f;
+        if (output.sharpness > 1.0f) output.sharpness = 1.0f;
+    }
+    std::fprintf(stderr, "[OUTPUT] %dp internal -> %ux%u, FSR1 sharpness %.2f\n",
+                 internal_height, output.width, output.height, output.sharpness);
     rsx_d3d12_output_pass pass{output.width, output.height, nullptr, initialize, record, shutdown};
     return rsx_d3d12_backend_set_output_pass(&pass);
 }

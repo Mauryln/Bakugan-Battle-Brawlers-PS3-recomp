@@ -15,7 +15,7 @@
 <img src="https://img.shields.io/badge/status-playable%20end%20to%20end-yellow?style=flat-square" alt="Playable end to end, performance limited by the engine">
 </p>
 
-<p><a href="README.es.md">Español</a> · <a href="docs/STATUS.md">Status</a> · <a href="docs/ARCHITECTURE.md">Architecture</a> · <a href="docs/PERFORMANCE.md">Performance</a> · <a href="CONTRIBUTING.md">Contributing</a></p>
+<p><a href="README.es.md">Español</a> · <a href="docs/PROJECT_GUIDE.md">Guía técnica</a> · <a href="docs/FSR.md">FSR y salida</a> · <a href="CONTRIBUTING.md">Contributing</a></p>
 
 </div>
 
@@ -40,7 +40,7 @@
 > **No release yet:** real controller mapping remains incomplete,
 > and sustained 30 FPS is still a target. The latest optimization has not yet
 > been validated through a complete post-launch duel or across every arena.
-> [Measured improvement](#recent-performance-improvements) · [Status](docs/STATUS.md).
+> [Measured improvement](#recent-performance-improvements) · [Guía técnica](docs/PROJECT_GUIDE.md).
 
 [Bakugan: Battle Brawlers](https://en.wikipedia.org/wiki/Bakugan:_Battle_Brawlers) (2009) was never ported to PC. This project lifts the game's **PPU (CPU) and SPU (DSP) code to C++ ahead of time** with [ps3recomp](https://github.com/sp00nznet/ps3recomp) and links it against a small HLE runtime, producing an ordinary `.exe` that renders through Direct3D 12. The whole game is playable end to end; menus hold 30 FPS and the latest fixed-arena comparison averaged 29.30 FPS with parallel vertex uploads. Sustained 30 FPS and frame-time consistency remain the performance goals.
 
@@ -135,9 +135,9 @@ address bounds and coherent fallbacks. Run it without a toolkit checkout or game
 
 ## Help wanted
 
-These are the walls we are stuck on. Each one is a self-contained problem with a measurement already done — the details are in [`docs/STATUS.md`](docs/STATUS.md) and [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md).
+These are the walls we are stuck on. Each one is a self-contained problem with a measurement already done - the details are in [`docs/PROJECT_GUIDE.md`](docs/PROJECT_GUIDE.md).
 
-1. **Performance.** Reduce loading stalls and reach sustained 30 FPS while preserving effects and complete frames. What has already been measured, and what it ruled out, is in [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md).
+1. **Performance.** Reduce loading stalls and reach sustained 30 FPS while preserving effects and complete frames. What has already been measured, and what it ruled out, is in [`docs/PROJECT_GUIDE.md`](docs/PROJECT_GUIDE.md).
 2. **Controller.** The pad is simulated from the keyboard path instead of being mapped from the guest's input library.
 3. **Audio leftovers.** Menu scores and the SPU mixer work; the `.PAST` effects are ATRAC3 and still silent, and a few cuts are under review. `libs/audio/`.
 4. **Testers.** Does it boot on your GPU/driver? A `run.log` and one sentence is enough to open an issue.
@@ -176,7 +176,13 @@ For an existing configured Release tree:
 ```powershell
 .\.venv\Scripts\ninja.exe -C bakugan-recomp\build
 .\tools\run.ps1
+# or the player-facing selector:
+.\bakugan-recomp\build\BakuganLauncher.exe
 ```
+
+Presets: 720p/30, **1080p/30 (default)**, 1080p/60 and 1440p/60. The title
+renders 1280x720 internally and FSR1 presents it at the selected output size;
+see [`docs/FSR.md`](docs/FSR.md).
 
 For a prepared source tree that needs initial configuration, use an x64 Visual
 Studio developer environment with `clang-cl`, CMake and Ninja on PATH:

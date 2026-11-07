@@ -193,6 +193,25 @@ En la prueba de I/O se vieron ~29–30 FPS **con gran parte de la arena ausente*
 
 No prometer 30 FPS ni mejoras de carga sin A/B con imagen y comportamiento idénticos.
 
+### Resolución, FSR y límite real (2026-11-07)
+
+- El render interno del título es **1280x720** (viewports, buffer de display y
+  composición final). Subir el backbuffer del host a 1080p deja la imagen en un
+  rectángulo 1280x720 en la esquina; falsear `cellVideoOutGetResolution` la
+  empequeñece. La ruta validada es 720p interno + FSR1 a la salida.
+- `BakuganLauncher.exe` expone presets 720p/30, 1080p/30 (default), 1080p/60 y
+  1440p/60; `PS3_INTERNAL` por defecto 720, `PS3_OUTPUT=native|1080p|1440p|2160p`,
+  `PS3_FPS_CAP=30|60|0`.
+- Medición con `tools/bench_arena.ps1`, arena fija, 720p->1080p FSR1, `PERF=0`:
+  media **28,65 FPS / 34,9 ms**, p95 41,9 ms, 57 % de cuadros > 33,3 ms.
+- `PS3_NOVSYNC=1` no cambió el resultado (28,29 FPS): el techo no es Present,
+  es trabajo CPU serial. `RSX_PACK_WORKERS=4` empeoró la media (24,4 FPS,
+  p99 146 ms) y queda apagado.
+- 60 FPS exige bajar el trabajo de ~35 ms a <16,6 ms por cuadro; no se logra con
+  ajustes locales. Requiere solapar walker/submit/render o reducir el coste del
+  guest, y debe medirse con la misma arena.
+
+
 ## 8. Diagnóstico y validación para agentes
 
 | Opción | Uso documentado |

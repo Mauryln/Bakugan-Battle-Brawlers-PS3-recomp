@@ -175,7 +175,6 @@ endif()
 add_executable(${PROJECT_NAME}
     main.cpp
     stubs.cpp
-    savedata_ui.cpp
     ${PS3RECOMP_SCAFFOLD}
     ${HLE_NID_TABLE}
     ${RECOMP_SOURCES}
@@ -231,7 +230,6 @@ target_include_directories(${PROJECT_NAME} PRIVATE
     "${PS3RECOMP_DIR}/runtime/memory"
     "${PS3RECOMP_DIR}/runtime/syscalls"
     "${PS3RECOMP_DIR}/runtime/platform"        # win32_compat.h and friends
-    "${PS3RECOMP_DIR}/libs/system"
     "${PS3RECOMP_DIR}/libs/video"
     "${CMAKE_CURRENT_SOURCE_DIR}"
 )
@@ -264,6 +262,10 @@ if(WIN32)
         gdi32
         winmm
     )
+
+    # Player-facing selector: 720p/30, 1080p/30 (default), 1080p/60, 1440p/60.
+    add_executable(BakuganLauncher WIN32 launcher.cpp)
+    target_link_libraries(BakuganLauncher PRIVATE user32 comdlg32)
 endif()
 
 # ---------------------------------------------------------------------------

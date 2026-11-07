@@ -162,8 +162,28 @@ extern "C" int  rsx_null_backend_pump_messages(void);
  * smaller arena makes every spawned thread's stack access out of bounds. */
 #define VM_SIZE       0x100010000ull   /* the full 32-bit guest space + a 64K guard */
 #define STACK_TOP     0x0FF00000u      /* main-thread stack, below the 0x10000000 segment */
-#define WINDOW_WIDTH  1280
-#define WINDOW_HEIGHT 720
+#define DEFAULT_INTERNAL_HEIGHT 720
+
+/* Internal raster size. The guest keeps its own 1280x720 layout and
+ * cellVideoOutGetResolution still reports 720p; only the host render target
+ * grows, so geometry keeps its logical coordinates while the raster gets more
+ * pixels. PS3_INTERNAL accepts 720p/900p/1080p/1440p or a bare height. */
+static void internal_resolution(uint32_t* out_w, uint32_t* out_h)
+{
+    int height = DEFAULT_INTERNAL_HEIGHT;
+    const char* value = getenv("PS3_INTERNAL");
+    if (value && *value) {
+        int parsed = atoi(value);
+        if (parsed >= 480 && parsed <= 2160)
+            height = parsed;
+        else
+            fprintf(stderr, "[output] PS3_INTERNAL=%s is not a height; using %dp\n",
+                    value, DEFAULT_INTERNAL_HEIGHT);
+    }
+    if (height & 1) height++;
+    *out_h = (uint32_t)height;
+    *out_w = (uint32_t)((height * 16 + 8) / 9) & ~1u;
+}
 
 /* ---------------------------------------------------------------------------
  * Frame clock
@@ -214,6 +234,35 @@ static unsigned frame_clock_due_ticks(unsigned long long now,
 static double s_wait_s = 0.0; unsigned s_wait_n = 0;
 static double s_pres_s = 0.0; unsigned s_pres_n = 0;
 static double s_qpc_freq2 = 0.0;
+
+/* PS3_FPS_CAP=30|60|0 throttles presentation. The guest still ticks at the
+ * vblank rate; this only stops the host from drawing more frames than the
+ * selected preset needs, which is what makes the low-end presets useful. */
+static void fps_cap_wait(void)
+{
+    static int cap = -1;
+    static double next = 0.0;
+    if (cap < 0) { const char* e = getenv("PS3_FPS_CAP"); cap = e ? atoi(e) : 0; }
+    if (cap <= 0) return;
+    if (s_qpc_freq2 == 0.0) { LARGE_INTEGER f; QueryPerformanceFrequency(&f); s_qpc_freq2 = (double)f.QuadPart; }
+    LARGE_INTEGER c; QueryPerformanceCounter(&c);
+    const double now = (double)c.QuadPart / s_qpc_freq2;
+    const double interval = 1.0 / cap;
+    if (next == 0.0) next = now;
+    next += interval;
+    if (next > now) {
+        const double remaining = next - now;
+        if (remaining > 0.001) Sleep((DWORD)(remaining * 1000.0));
+        for (;;) {
+            QueryPerformanceCounter(&c);
+            if ((double)c.QuadPart / s_qpc_freq2 >= next) break;
+            Sleep(0);
+        }
+    } else if (now - next > interval) {
+        next = now;   /* a long stall is not replayed as a burst of frames */
+    }
+}
+
 static void present_timed(void)
 {
     if (s_qpc_freq2 == 0.0) { LARGE_INTEGER f; QueryPerformanceFrequency(&f); s_qpc_freq2 = (double)f.QuadPart; }
@@ -222,6 +271,7 @@ static void present_timed(void)
     QueryPerformanceCounter(&b);
     s_pres_s += (double)(b.QuadPart - a.QuadPart) / s_qpc_freq2;
     s_pres_n++;
+    fps_cap_wait();
     /* Opt-in whole guest-frame intervals, including waits and Present. Keep
      * samples in memory: one summary per 120 frames avoids per-frame logging. */
     static int metrics = -1;
@@ -301,7 +351,10 @@ static DWORD WINAPI frame_clock(LPVOID)
     const char* title = getenv("PS3_TITLE");
     if (!title || !*title) title = "Bakugan: Battle Brawlers";
 
-    int rsx_ok = (rsx_backend_init(WINDOW_WIDTH, WINDOW_HEIGHT, title) == 0);
+    uint32_t internal_w = 0, internal_h = 0;
+    internal_resolution(&internal_w, &internal_h);
+    fprintf(stderr, "[output] internal render %ux%u\n", internal_w, internal_h);
+    int rsx_ok = (rsx_backend_init(internal_w, internal_h, title) == 0);
     fprintf(stderr, "[rsx] %s backend init %s\n", RSX_BACKEND_NAME,
             rsx_ok ? "OK -- window open" : "FAILED");
     /* Which host thread owns the FIFO drain, so a sampler can tell it apart
@@ -634,98 +687,6 @@ static void harness_guest_caller(uint32_t opd, uint64_t a0, uint64_t a1,
     ppu_guest_call(opd, a0, a1, a2, a3, a4, a5, a6, a7);
 }
 
-#ifdef _WIN32
-/* Save data belongs to the player, not to the checkout the game happens to be
- * launched from: default the root to %LOCALAPPDATA%\BakuganRecomp. The toolkit
- * still honours PS3_GAMEDATA_ROOT, which tests and diagnostics use to point at
- * a scratch directory, and an explicit value wins over this policy. */
-static void ensure_host_dirs(const char* path)
-{
-    char tmp[1200];
-    snprintf(tmp, sizeof tmp, "%s", path);
-    for (char* p = tmp + 1; *p; p++) {
-        if (*p == '\\' || *p == '/') {
-            char saved = *p;
-            *p = '\0';
-            CreateDirectoryA(tmp, NULL);
-            *p = saved;
-        }
-    }
-    CreateDirectoryA(tmp, NULL);
-}
-
-/* Copy every file under `from` into `to`, never replacing an existing one: a
- * save made after the move is newer than anything the old tree holds. */
-static void copy_tree_missing(const char* from, const char* to)
-{
-    ensure_host_dirs(to);
-    char search[1300];
-    snprintf(search, sizeof search, "%s\\*", from);
-    WIN32_FIND_DATAA fd;
-    HANDLE h = FindFirstFileA(search, &fd);
-    if (h == INVALID_HANDLE_VALUE) return;
-    do {
-        if (!strcmp(fd.cFileName, ".") || !strcmp(fd.cFileName, "..")) continue;
-        char src[1300], dst[1300];
-        snprintf(src, sizeof src, "%s\\%s", from, fd.cFileName);
-        snprintf(dst, sizeof dst, "%s\\%s", to, fd.cFileName);
-        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
-            copy_tree_missing(src, dst);
-        else if (GetFileAttributesA(dst) == INVALID_FILE_ATTRIBUTES)
-            CopyFileA(src, dst, TRUE);
-    } while (FindNextFileA(h, &fd));
-    FindClose(h);
-}
-
-#define SAVEDATA_SUBPATH "\\dev_hdd0\\home\\00000001\\savedata"
-
-static void prepare_savedata_root(void)
-{
-    const char* explicit_root = getenv("PS3_GAMEDATA_ROOT");
-    if (explicit_root && *explicit_root) return;   /* caller chose the location */
-
-    const char* local = getenv("LOCALAPPDATA");
-    if (!local || !*local) return;                 /* keep the cwd-relative default */
-
-    char root[1024], savedata[1300], marker[1200];
-    snprintf(root, sizeof root, "%s\\BakuganRecomp", local);
-    snprintf(savedata, sizeof savedata, "%s" SAVEDATA_SUBPATH, root);
-    snprintf(marker, sizeof marker, "%s\\.gamedata-migrated", root);
-    ensure_host_dirs(root);
-    _putenv_s("PS3_GAMEDATA_ROOT", root);
-    printf("[boot] save data root: %s\n", root);
-
-    if (GetFileAttributesA(marker) != INVALID_FILE_ATTRIBUTES) return;
-
-    /* Pre-release builds kept saves beside the disc tree (or the cwd). Copy
-     * that tree once, then leave a marker so a deleted save cannot resurrect
-     * old files on the next boot. */
-    char legacy[1300], from[1300];
-    int migrated = 0;
-    static const char* const kLegacy[] = { "%s\\..\\gamedata", "%s\\gamedata", "." };
-    for (size_t i = 0; i < sizeof kLegacy / sizeof kLegacy[0]; i++) {
-        if (i < 2)
-            snprintf(legacy, sizeof legacy, kLegacy[i], ppu_vfs_root);
-        else
-            snprintf(legacy, sizeof legacy, "%s", kLegacy[i]);
-        snprintf(from, sizeof from, "%s" SAVEDATA_SUBPATH, legacy);
-        if (GetFileAttributesA(from) != INVALID_FILE_ATTRIBUTES) {
-            printf("[boot] migrating save data from %s\n", legacy);
-            copy_tree_missing(from, savedata);
-            migrated = 1;
-            break;
-        }
-    }
-    FILE* f = fopen(marker, "wb");
-    if (f) {
-        fprintf(f, "%s\n", migrated ? legacy : "none");
-        fclose(f);
-    }
-}
-#else
-static void prepare_savedata_root(void) {}
-#endif
-
 int main(int argc, char** argv)
 {
 #if defined(BAKUGAN_SPU_SSE41)
@@ -786,7 +747,6 @@ int main(int argc, char** argv)
 
     derive_vfs_root(argv[1]);
     printf("[boot] VFS root: %s\n", ppu_vfs_root);
-    prepare_savedata_root();
 
     /* Real title id (BLES00758) and title name, from the game's own PARAM.SFO.
      * cellGame/cellSaveData/sceNpTrophy build their /dev_hdd0/game/<id> paths
@@ -823,10 +783,6 @@ int main(int argc, char** argv)
 #ifdef _WIN32
     extern void bakugan_install_video();
     bakugan_install_video();
-    /* The firmware's save-data applet does not exist here; the native picker
-     * stands in for it while cellSaveData blocks the guest. */
-    extern void bakugan_savedata_ui_install(void);
-    bakugan_savedata_ui_install();
 #endif
 
     /* Install the guest-callback hook, then start the frame clock. It no-ops

@@ -26,6 +26,37 @@ Al ejecutar el binario directamente, `PS3_FSR=fsr1` activa el procesado;
 `PS3_FSR=0` o la variable ausente lo desactiva. Los archivos de
 `shaders/fsr1/` generados por CMake deben acompañar al ejecutable.
 
+## Launcher y presets
+
+`BakuganLauncher.exe` (misma carpeta que `BakuganRecomp.exe`) ofrece:
+
+| Preset | Salida | FPS |
+| --- | --- | --- |
+| 720p / 30 FPS | 720p | 30 |
+| 1080p / 30 FPS (default) | 1080p | 30 |
+| 1080p / 60 FPS | 1080p | sin tope |
+| 1440p / 60 FPS | 1440p | sin tope |
+
+El launcher fija `PS3_INTERNAL=720`, `PS3_OUTPUT`, `PS3_FSR=auto`,
+`PS3_FPS_CAP` y `PS3_WINDOW_MODE=borderless`, busca `EBOOT.elf` y arranca el
+juego. `--preset 720p30|1080p30|1080p60|1440p60` permite probarlo sin GUI.
+Las variables equivalentes siguen disponibles en `tools/run.ps1`:
+`-RenderHeight`, `-Output`, `-FSR`, `-Sharpness`, `-FpsCap`.
+
+## Por qué el render interno sigue siendo 1280x720
+
+El título construye sus viewports, su buffer de display y su composición final
+para 1280x720. Subir solo el backbuffer del host (o falsear
+`cellVideoOutGetResolution`) deja la imagen real en un rectángulo de 1280x720
+en la esquina superior izquierda; escalar el clip-space la amplía pero recorta.
+La ruta validada es conservar el render interno a 720p y usar FSR 1 para la
+salida. Aumentar de verdad la resolución interna exige escalar las superficies
+y viewports del guest de forma coherente (trabajo pendiente, no activado).
+
+`PS3_INTERNAL` acepta 720/900/1080/1440 y existe para experimentos; el valor
+por defecto y el que usa el launcher es 720. Un valor mayor no mejora la imagen
+con este título.
+
 La ventana normal se ajusta al área de trabajo del monitor. `-WindowMode
 Borderless` ocupa el monitor sin cambiar el modo de pantalla. Ambas opciones
 conservan el tamaño de salida a 1080p. La variable equivalente es

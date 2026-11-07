@@ -9,10 +9,17 @@
 param(
     [string]$Elf = "",
     [switch]$VfsFromExe,
-    [ValidateSet('Native', 'FSR1')]
-    [string]$Upscaler = 'Native',
-    [ValidateSet(720)]
+    [ValidateSet('Auto', 'Native', 'FSR1')]
+    [string]$Upscaler = 'Auto',
+    [ValidateSet(720, 900, 1080, 1440)]
     [int]$RenderHeight = 720,
+    [ValidateSet('Native', '1080p', '1440p', '2160p')]
+    [string]$Output = 'Native',
+    [ValidateSet('Auto', 'On', 'Off')]
+    [string]$FSR = 'Auto',
+    [double]$Sharpness = 0.5,
+    [ValidateSet(0, 30, 60)]
+    [int]$FpsCap = 0,
     [ValidateSet('Windowed', 'Borderless')]
     [string]$WindowMode = 'Windowed'
 )
@@ -32,9 +39,17 @@ if (-not (Test-Path $Elf)) {
 
 $env:PS3_VFS_ROOT = Join-Path $root "game"
 $env:PS3_TITLE = "Bakugan: Battle Brawlers"
-$env:PS3_FSR = if ($Upscaler -eq 'FSR1') { 'fsr1' } else { $null }
-$env:PS3_RENDER_HEIGHT = [string]$RenderHeight
+$env:PS3_INTERNAL = [string]$RenderHeight
+$env:PS3_OUTPUT = $Output
+if ($Upscaler -eq 'FSR1') { $env:PS3_FSR = 'fsr1' }
+elseif ($Upscaler -eq 'Native') { $env:PS3_FSR = '0' }
+elseif ($FSR -eq 'On') { $env:PS3_FSR = 'fsr1' }
+elseif ($FSR -eq 'Off') { $env:PS3_FSR = '0' }
+else { $env:PS3_FSR = $null }
+$env:PS3_FSR_SHARPNESS = $Sharpness.ToString('0.00', [Globalization.CultureInfo]::InvariantCulture)
+$env:PS3_FPS_CAP = if ($FpsCap -gt 0) { [string]$FpsCap } else { $null }
 $env:PS3_WINDOW_MODE = $WindowMode.ToLowerInvariant()
 
 Write-Host "VFS root: $env:PS3_VFS_ROOT"
+Write-Host "Internal: $($env:PS3_INTERNAL)p | Output: $Output | FSR: $(if ($env:PS3_FSR) { $env:PS3_FSR } else { 'auto' }) | FPS cap: $(if ($env:PS3_FPS_CAP) { $env:PS3_FPS_CAP } else { 'off' })"
 & $exe $Elf
