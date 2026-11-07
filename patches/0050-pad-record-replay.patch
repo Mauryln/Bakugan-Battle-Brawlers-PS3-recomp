@@ -1,0 +1,288 @@
+diff --git a/libs/input/cellPad.c b/libs/input/cellPad.c
+index d82ba77..03d6c40 100644
+--- a/libs/input/cellPad.c
++++ b/libs/input/cellPad.c
+@@ -25,12 +25,24 @@
+  * frame rate, and a wall-clock schedule then presses START on the logos; a
+  * flip schedule replays the same screens however slow the run is. */
+ extern u32 cellGcm_flip_request_count(void);
+-static double pad_clock(unsigned long long t0_ms)
++static int pad_clock_flips(void)
+ {
+     static int flips = -1;
+-    if (flips < 0) { const char* e = getenv("PAD_CLOCK"); flips = e && !strcmp(e, "flips"); }
+-    return flips ? (double)cellGcm_flip_request_count()
+-                 : (double)(GetTickCount64() - t0_ms) / 1000.0;
++    if (flips < 0) {
++        const char* e = getenv("PAD_CLOCK");
++        if (e) flips = !strcmp(e, "flips");
++        /* A replay defaults to flips: a recorded run is a sequence of SCREENS,
++         * and the frame counter is the only clock that tracks screens instead
++         * of seconds on a machine whose load times vary run to run. */
++        else   flips = getenv("PAD_REPLAY") != NULL;
++    }
++    return flips;
++}
++
++static double pad_clock(unsigned long long t0_ms)
++{
++    return pad_clock_flips() ? (double)cellGcm_flip_request_count()
++                             : (double)(GetTickCount64() - t0_ms) / 1000.0;
+ }
+ 
+ /* A button-driven Sixaxis forward impulse, followed by the braking impulse.
+@@ -600,6 +612,223 @@ void cellPad_poll(void)
+     }
+ }
+ 
++/* ---------------------------------------------------------------------------
++ * PAD_RECORD / PAD_REPLAY -- capture one human playthrough, replay it later.
++ *
++ * PAD_SCRIPT cannot drive a menu system blind: the number of screens between
++ * boot and gameplay is not known in advance, and a fixed schedule drifts the
++ * moment one load is slower than the one it was timed against. PAD_RECORD
++ * instead stores what the guest ACTUALLY SAW -- the merged pad packet, after
++ * keyboard/XInput/PAD_FILE, exactly as cellPadGetData handed it out -- so a
++ * replay reproduces the same presses without modelling the menus at all.
++ *
++ * Sample line (whitespace separated, '#' starts a comment):
++ *
++ *     <t_ms> <flips> <mask> <lx> <ly> <rx> <ry>
++ *
++ * mask is (DIGITAL2 << 8) | DIGITAL1, the same packing PAD_SCRIPT uses. Both
++ * clocks are recorded so the replay can use either; PAD_CLOCK picks (and a
++ * replay defaults to flips, see pad_clock_flips).
++ *
++ * A sample is written whenever the packet CHANGES, plus a heartbeat every
++ * PAD_REC_HB_MS, so a replay always has a timeline position even while the
++ * player is holding nothing. The file is flushed as it grows, because the
++ * normal way to end a recording is to close the game.
++ *
++ * Replay overrides host input while samples remain and returns control to the
++ * real pad once the timeline is spent, so a human can pick up where the
++ * recording stopped. Completion prints one "[cellPad] PAD_REPLAY done" line:
++ * that is the signal an automated run can wait on.
++ *
++ * ponytail: whole file in memory, linear cursor, no seek/streaming. A ten
++ * minute recording is a few thousand samples because only changes and the
++ * 4 Hz heartbeat are stored, and the array is grown once at load.
++ * -----------------------------------------------------------------------*/
++
++#define PAD_REC_HB_MS   250u    /* heartbeat period while nothing changes */
++
++typedef struct {
++    unsigned t_ms;              /* ms since recording start */
++    unsigned flips;             /* guest flips since recording start */
++    unsigned mask;              /* (DIGITAL2 << 8) | DIGITAL1 */
++    u8 lx, ly, rx, ry;          /* analog sticks, 0-255, 128 = centred */
++} PadRecSample;
++
++static struct {
++    int           state;        /* 0 = not probed, 1 = off, 2 = active */
++    int           replaying;
++    PadRecSample* s;
++    int           n;
++    int           cur;
++    int           held;         /* polls the cursor sample has been shown */
++    int           done_logged;
++    int           replay_started;
++    unsigned      replay_flip0;
++    unsigned long long replay_t0;
++    FILE*         out;
++    unsigned long long t0_ms;
++    unsigned      flip0;
++    unsigned      written;
++    unsigned      last_t_ms;
++    unsigned      last_mask;
++    u8            last_an[4];
++} s_rec;
++
++static void pad_rec_close(void)
++{
++    if (s_rec.out) { fclose(s_rec.out); s_rec.out = NULL; }
++}
++
++static void pad_rec_open(void)
++{
++    if (s_rec.state) return;
++    s_rec.state = 1;
++
++    { const char* rp = getenv("PAD_REPLAY");
++      if (rp && *rp) {
++          FILE* f = fopen(rp, "rb");
++          if (!f) {
++              fprintf(stderr, "[cellPad] PAD_REPLAY: cannot open %s\n", rp);
++          } else {
++              size_t cap = 4096;
++              char line[256];
++              s_rec.s = (PadRecSample*)malloc(cap * sizeof *s_rec.s);
++              while (s_rec.s && fgets(line, sizeof line, f)) {
++                  unsigned t, fl, m, lx, ly, rx, ry;
++                  if (line[0] == '#' || line[0] == '\n' || line[0] == '\r') continue;
++                  if (sscanf(line, "%u %u %u %u %u %u %u",
++                             &t, &fl, &m, &lx, &ly, &rx, &ry) != 7) continue;
++                  if ((size_t)s_rec.n == cap) {
++                      PadRecSample* grown = (PadRecSample*)realloc(
++                          s_rec.s, cap * 2 * sizeof *s_rec.s);
++                      if (!grown) break;      /* keep what loaded */
++                      s_rec.s = grown; cap *= 2;
++                  }
++                  s_rec.s[s_rec.n].t_ms  = t;
++                  s_rec.s[s_rec.n].flips = fl;
++                  s_rec.s[s_rec.n].mask  = m;
++                  s_rec.s[s_rec.n].lx = (u8)lx; s_rec.s[s_rec.n].ly = (u8)ly;
++                  s_rec.s[s_rec.n].rx = (u8)rx; s_rec.s[s_rec.n].ry = (u8)ry;
++                  s_rec.n++;
++              }
++              fclose(f);
++              if (s_rec.n > 0) {
++                  s_rec.replaying = 1;
++                  s_rec.state     = 2;
++                  printf("[cellPad] PAD_REPLAY: %d sample(s) from %s (clock=%s)\n",
++                         s_rec.n, rp, pad_clock_flips() ? "flips" : "wall");
++                  fflush(stdout);
++              } else {
++                  fprintf(stderr, "[cellPad] PAD_REPLAY: no samples in %s\n", rp);
++              }
++          }
++      } }
++
++    /* A replay wins over a recording: recording the replay would only
++     * overwrite the file being played. */
++    { const char* rc = getenv("PAD_RECORD");
++      if (rc && *rc && !s_rec.replaying) {
++          FILE* f = fopen(rc, "wb");
++          if (!f) {
++              fprintf(stderr, "[cellPad] PAD_RECORD: cannot write %s\n", rc);
++          } else {
++              s_rec.out   = f;
++              s_rec.state = 2;
++              s_rec.t0_ms = (unsigned long long)GetTickCount64();
++              s_rec.flip0 = (u32)cellGcm_flip_request_count();
++              fprintf(f, "# ps3recomp pad recording v1\n");
++              fprintf(f, "# t_ms flips mask lx ly rx ry\n");
++              fflush(f);
++              atexit(pad_rec_close);
++              printf("[cellPad] PAD_RECORD -> %s\n", rc);
++              fflush(stdout);
++          }
++      } }
++}
++
++/* Called with the finished packet, right before it goes to guest memory. */
++static void pad_rec_capture(const u16* button)
++{
++    if (!s_rec.out) return;
++
++    unsigned t_ms = (unsigned)((unsigned long long)GetTickCount64() - s_rec.t0_ms);
++    unsigned flips = (u32)cellGcm_flip_request_count() - s_rec.flip0;
++    unsigned mask  = (unsigned)button[CELL_PAD_BTN_OFFSET_DIGITAL1]
++                   | ((unsigned)button[CELL_PAD_BTN_OFFSET_DIGITAL2] << 8);
++    u8 lx = (u8)button[CELL_PAD_BTN_OFFSET_ANALOG_LEFT_X];
++    u8 ly = (u8)button[CELL_PAD_BTN_OFFSET_ANALOG_LEFT_Y];
++    u8 rx = (u8)button[CELL_PAD_BTN_OFFSET_ANALOG_RIGHT_X];
++    u8 ry = (u8)button[CELL_PAD_BTN_OFFSET_ANALOG_RIGHT_Y];
++
++    int changed = !s_rec.written || mask != s_rec.last_mask
++               || lx != s_rec.last_an[0] || ly != s_rec.last_an[1]
++               || rx != s_rec.last_an[2] || ry != s_rec.last_an[3];
++    if (!changed && t_ms - s_rec.last_t_ms < PAD_REC_HB_MS) return;
++
++    fprintf(s_rec.out, "%u %u %u %u %u %u %u\n", t_ms, flips, mask, lx, ly, rx, ry);
++    fflush(s_rec.out);
++
++    s_rec.written++;
++    s_rec.last_t_ms = t_ms;
++    s_rec.last_mask = mask;
++    s_rec.last_an[0] = lx; s_rec.last_an[1] = ly;
++    s_rec.last_an[2] = rx; s_rec.last_an[3] = ry;
++}
++
++/* Replaces whatever the host produced with the recorded packet. */
++static void pad_rec_apply(u16* button)
++{
++    if (!s_rec.replaying) return;
++
++    if (!s_rec.replay_started) {
++        /* Anchor on the first poll the guest makes, not on load: a title that
++         * spends five seconds in asset init before opening its pad must not
++         * burn five seconds of the timeline before the first press. */
++        s_rec.replay_started = 1;
++        s_rec.replay_flip0   = (u32)cellGcm_flip_request_count();
++        s_rec.replay_t0      = (unsigned long long)GetTickCount64();
++    }
++
++    int flips = pad_clock_flips();
++    unsigned key = flips
++        ? (u32)cellGcm_flip_request_count() - s_rec.replay_flip0
++        : (unsigned)((unsigned long long)GetTickCount64() - s_rec.replay_t0);
++    unsigned last_key = flips ? s_rec.s[s_rec.n - 1].flips : s_rec.s[s_rec.n - 1].t_ms;
++
++    /* One sample per poll at most: a frame spike must not skip a short tap,
++     * and menu navigation in this title is full of one-frame-visible presses. */
++    while (s_rec.cur + 1 < s_rec.n) {
++        unsigned next = flips ? s_rec.s[s_rec.cur + 1].flips : s_rec.s[s_rec.cur + 1].t_ms;
++        if (next > key || s_rec.held < 1) break;
++        s_rec.cur++;
++        s_rec.held = 0;
++    }
++    s_rec.held++;
++
++    if (s_rec.cur == s_rec.n - 1) {
++        unsigned margin = flips ? 30u : 1000u;
++        if (key > last_key + margin) {
++            if (!s_rec.done_logged) {
++                s_rec.done_logged = 1;
++                printf("[cellPad] PAD_REPLAY done: %d sample(s) played, host pad takes over\n",
++                       s_rec.n);
++                fflush(stdout);
++            }
++            s_rec.replaying = 0;
++            s_rec.state = 1;
++            return;
++        }
++    }
++
++    { const PadRecSample* e = &s_rec.s[s_rec.cur];
++      button[CELL_PAD_BTN_OFFSET_DIGITAL1] = (u16)(e->mask & 0xFF);
++      button[CELL_PAD_BTN_OFFSET_DIGITAL2] = (u16)((e->mask >> 8) & 0xFF);
++      button[CELL_PAD_BTN_OFFSET_ANALOG_LEFT_X]  = e->lx;
++      button[CELL_PAD_BTN_OFFSET_ANALOG_LEFT_Y]  = e->ly;
++      button[CELL_PAD_BTN_OFFSET_ANALOG_RIGHT_X] = e->rx;
++      button[CELL_PAD_BTN_OFFSET_ANALOG_RIGHT_Y] = e->ry; }
++}
++
+ /* HLE args are GUEST effective addresses; guest structs are BIG-ENDIAN. The
+  * vm_write helpers from ppu_memory.h translate + byte-swap. (cellPad was
+  * written for host pointers and was never actually invoked until its NIDs
+@@ -616,6 +845,8 @@ s32 cellPadGetData(u32 port_no, CellPadData* data_guest)
+     if (port_no >= s_max_connect || !data_guest)
+         return CELL_PAD_ERROR_INVALID_PARAMETER;
+ 
++    pad_rec_open();
++
+     /* Build in a local host struct, then copy to guest memory big-endian. */
+     CellPadData _d; CellPadData* data = &_d;
+     memset(data, 0, sizeof(CellPadData));
+@@ -854,6 +1085,11 @@ skip_inject: ;
+     data->button[CELL_PAD_BTN_OFFSET_ANALOG_LEFT_X]  = hs->analog_lx;
+     data->button[CELL_PAD_BTN_OFFSET_ANALOG_LEFT_Y]  = hs->analog_ly;
+ 
++    /* PAD_REPLAY: a recorded playthrough overrides the host pad. Applied here,
++     * before the pressure map below, so a replayed press also reads full
++     * pressure the way a real pad report does. */
++    if (port_no == 0) pad_rec_apply(data->button);
++
+     /* Pressure-sensitive buttons (only meaningful if PRESS_ON) */
+     if (setting & CELL_PAD_SETTING_PRESS_ON) {
+         data->button[CELL_PAD_BTN_OFFSET_PRESS_RIGHT]    = hs->press_right;
+@@ -918,6 +1154,9 @@ skip_inject: ;
+         pad_direction_motion(&data->button[CELL_PAD_BTN_OFFSET_SENSOR_X],
+             up, down, left, right);
+     }
++    /* PAD_RECORD: store the packet the guest is about to receive, after every
++     * other input source has contributed to it. */
++    if (port_no == 0) pad_rec_capture(data->button);
+     }  /* end connected block */
+ 
+ emit:
