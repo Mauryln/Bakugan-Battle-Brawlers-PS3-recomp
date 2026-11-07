@@ -25,6 +25,8 @@
 > la media pasó de **28,71 a 29,30 FPS**, con mejor p95/p99. La CPU total del
 > proceso fue similar. **Siguen pendientes los 30 FPS estables.** [Mediciones y límites](docs/SESSION_20261107_WALKER.md).
 
+> Se conservan también reducciones pequeñas del filtro de depuración y copias de tiras; su aumento adicional combinado de FPS sigue sin medirse.
+
 > **Nuevo: salida FSR 1 a 1080p.** EASU + RCAS oficiales de AMD reescalan el
 > cuadro completo de 720p a 1080p. La ventana se ajusta al monitor e incluye modo
 > sin bordes y gestión de DPI. La arena medida promedió **28,02 FPS**:

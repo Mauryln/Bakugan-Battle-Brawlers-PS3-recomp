@@ -1,5 +1,10 @@
 # Walker y subida paralela de vértices — 7 de noviembre de 2026
 
+Estado final: pack2 + caché de pick + copia diferida de last activos. La tabla
+A/B siguiente mide sólo pack2, anterior a las dos adiciones. Su incremento
+combinado no está medido; las adiciones se conservan por petición explícita del
+usuario de acumular también reducciones pequeñas de trabajo.
+
 ## Cambio aplicado
 
 El runner activa dos trabajadores para copiar el staging de vértices ya cerrado
@@ -126,3 +131,60 @@ sigue abierto; esta entrega reduce la carga del walker y mejora modestamente FPS
 
 Backup local del ejecutable y fuentes: `backups/walker-pack-20261107T114209Z`. Incluye manifest SHA256,
 parches reproducibles, documentación y fuentes del toolkit; no incluye game data.
+
+## Adición solicitada: acumular también ganancias pequeñas
+
+El usuario cambió el criterio de aceptación al finalizar: conservar también las
+mejoras pequeñas de media, aunque antes se hubieran retirado por no mejorar las
+colas consistentemente. Se revisaron los resultados archivados; no existe una
+colección de mejoras positivas del 1% que sólo haga falta activar.
+
+Se añadió la única candidata recuperable con señal media positiva: caché de
+`RSX_DBG_PICK`. Antes, el valor ausente se convertía en -2 y el test `pick<0`
+volvía a consultar getenv en cada draw de triángulos. Ahora la inicialización
+se representa separadamente del valor; no cambia el filtro, datos ni draws.
+Está activa por defecto; `RSX_PICK_CACHE=0` conserva el comportamiento anterior.
+Parche 0055, compatible con 0054. Sin evento de A/B ni bloqueo nuevo por draw.
+
+Antecedente medido: último par A2/B3, 27.964 -> 28.090 FPS (+0.45% de media), pero
+p99 44.362 -> 48.589 ms. Hubo otras ventanas positivas y variación; no está demostrado
+que ese p99 sea causado por la caché ni que la mejora se acumule linealmente con
+pack2. Se conserva por la nueva preferencia explícita del usuario y por eliminar
+trabajo redundante sin cambiar datos. **El incremento combinado de FPS todavía
+no tiene una comparación aislada nueva**; no sumar 0.45% y 2.03% como una medida.
+
+`tools/test_rsx_pick_cache.ps1`: 32 casos de opciones/modos, 20000 llamadas cada uno,
+valores y selección idénticos, una consulta en caché, default activo, rollback 0 y
+transiciones del helper. Build Release compilada. Se revisa la escena nuevamente;
+no se realizan pruebas de gameplay por indicación del usuario.
+
+Las demás propuestas no son ganancias pequeñas acumulables: prefetch, memcpy
+literal 64/80, reuse upload y decode workers dieron medias negativas; staging,
+SIMD y otras cachés no demostraron más FPS. La variante NV3089 con lock siempre
+fue sustituida por el camino condicional actual del mismo trabajo, y no se puede
+sumar encima. La copia diferida last se recupera bajo la nueva preferencia del usuario, como se
+detalla abajo; su aumento de FPS permanece sin cuantificar. Los ensayos con
+regresión medida permanecen desactivados.
+
+### Copia de last recuperada
+
+Patch 0056 conserva el bloque de 256 bytes ya emitido y sólo lo copia a last cuando
+aparece un corte que lo consume. Mantiene el ensamblado original, máscaras,
+strides, reinicios y continuidad. El canary de copia parcial conserva su camino
+anterior. Default activo; `VP_STRIP_DEFER_LAST=0` restaura la copia por vértice.
+No modifica ni habilita VP_STRIP_DIRECT.
+
+`tools/test_rsx_strip_defer.ps1` extrae la función actual y la compara con un
+snapshot del ensamblador anterior: 86016 paquetes por modo, 172032 en total, bytes
+completos, conteos, límites, fetches y rangos de índices idénticos; u16/u32,
+reinicios, particiones/continuidad, capacidades y copias 64/256. El fixture y
+mocks están versionados en tools/tests/fixtures, sin depender de diagnostics.
+
+La escena se revisó con pack+pick antes de esta última elisión y registró miles
+de hitcheck con bad=0; no hubo GPUV. La elisión posterior pasó el fixture exacto
+y la compilación final. No se declara una nueva medición de FPS del conjunto
+pack+pick+last, ni se extrapolan porcentajes independientes. La siguiente sesión
+puede medir esa combinación sobre la referencia d5ab926, sin repetir gameplay.
+
+Backup final del conjunto: `backups/walker-pack-pick-strip-20261107T115149Z`. El backup anterior conserva
+la referencia con sólo pack2. Juego cerrado normalmente al terminar la escena.

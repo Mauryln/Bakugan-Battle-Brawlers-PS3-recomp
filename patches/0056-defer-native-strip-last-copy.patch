@@ -1,0 +1,43 @@
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -7901,6 +7901,12 @@
+     u32 cache_tags[16], cache_valid = 0;
+     u32 o = 0;
+     int seeded = 0, cut = 0;
++    static int defer_mode = -1;
++    if (defer_mode < 0) {
++        const char* value = getenv("VP_STRIP_DEFER_LAST");
++        defer_mode = !value || atoi(value) != 0;
++    }
++    const int defer_last = defer_mode && s_vp_copy_bytes == sizeof(last);
+ #define VP_STRIP_EMIT(v) do { memcpy(&out[o * 16], (v), s_vp_copy_bytes); ++o; } while (0)
+ #define VP_STRIP_FETCH(index, dst) do { \
+     u32 ref = (index), slot = ref & 15u, bit = 1u << slot; \
+@@ -8007,7 +8013,7 @@
+                     vpchk_compare(state, vi4[q], &out[(o + q) * 16]);
+             o += 4;
+             k += 3;
+-            memcpy(last, &out[(o - 1) * 16], sizeof(VPSlot) * 16);
++            if (!defer_last) memcpy(last, &out[(o - 1) * 16], sizeof(VPSlot) * 16);
+             strip.previous[0] = vi4[2];
+             strip.previous[1] = vi4[3];
+             strip.length += 4;
+@@ -8017,13 +8023,16 @@
+         if (_vt0 > 0.0) s_perf_vfetch += (perf_now() - _vt0) * 64.0;
+         if (cut && o) {
+             u32 old_count = o;
++            if (defer_last) memcpy(last, &out[(o - 1) * 16], sizeof(last));
+             VP_STRIP_EMIT(last);
+             VP_STRIP_EMIT(vertex);
+             if (old_count & 1u) VP_STRIP_EMIT(vertex);
+         }
+         cut = 0;
+         VP_STRIP_EMIT(vertex);
+-        memcpy(last, vertex, sizeof(last));
++        /* The cut is the only consumer. The emitted full block is already the
++         * same snapshot; recover it there and preserve partial-copy canaries. */
++        if (!defer_last) memcpy(last, vertex, sizeof(last));
+         strip.previous[0] = strip.previous[1];
+         strip.previous[1] = index;
+         strip.length++;

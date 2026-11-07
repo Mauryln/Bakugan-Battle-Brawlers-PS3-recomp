@@ -1,0 +1,39 @@
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -792,6 +792,25 @@
+         enabled = !value || value[0] != '0';
+     }
+     return enabled;
++}
++
++static int s_pick_cache_enabled = -1;
++
++/* Negative filter values are valid data, not an uninitialized sentinel.
++ * Keep an explicit rollback for comparisons with the original lookup path. */
++static int vp_pick_filter(void)
++{
++    static int initialized = 0, value = -2;
++    if (s_pick_cache_enabled < 0) {
++        const char* mode = getenv("RSX_PICK_CACHE");
++        s_pick_cache_enabled = !mode || atoi(mode) != 0;
++    }
++    if (!initialized || (!s_pick_cache_enabled && value < 0)) {
++        const char* e = getenv("RSX_DBG_PICK");
++        value = e ? atoi(e) : -2;
++        initialized = 1;
++    }
++    return value;
+ }
+
+ static int perf_on(void)
+@@ -7579,8 +7598,7 @@
+        * across all of them converges on the centre of the whole field -- which is
+        * where there is nothing in particular. A single slice is a stable target
+        * and can be magnified without drifting off it. */
+-      static int pick = -1;
+-      if (pick < 0) { const char* e = getenv("RSX_DBG_PICK"); pick = e ? atoi(e) : -2; }
++      int pick = vp_pick_filter();
+       if (wantl && s_d3d.cur_texs[0].raw == wantl && count
+           && (pick == -2 || (int)first == pick)) {
+           double sx = 0, sy = 0, sz = 0;
