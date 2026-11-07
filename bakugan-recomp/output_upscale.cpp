@@ -54,15 +54,31 @@ static void configure_output_size(u32* width, u32* height)
     monitor_size(&monitor_w, &monitor_h);
     u32 wanted = 0;
     const char* value = std::getenv("PS3_OUTPUT");
-    if (value && *value && _stricmp(value, "native") && _stricmp(value, "auto")) {
-        if (!_stricmp(value, "1080p")) wanted = 1080;
-        else if (!_stricmp(value, "1440p")) wanted = 1440;
-        else if (!_stricmp(value, "2160p") || !_stricmp(value, "4k")) wanted = 2160;
-        else wanted = (u32)atoi(value);
+    const bool auto_mode = !value || !*value || !_stricmp(value, "auto");
+    if (auto_mode) {
+        /* Release default: the largest common step the monitor can show,
+         * never above it. A 4K panel gets 2160p instead of staying at 720p. */
+        if (monitor_h >= 2160) wanted = 2160;
+        else if (monitor_h >= 1440) wanted = 1440;
+        else if (monitor_h >= 1080) wanted = 1080;
+        else wanted = monitor_h;
+    } else if (!_stricmp(value, "native")) {
+        wanted = monitor_h;
+    } else if (!_stricmp(value, "1080p")) {
+        wanted = 1080;
+    } else if (!_stricmp(value, "1440p")) {
+        wanted = 1440;
+    } else if (!_stricmp(value, "2160p") || !_stricmp(value, "4k")) {
+        wanted = 2160;
+    } else {
+        wanted = (u32)atoi(value);
     }
-    if (!wanted) wanted = monitor_h;
+    if (!wanted) wanted = monitor_h ? monitor_h : 1080;
     if (wanted < 480) wanted = 480;
     if (wanted > 8192) wanted = 8192;
+    /* Never ask for a raster taller than the panel: DWM would downscale the
+     * whole window and blur the image on smaller monitors. */
+    if (monitor_h && wanted > monitor_h) wanted = monitor_h;
     if (wanted & 1) wanted++;
     u32 w = (wanted * 16u + 8u) / 9u;
     if (w & 1) w++;

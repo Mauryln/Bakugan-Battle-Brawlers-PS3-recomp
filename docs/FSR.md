@@ -50,6 +50,24 @@ a ~28-29 FPS. Para 90/120 el launcher fija también `PS3_TICK_HZ` al mismo valor
 (experimental: el guest puede avanzar su lógica más rápido). El valor validado
 para jugar es 30 o 60 con `PS3_TICK_HZ=60`.
 
+## Resolución dinámica y monitores distintos
+
+`PS3_OUTPUT=auto` (el valor por defecto del runner) elige el mayor escalón
+común que el monitor puede mostrar: 2160p, 1440p, 1080p o el nativo del panel.
+Si el monitor es más pequeño que el escalón pedido, el raster se recorta al
+panel; si es más grande, `auto` sube la salida. Nunca se pide una altura mayor
+que el monitor, para que DWM no reescale y difumine la ventana.
+
+`native` usa la altura del monitor; `1080p`, `1440p` y `2160p` fuerzan un
+escalón y se recortan al panel si no cabe. En monitores no 16:9 se conserva el
+aspecto y se deja margen en lugar de estirar la imagen.
+
+FSR1 escala el **cuadro final**, no los assets de textura: mejora bordes y
+nitidez aparente a 1080p/1440p/2160p, pero no inventa detalle de texturas.
+`PS3_FSR_SHARPNESS` (0.0-1.0, por defecto 0.5) controla RCAS; subirlo agudiza,
+bajarlo suaviza. Para resolución de texturas de origen haría falta un pipeline
+de upscaling de assets, fuera del alcance de FSR1.
+
 ## Por qué el render interno sigue siendo 1280x720
 
 El título construye sus viewports, su buffer de display y su composición final

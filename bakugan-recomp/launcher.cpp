@@ -29,7 +29,7 @@ static const Preset kPresets[] = {
     {"1440p / 60 FPS",             "1440p", "60"},
     {"Personalizado",              "1080p", "0"},
 };
-static const char* kOutputs[] = {"native", "1080p", "1440p", "2160p"};
+static const char* kOutputs[] = {"auto", "native", "1080p", "1440p", "2160p"};
 static const char* kCaps[] = {"30", "60", "90", "120", "monitor", "0"};
 
 static char s_dir[MAX_PATH];
@@ -153,7 +153,7 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             char out[32] = "1080p", cap[8] = "30";
             int oi = (int)SendMessageA(s_output, CB_GETCURSEL, 0, 0);
             int ci = (int)SendMessageA(s_cap, CB_GETCURSEL, 0, 0);
-            if (oi >= 0 && oi < 4) snprintf(out, sizeof out, "%s", kOutputs[oi]);
+            if (oi >= 0 && oi < 5) snprintf(out, sizeof out, "%s", kOutputs[oi]);
             if (ci >= 0 && ci < 6) snprintf(cap, sizeof cap, "%s", kCaps[ci]);
             launch((int)SendMessageA(s_preset, CB_GETCURSEL, 0, 0), out, cap);
         }

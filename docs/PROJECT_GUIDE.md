@@ -217,6 +217,9 @@ No prometer 30 FPS ni mejoras de carga sin A/B con imagen y comportamiento idén
 - Topes de presentación: `PS3_FPS_CAP=30|60|90|120|monitor|0`. Verificado 30.00
   exacto; 60/90 no elevan el FPS de batalla porque el renderer sigue limitado
   por CPU. `PS3_TICK_HZ=90/120` es experimental (acelera la lógica del guest).
+- Resolución dinámica: `PS3_OUTPUT=auto` (default) elige 2160/1440/1080/nativo
+  según el panel y recorta si el monitor es menor; nunca pide más que el panel.
+  Validado en 1080p: `auto` y `2160p` caen a 1920x1080 sin romper la vista.
 
 
 ## 8. Diagnóstico y validación para agentes

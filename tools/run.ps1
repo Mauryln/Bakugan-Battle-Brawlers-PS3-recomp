@@ -13,8 +13,8 @@ param(
     [string]$Upscaler = 'Auto',
     [ValidateSet(720, 900, 1080, 1440)]
     [int]$RenderHeight = 720,
-    [ValidateSet('Native', '1080p', '1440p', '2160p')]
-    [string]$Output = 'Native',
+    [ValidateSet('Auto', 'Native', '1080p', '1440p', '2160p')]
+    [string]$Output = 'Auto',
     [ValidateSet('Auto', 'On', 'Off')]
     [string]$FSR = 'Auto',
     [double]$Sharpness = 0.5,
