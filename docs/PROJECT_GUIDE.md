@@ -98,7 +98,7 @@ Guest escribe comandos GCM al FIFO
 - Los `upload_*` escriben a `s_d3d.vp_vb_mapped` (192 MB en la versión documentada) y avanzan `vp_vb_offset`.
 - `vp_upload_compact_frame` empaqueta atributos con stride `popcount(mask)*16` y alterna mitades mediante `vp_parity` para no sobrescribir datos en uso por GPU.
 - Los strips indexados contienen reinicios `0x7FFF` aproximadamente cada 13 índices; `upload_native_strip_vp_indexed` inserta puentes y corrige paridad. **No sustituirlo por concatenación ingenua.**
-- La caché `VP_CACHE` usa identidad de draw y generaciones de páginas guest de 4 KB; no reutilizar datos si cambian las páginas leídas.
+- La caché `VP_CACHE` usa identidad de draw y generaciones de páginas guest de 4 KB; no reutilizar datos si cambian las páginas leídas. Las escrituras masivas que no pasan por `vm_write*` (lecturas `cellFs`/`sys_fs`, carga de partidas, PNG) también deben sellar sus páginas; la caché de texturas reutiliza una textura solo si ninguna página de su origen cambió desde la subida (el checksum disperso no detecta cambios pequeños, como un retrato personalizado). `VP_CACHE=0` y `TEX_NOCACHE=1` quedan como rollback de diagnóstico.
 
 **Invariante de layout:** cambiar coordinadamente `s_vertex_fetch_plan.mask/slot_off[]`, `dr->vb_stride`, `dr->gpu_input_mask/dr->gpu_stride` y `s_d3d.vp_vb_offset`. Si un lado escribe compacto y otro lee canónico, puede aparecer pantalla negra sin error. No insertar un `return` en `upload_*` que descarte draws ni romper cadenas `if/else if/else` de primitivas: una regresión documentada redujo ~1743 draws a 51.
 
@@ -132,7 +132,7 @@ En pruebas de integración aparecieron estructuras ausentes y, en otra variante,
 
 ### Save data
 
-`libs/system/cellSaveData.c` implementa el applet de guardado. La raíz por defecto es `%LOCALAPPDATA%\BakuganRecomp\dev_hdd0\home\00000001\savedata`; `PS3_GAMEDATA_ROOT` la sobrescribe y la primera ejecución copia una vez `gamedata/` (marcador `.gamedata-migrated`). `cellSaveDataListSave2` crea un slot `...-NN` por guardado manual, con el nombre libre que calcula el `funcList` del juego. `cellSaveDataFixedSave2` es el checkpoint y sobrescribe el directorio que pide el título (`PS3_SAVEDATA_NEW_SLOT_FIXED=1` fuerza slot nuevo). `ListAutoSave` mantiene `BLES00758-SYSTEM-DATA` fijo. `cellSaveDataListLoad2` y los borrados usan el selector dentro del juego (`bakugan-recomp/savedata_overlay.cpp`): un canvas GDI+ con `PIC1.PNG` del disco y el `ICON0.PNG` de cada slot, subido como textura D3D12 y dibujado sobre el cuadro final. Se controla con teclado, ratón o XInput; `PS3_SAVEDATA_UI=0` lo desactiva. `PS3_SAVEDATA_CHOICE=new|first|last|<n>|<dir>|cancel` automatiza la elección.
+`libs/system/cellSaveData.c` implementa el applet de guardado. La raíz por defecto es `%LOCALAPPDATA%\BakuganRecomp\dev_hdd0\home\00000001\savedata`; `PS3_GAMEDATA_ROOT` la sobrescribe y la primera ejecución copia una vez `gamedata/` (marcador `.gamedata-migrated`). `cellSaveDataListSave2` crea un slot `...-NN` por guardado manual, con el nombre libre que calcula el `funcList` del juego. Si un slot `-NN` sólo contiene `PARAM.SFO` (primer guardado abortado), el siguiente guardado lo reutiliza en lugar de crear el número siguiente; así el slot no queda huérfano. `cellSaveDataFixedSave2` es el checkpoint y sobrescribe el directorio que pide el título (`PS3_SAVEDATA_NEW_SLOT_FIXED=1` fuerza slot nuevo). `ListAutoSave` mantiene `BLES00758-SYSTEM-DATA` fijo. `cellSaveDataListLoad2` y los borrados usan el selector dentro del juego (`bakugan-recomp/savedata_overlay.cpp`): un canvas GDI+ con `PIC1.PNG` del disco y el `ICON0.PNG` de cada slot, subido como textura D3D12 y dibujado sobre el cuadro final. Se controla con teclado, ratón o XInput; `PS3_SAVEDATA_UI=0` lo desactiva. `PS3_SAVEDATA_CHOICE=new|first|last|<n>|<dir>|cancel` automatiza la elección.
 
 ## 6. Guardrails: cambios y opciones de alto riesgo
 
@@ -201,7 +201,8 @@ No prometer 30 FPS ni mejoras de carga sin A/B con imagen y comportamiento idén
   empequeñece. La ruta validada es 720p interno + FSR1 a la salida.
 - `BakuganLauncher.exe` expone presets 720p/30, 1080p/30 (default), 1080p/60 y
   1440p/60; `PS3_INTERNAL` por defecto 720, `PS3_OUTPUT=native|1080p|1440p|2160p`,
-  `PS3_FPS_CAP=30|60|0`.
+  `PS3_FPS_CAP=30|60|0`. La interfaz arranca en español o inglés según el idioma de
+  Windows; `[Player] LauncherLanguage=auto|es|en` en `player.ini` lo fija.
 - Medición con `tools/bench_arena.ps1`, arena fija, 720p->1080p FSR1, `PERF=0`:
   media **28,65 FPS / 34,9 ms**, p95 41,9 ms, 57 % de cuadros > 33,3 ms.
 - `PS3_NOVSYNC=1` no cambió el resultado (28,29 FPS): el techo no es Present,

@@ -847,6 +847,10 @@ int main(int argc, char** argv)
     /* Pack frozen vertex staging while the owner prepares draw materials.
      * Preserve RSX_PACK_WORKERS=0 as the synchronous diagnostic path. */
     if (!getenv("RSX_PACK_WORKERS")) _putenv_s("RSX_PACK_WORKERS", "2");
+    /* A "-00" directory holding only PARAM.SFO is the aborted first-save stub.
+     * Hide that stub from the load chooser; a real -00 save stays visible. */
+    if (!getenv("PS3_SAVEDATA_HIDE_LOAD"))
+        _putenv_s("PS3_SAVEDATA_HIDE_LOAD", "BLES00758-PLAYER-DATA-00");
     /* 1 ms timer resolution. The default granularity is about 15.6 ms, which
      * inflates every shorter wait the title makes and throttles the whole
      * thing. POSIX timers are already fine-grained. */
