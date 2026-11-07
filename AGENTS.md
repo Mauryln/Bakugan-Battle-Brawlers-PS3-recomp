@@ -98,6 +98,10 @@ count with missing geometry is not a valid improvement. For vertex-path changes,
   1280x720 corner, and faking `cellVideoOutGetResolution` makes it smaller.
   Raise the output with `PS3_OUTPUT` + FSR1 instead. `RSX_PACK_WORKERS=4` is
   slower here (p99 146 ms); leave it unset.
+- Texture quality defaults: aniso 16x (`PS3_ANISO=1` to compare), `PS3_LOD_BIAS`
+  unset (negative values sharpen but shimmer), RCAS 0.6 at 1080p. Mips are
+  already uploaded as `level_count` subresources; do not replace them with a
+  single level.
 - `main.cpp` sets `SPU_INTERP_UNLIFTED=1`, `RSX_ACCUM_FRAME=1`,
   `GCM_FULL_FRAMES=1` and `timeBeginPeriod(1)` because this title needs them.
 - A D3D12 device removal reports `0x887A0005` (or `0x887A0001` for an illegal

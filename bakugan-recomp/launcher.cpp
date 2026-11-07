@@ -13,6 +13,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "graphics_config.h"
 
 #define ID_PRESET  101
 #define ID_OUTPUT  102
@@ -70,16 +71,18 @@ static void launch(int preset_index, const char* output, const char* cap)
     char* at = strstr(vfs, "\\PS3_GAME\\");
     if (at) *at = 0; else { at = strrchr(vfs, '\\'); if (at) *at = 0; }
 
-    SetEnvironmentVariableA("PS3_VFS_ROOT", vfs);
-    SetEnvironmentVariableA("PS3_TITLE", "Bakugan: Battle Brawlers");
-    SetEnvironmentVariableA("PS3_VERBOSE", "0");
-    SetEnvironmentVariableA("PS3_INTERNAL", "720");
-    SetEnvironmentVariableA("PS3_OUTPUT", output);
-    SetEnvironmentVariableA("PS3_FSR", "auto");
-    SetEnvironmentVariableA("PS3_FSR_SHARPNESS", "0.5");
-    SetEnvironmentVariableA("PS3_FPS_CAP", strcmp(cap, "0") ? cap : NULL);
-    SetEnvironmentVariableA("PS3_TICK_HZ", atoi(cap) > 60 ? cap : NULL);
-    SetEnvironmentVariableA("PS3_WINDOW_MODE", "borderless");
+    SetEnvironmentVariableA(PS3_ENV_VFS_ROOT, vfs);
+    SetEnvironmentVariableA(PS3_ENV_TITLE, "Bakugan: Battle Brawlers");
+    SetEnvironmentVariableA(PS3_ENV_VERBOSE, "0");
+    SetEnvironmentVariableA(PS3_ENV_INTERNAL, PS3_DEFAULT_INTERNAL);
+    SetEnvironmentVariableA(PS3_ENV_OUTPUT, output);
+    SetEnvironmentVariableA(PS3_ENV_FSR, PS3_DEFAULT_FSR);
+    SetEnvironmentVariableA(PS3_ENV_FSR_SHARPNESS, PS3_DEFAULT_SHARPNESS);
+    SetEnvironmentVariableA(PS3_ENV_ANISO, PS3_DEFAULT_ANISO);
+    SetEnvironmentVariableA(PS3_ENV_LOD_BIAS, PS3_DEFAULT_LOD_BIAS);
+    SetEnvironmentVariableA(PS3_ENV_FPS_CAP, strcmp(cap, "0") ? cap : NULL);
+    SetEnvironmentVariableA(PS3_ENV_TICK_HZ, atoi(cap) > 60 ? cap : NULL);
+    SetEnvironmentVariableA(PS3_ENV_WINDOW_MODE, PS3_DEFAULT_WINDOW_MODE);
 
     char cmd[MAX_PATH * 4];
     snprintf(cmd, sizeof cmd, "\"%s\" \"%s\"", exe, elf);

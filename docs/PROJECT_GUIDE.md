@@ -220,6 +220,9 @@ No prometer 30 FPS ni mejoras de carga sin A/B con imagen y comportamiento idén
 - Resolución dinámica: `PS3_OUTPUT=auto` (default) elige 2160/1440/1080/nativo
   según el panel y recorta si el monitor es menor; nunca pide más que el panel.
   Validado en 1080p: `auto` y `2160p` caen a 1920x1080 sin romper la vista.
+- Texturas: aniso 16x por defecto (`PS3_ANISO`), `PS3_LOD_BIAS` opcional, RCAS
+  0.6 y salida 1080p por defecto. Arena con aniso 16: **28,95 FPS** (p95 41,1)
+  frente a 28,65 sin aniso; sin regresión. Los mips ya se suben completos.
 
 
 ## 8. Diagnóstico y validación para agentes

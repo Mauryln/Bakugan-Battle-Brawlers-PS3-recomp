@@ -14,10 +14,10 @@ param(
     [ValidateSet(720, 900, 1080, 1440)]
     [int]$RenderHeight = 720,
     [ValidateSet('Auto', 'Native', '1080p', '1440p', '2160p')]
-    [string]$Output = 'Auto',
+    [string]$Output = '1080p',
     [ValidateSet('Auto', 'On', 'Off')]
     [string]$FSR = 'Auto',
-    [double]$Sharpness = 0.5,
+    [double]$Sharpness = 0.6,
     [ValidateSet('0', '30', '60', '90', '120', 'monitor')]
     [string]$FpsCap = '0',
     [ValidateSet(0, 60, 90, 120)]

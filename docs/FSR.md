@@ -68,6 +68,44 @@ nitidez aparente a 1080p/1440p/2160p, pero no inventa detalle de texturas.
 bajarlo suaviza. Para resolución de texturas de origen haría falta un pipeline
 de upscaling de assets, fuera del alcance de FSR1.
 
+## Filtrado de texturas (release 1.0)
+
+- **Anisotrópico 16x por defecto** en samplers trilineales
+  (`PS3_ANISO=1|4|8|16` para A/B). El RSX original no tenía aniso; es una
+  mejora, no fidelidad. Coste GPU bajo en este título (CPU-bound).
+- **`PS3_LOD_BIAS`** opcional (por defecto 0). Un valor negativo como `-0.5`
+  afila la selección de mip; puede provocar shimmer, así que no va activo.
+- **RCAS 0.6** y salida **1080p** son el ajuste por defecto del runner y del
+  preset 1080p/30. `PS3_FSR_SHARPNESS` sigue permitiendo 0.2 (suave) a 0.8
+  (nítido).
+- **Mips**: la subida de texturas ya crea `level_count` subrecursos y los
+  samplers usan la cadena completa; no hace falta generar mips nuevos para 1.0.
+- Medición de arena con aniso 16: **28,95 FPS** (p95 41,1) frente a 28,65 sin
+  aniso; sin regresión medible.
+
+## F11 y variables para el launcher
+
+`F11` alterna ventana y ventana completa sin bordes en caliente (no cambia el
+modo de pantalla ni el tamaño del swap chain). `Esc` sigue cerrando.
+
+Todas las variables gráficas están centralizadas en
+`bakugan-recomp/graphics_config.h` y se pasan por entorno, de modo que el
+launcher del release puede exponerlas sin tocar el runtime:
+
+| Variable | Valores | Default |
+| --- | --- | --- |
+| `PS3_INTERNAL` | 720 (el título renderiza 720p) | 720 |
+| `PS3_OUTPUT` | `auto`, `native`, `1080p`, `1440p`, `2160p` | 1080p |
+| `PS3_FSR` | `auto`, `fsr1`, `0` | auto |
+| `PS3_FSR_SHARPNESS` | 0.0-1.0 | 0.6 |
+| `PS3_ANISO` | 1, 4, 8, 16 | 16 |
+| `PS3_LOD_BIAS` | p. ej. -0.5 (opcional) | 0 |
+| `PS3_FPS_CAP` | 30, 60, 90, 120, `monitor`, 0 | 30 |
+| `PS3_TICK_HZ` | 60, 90, 120 (experimental) | 60 |
+| `PS3_WINDOW_MODE` | `windowed`, `borderless` | borderless |
+
+
+
 ## Por qué el render interno sigue siendo 1280x720
 
 El título construye sus viewports, su buffer de display y su composición final

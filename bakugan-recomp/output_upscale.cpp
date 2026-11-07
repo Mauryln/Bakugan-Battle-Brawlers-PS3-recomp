@@ -28,7 +28,7 @@ struct fsr_output {
     ID3D12Resource* outputs[2]{};
     UINT srv_step{}, rtv_step{}, constants[24]{};
     UINT width = 1920, height = 1080;
-    float sharpness = 0.5f;
+    float sharpness = 0.6f;
     D3D12_RESOURCE_STATES intermediate_state = D3D12_RESOURCE_STATE_COMMON;
 };
 fsr_output output;
