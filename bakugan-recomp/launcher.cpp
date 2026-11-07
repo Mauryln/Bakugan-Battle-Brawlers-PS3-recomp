@@ -17,9 +17,7 @@ namespace {
 using namespace player;
 enum {
     ID_OUTPUT = 100,
-    ID_CAP,
     ID_WINDOW,
-    ID_FSR,
     ID_SHARP,
     ID_ANISO,
     ID_LANG,
@@ -33,9 +31,11 @@ enum {
     ID_MAP_MODE,
     ID_DEFAULTS,
     ID_SAVE,
-    ID_PLAY
+    ID_PLAY,
+    ID_UI_LANG
 };
 constexpr int ID_BIND = 200;
+constexpr UINT WM_APP_REBUILD = WM_APP + 1;
 constexpr int WIDTH = 1000, HEIGHT = 800;
 struct Control {
     HWND hwnd;
@@ -51,11 +51,36 @@ std::string device_signature;
 int capture = -1;
 bool capture_armed = false;
 ULONGLONG capture_start = 0;
+bool ui_english = false;
+const wchar_t *S(const wchar_t *es, const wchar_t *en) { return ui_english ? en : es; }
+std::wstring localized(const std::wstring &error) {
+    if (!ui_english)
+        return error;
+    if (error == L"Versión de configuración desconocida")
+        return L"Unknown configuration version";
+    if (error == L"No se pudo resolver la carpeta de ajustes")
+        return L"Could not resolve the settings folder";
+    if (error == L"No se pudo crear la carpeta de ajustes")
+        return L"Could not create the settings folder";
+    if (error == L"No se pudo crear player.ini")
+        return L"Could not create player.ini";
+    if (error == L"No se pudieron escribir todos los ajustes")
+        return L"Could not write all settings";
+    return error;
+}
+void apply_ui_language() {
+    if (config.ui_language == L"en")
+        ui_english = true;
+    else if (config.ui_language == L"es")
+        ui_english = false;
+    else
+        ui_english = PRIMARYLANGID(GetUserDefaultUILanguage()) != LANG_SPANISH;
+    launcher_theme::set_english(ui_english);
+}
 const wchar_t *outputs[] = {L"720p", L"1080p", L"1440p", L"2160p", L"auto", L"native"};
-const wchar_t *caps[] = {L"30", L"60", L"90", L"120", L"monitor", L"0"};
 const wchar_t *windows[] = {L"borderless", L"windowed"};
-const wchar_t *fsrs[] = {L"auto", L"fsr1", L"0"};
 const wchar_t *languages[] = {L"auto", L"es", L"en", L"fr", L"de", L"it", L"nl", L"sv"};
+const wchar_t *ui_languages[] = {L"auto", L"es", L"en"};
 int selected(int id) { return (int)SendMessageW(GetDlgItem(window, id), CB_GETCURSEL, 0, 0); }
 void message(const std::wstring &text) { SetWindowTextW(status, text.c_str()); }
 HWND add(const wchar_t *cls, const wchar_t *text, int id, int x, int y, int w, int h, DWORD style = 0) {
@@ -106,7 +131,7 @@ int position(int id) { return (int)SendMessageW(GetDlgItem(window, id), TBM_GETP
 void update_bindings() {
     const auto &map = selected(ID_MAP_MODE) == 1 ? config.gamepad : config.keyboard;
     for (int i = 0; i < ACTION_COUNT; ++i)
-        SetWindowTextW(bindings[i], binding_name(map[i]).c_str());
+        SetWindowTextW(bindings[i], binding_name(map[i], ui_english).c_str());
 }
 void read_device() {
     int i = selected(ID_DEVICE);
@@ -128,7 +153,9 @@ void refresh_devices(bool force = false) {
         device_signature = signature;
         HWND box = GetDlgItem(window, ID_DEVICE);
         SendMessageW(box, CB_RESETCONTENT, 0, 0);
-        SendMessageW(box, CB_ADDSTRING, 0, (LPARAM)L"Automático: primer mando conectado");
+        SendMessageW(box, CB_ADDSTRING, 0,
+                     (LPARAM)S(L"Automático: primer mando conectado",
+                              L"Automatic: first connected controller"));
         int index = 0;
         for (size_t i = 0; i < pads.devices().size(); ++i) {
             const auto &d = pads.devices()[i];
@@ -140,30 +167,36 @@ void refresh_devices(bool force = false) {
         }
         if (!config.device_guid.empty() && !index) {
             index = (int)pads.devices().size() + 1;
-            SendMessageW(box, CB_ADDSTRING, 0, (LPARAM)L"Mando guardado (desconectado)");
+            SendMessageW(box, CB_ADDSTRING, 0,
+                         (LPARAM)S(L"Mando guardado (desconectado)",
+                                  L"Saved controller (disconnected)"));
         }
         choose(ID_DEVICE, index);
     }
     Device *device = pads.selected(config);
-    std::wstring info = L"Sin mando conectado. Sixaxis: palanca R / teclas I J K L.";
+    std::wstring info = S(L"Sin mando conectado. Sixaxis: palanca R / teclas I J K L.",
+                          L"No controller connected. Sixaxis: right stick / keys I J K L.");
     if (device) {
         std::array<float, 3> a{}, g{};
         bool real = selected(ID_MOTION) != 2 && pads.motion(device, a, g);
-        info = real ? L"Giroscopio + acelerómetro disponibles: Sixaxis real."
-                    : L"Sensores no disponibles o desactivados: Sixaxis en palanca R.";
+        info = real ? S(L"Giroscopio + acelerómetro disponibles: Sixaxis real.",
+                        L"Gyroscope + accelerometer available: real Sixaxis.")
+                    : S(L"Sensores no disponibles o desactivados: Sixaxis en palanca R.",
+                        L"Sensors unavailable or disabled: Sixaxis on right stick.");
     }
     SetWindowTextW(sensor_status, info.c_str());
 }
 void read_controls() {
     auto index = [](int id, int count) { return std::clamp(selected(id), 0, count - 1); };
     config.output = outputs[index(ID_OUTPUT, 6)];
-    config.cap = caps[index(ID_CAP, 6)];
+    config.cap = L"30";
     config.window = windows[index(ID_WINDOW, 2)];
-    config.fsr = fsrs[index(ID_FSR, 3)];
+    config.fsr = L"auto";
     config.sharpness = position(ID_SHARP) / 100.f;
     const int aniso[] = {1, 2, 4, 8, 16};
     config.aniso = aniso[index(ID_ANISO, 5)];
     config.language = languages[index(ID_LANG, 8)];
+    config.ui_language = ui_languages[index(ID_UI_LANG, 3)];
     config.input = (InputMode)index(ID_MODE, 3);
     config.motion = (MotionMode)index(ID_MOTION, 3);
     config.deadzone = position(ID_DEADZONE) / 100.f;
@@ -174,10 +207,9 @@ void read_controls() {
 }
 void fill_controls() {
     choose(ID_OUTPUT, outputs, config.output);
-    choose(ID_CAP, caps, config.cap);
     choose(ID_WINDOW, windows, config.window);
-    choose(ID_FSR, fsrs, config.fsr);
     choose(ID_LANG, languages, config.language);
+    choose(ID_UI_LANG, ui_languages, config.ui_language);
     choose(ID_MODE, (int)config.input);
     choose(ID_MOTION, (int)config.motion);
     int a = 0;
@@ -225,10 +257,11 @@ bool save_settings() {
     read_controls();
     std::wstring error;
     if (!save(config, path, &error)) {
-        message(error);
+        message(localized(error));
         return false;
     }
-    message(L"Ajustes guardados. Se aplicarán al iniciar el juego.");
+    message(S(L"Ajustes guardados. Se aplicarán al iniciar el juego.",
+              L"Settings saved. They will apply when the game starts."));
     return true;
 }
 void launch() {
@@ -236,7 +269,8 @@ void launch() {
         return;
     std::filesystem::path exe = std::filesystem::path(directory) / L"BakuganRecomp.exe";
     if (!std::filesystem::exists(exe)) {
-        message(L"No se encuentra BakuganRecomp.exe junto al launcher.");
+        message(S(L"No se encuentra BakuganRecomp.exe junto al launcher.",
+                  L"BakuganRecomp.exe was not found next to the launcher."));
         return;
     }
     std::filesystem::path elf;
@@ -252,12 +286,13 @@ void launch() {
         wchar_t file[32768]{};
         OPENFILENAMEW dialog{sizeof(dialog)};
         dialog.hwndOwner = window;
-        dialog.lpstrFilter = L"Ejecutable del juego (EBOOT.elf)\0EBOOT.elf\0";
+        dialog.lpstrFilter = S(L"Ejecutable del juego (EBOOT.elf)\0EBOOT.elf\0",
+                               L"Game executable (EBOOT.elf)\0EBOOT.elf\0");
         dialog.lpstrFile = file;
         dialog.nMaxFile = 32768;
         dialog.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST;
         if (!GetOpenFileNameW(&dialog)) {
-            message(L"Selecciona EBOOT.elf para iniciar.");
+            message(S(L"Selecciona EBOOT.elf para iniciar.", L"Select EBOOT.elf to start."));
             return;
         }
         elf = file;
@@ -265,24 +300,44 @@ void launch() {
     elf = std::filesystem::absolute(elf).lexically_normal();
     if (elf.parent_path().filename() != L"USRDIR" ||
         elf.parent_path().parent_path().filename() != L"PS3_GAME") {
-        message(L"EBOOT.elf debe estar dentro de PS3_GAME/USRDIR.");
+        message(S(L"EBOOT.elf debe estar dentro de PS3_GAME/USRDIR.",
+                  L"EBOOT.elf must be inside PS3_GAME/USRDIR."));
         return;
     }
     apply_environment(config, path);
     SetEnvironmentVariableW(L"PS3_VFS_ROOT", elf.parent_path().parent_path().parent_path().c_str());
     SetEnvironmentVariableW(L"PS3_TITLE", L"Bakugan: Battle Brawlers");
     std::wstring command = L"\"" + exe.wstring() + L"\" \"" + elf.wstring() + L"\"";
+    std::wstring log_path = (std::filesystem::path(path).parent_path() / L"BakuganRecomp.log").wstring();
+    std::error_code log_ec;
+    std::filesystem::create_directories(std::filesystem::path(path).parent_path(), log_ec);
+    SECURITY_ATTRIBUTES sa{sizeof(sa), nullptr, TRUE};
+    HANDLE log = CreateFileW(log_path.c_str(), GENERIC_WRITE, FILE_SHARE_READ, &sa,
+                             CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
     STARTUPINFOW startup{sizeof(startup)};
+    if (log != INVALID_HANDLE_VALUE) {
+        startup.dwFlags = STARTF_USESTDHANDLES;
+        startup.hStdOutput = log;
+        startup.hStdError = log;
+        startup.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+    }
     PROCESS_INFORMATION process{};
-    if (!CreateProcessW(exe.c_str(), command.data(), nullptr, nullptr, FALSE, 0, nullptr, directory.c_str(),
-                        &startup, &process)) {
-        message(L"No se pudo iniciar el juego. Error " + std::to_wstring(GetLastError()));
+    BOOL started = CreateProcessW(exe.c_str(), command.data(), nullptr, nullptr,
+                                  log != INVALID_HANDLE_VALUE, 0, nullptr, directory.c_str(),
+                                  &startup, &process);
+    if (!started) {
+        DWORD error = GetLastError();
+        if (log != INVALID_HANDLE_VALUE) CloseHandle(log);
+        message(S(L"No se pudo iniciar el juego. Error ", L"The game could not start. Error ") +
+                std::to_wstring(error));
         return;
     }
+    if (log != INVALID_HANDLE_VALUE) CloseHandle(log);
     CloseHandle(process.hThread);
     CloseHandle(process.hProcess);
-    ShowWindow(window, SW_MINIMIZE);
-    message(L"Juego iniciado. Puedes cerrar el launcher.");
+    /* The launcher's job ends when the game starts; keep no second window in
+     * the taskbar. WM_CLOSE performs the normal shutdown path. */
+    PostMessageW(window, WM_CLOSE, 0, 0);
 }
 void finish_capture(Binding binding, bool cancel = false) {
     if (!cancel) {
@@ -292,8 +347,9 @@ void finish_capture(Binding binding, bool cancel = false) {
     capture = -1;
     capture_armed = false;
     update_bindings();
-    message(cancel ? L"Asignación cancelada."
-                   : L"Asignación aplicada. Guarda los ajustes o inicia el juego.");
+    message(cancel ? S(L"Asignación cancelada.", L"Binding cancelled.")
+                   : S(L"Asignación aplicada. Guarda los ajustes o inicia el juego.",
+                       L"Binding applied. Save the settings or start the game."));
 }
 void poll_capture() {
     if (capture < 0)
@@ -398,64 +454,80 @@ bool activate_button(const MSG &msg) {
     return true;
 }
 void create_controls() {
-    add(L"BUTTON", L"Pantalla y gráficos", 0, 16, 76, 302, 558, BS_GROUPBOX);
-    label(L"Resolución de salida", 32, 100);
+    apply_ui_language();
+    label(S(L"Idioma del launcher", L"Launcher language"), 712, 26, 272);
+    combo(ID_UI_LANG, 712, 46, 272,
+          {S(L"Automático (Windows)", L"Automatic (Windows)"), L"Español", L"English"});
+    add(L"BUTTON", S(L"Pantalla y gráficos", L"Display and graphics"), 0, 16, 76, 302, 558, BS_GROUPBOX);
+    label(S(L"Resolución de salida", L"Output resolution"), 32, 100);
     combo(ID_OUTPUT, 32, 124, 268,
-          {L"1280 × 720", L"1920 × 1080", L"2560 × 1440", L"3840 × 2160", L"Automática",
-           L"Resolución del monitor"});
-    label(L"Límite de FPS", 32, 158);
-    combo(ID_CAP, 32, 182, 268,
-          {L"30 FPS (recomendado)", L"60 FPS", L"90 FPS", L"120 FPS", L"Frecuencia del monitor",
-           L"Sin límite"});
-    label(L"Modo de ventana", 32, 216);
-    combo(ID_WINDOW, 32, 240, 268, {L"Sin bordes", L"Ventana"});
-    label(L"Reescalado", 32, 274);
-    combo(ID_FSR, 32, 298, 268, {L"FSR automático", L"FSR 1", L"Desactivado"});
-    label(L"Nitidez FSR: 0 alta · 2 baja", 32, 332);
-    slider(ID_SHARP, 28, 356, 276, 0, 200, 60);
-    label(L"Filtrado anisotrópico", 32, 394);
-    combo(ID_ANISO, 32, 418, 268, {L"1×", L"2×", L"4×", L"8×", L"16×"});
+          {L"1280 × 720", L"1920 × 1080", L"2560 × 1440", L"3840 × 2160",
+           S(L"Automática", L"Automatic"), S(L"Resolución del monitor", L"Monitor resolution")});
+    label(S(L"Modo de ventana", L"Window mode"), 32, 168);
+    combo(ID_WINDOW, 32, 192, 268,
+          {S(L"Sin bordes", L"Borderless"), S(L"Ventana", L"Windowed")});
+    label(S(L"Nitidez FSR: 0 alta · 2 baja", L"FSR sharpness: 0 sharp · 2 soft"), 32, 236);
+    slider(ID_SHARP, 28, 260, 276, 0, 200, 60);
+    label(S(L"Filtrado anisotrópico", L"Anisotropic filtering"), 32, 298);
+    combo(ID_ANISO, 32, 322, 268, {L"1×", L"2×", L"4×", L"8×", L"16×"});
     add(L"STATIC",
-        L"La resolución de salida se adapta al monitor. El límite de FPS no garantiza el rendimiento del "
-        L"equipo.",
-        0, 32, 468, 268, 72);
-    add(L"BUTTON", L"Mantener clic derecho: apuntar", ID_MOUSE_LOOK, 32, 550, 276, 26,
-        BS_AUTOCHECKBOX | WS_TABSTOP);
-    add(L"BUTTON", L"Clic izquierdo: Cruz (X)", ID_MOUSE_CROSS, 32, 584, 276, 26,
-        BS_AUTOCHECKBOX | WS_TABSTOP);
-    add(L"BUTTON", L"Idioma y controles", 0, 332, 76, 652, 558, BS_GROUPBOX);
-    label(L"Idioma", 348, 100, 112);
+        S(L"La resolución de salida se adapta al monitor. El límite de FPS es fijo a 30.",
+          L"The output resolution adapts to the monitor. The FPS limit is fixed at 30."),
+        0, 32, 372, 268, 72);
+    add(L"BUTTON", S(L"Mantener clic derecho: apuntar", L"Hold right click: aim"), ID_MOUSE_LOOK, 32, 454,
+        276, 26, BS_AUTOCHECKBOX | WS_TABSTOP);
+    add(L"BUTTON", S(L"Clic izquierdo: Cruz (X)", L"Left click: Cross (X)"), ID_MOUSE_CROSS, 32, 488, 276,
+        26, BS_AUTOCHECKBOX | WS_TABSTOP);
+    add(L"BUTTON", S(L"Idioma y controles", L"Language and controls"), 0, 332, 76, 652, 558, BS_GROUPBOX);
+    label(S(L"Idioma", L"Language"), 348, 100, 112);
     combo(ID_LANG, 468, 96, 496,
-          {L"Automático (idioma de Windows)", L"Español", L"English", L"Français", L"Deutsch", L"Italiano",
-           L"Nederlands", L"Svenska"});
-    label(L"Dispositivo", 348, 134, 112);
-    combo(ID_MODE, 468, 130, 496, {L"Automático: mando o teclado y ratón", L"Teclado y ratón", L"Mando"});
-    label(L"Mando", 348, 168, 112);
-    combo(ID_DEVICE, 468, 164, 496, {L"Buscando mandos…"});
+          {S(L"Automático (idioma de Windows)", L"Automatic (Windows language)"), L"Español", L"English",
+           L"Français", L"Deutsch", L"Italiano", L"Nederlands", L"Svenska"});
+    label(S(L"Dispositivo", L"Device"), 348, 134, 112);
+    combo(ID_MODE, 468, 130, 496,
+          {S(L"Automático: mando o teclado y ratón", L"Automatic: controller or keyboard and mouse"),
+           S(L"Teclado y ratón", L"Keyboard and mouse"), S(L"Mando", L"Controller")});
+    label(S(L"Mando", L"Controller"), 348, 168, 112);
+    combo(ID_DEVICE, 468, 164, 496, {S(L"Buscando mandos…", L"Searching for controllers…")});
     label(L"Sixaxis", 348, 202, 112);
     combo(ID_MOTION, 468, 198, 496,
-          {L"Automático: sensores o palanca R", L"Preferir giroscopio (respaldo: palanca R)", L"Palanca R"});
+          {S(L"Automático: sensores o palanca R", L"Automatic: sensors or right stick"),
+           S(L"Preferir giroscopio (respaldo: palanca R)", L"Prefer gyroscope (fallback: right stick)"),
+           S(L"Palanca R", L"Right stick")});
     sensor_status = add(L"STATIC", L"", 0, 348, 234, 616, 24);
-    label(L"Zona muerta", 348, 270, 112);
+    label(S(L"Zona muerta", L"Deadzone"), 348, 270, 112);
     slider(ID_DEADZONE, 458, 264, 190, 2, 50, 15);
-    label(L"Ratón", 670, 270, 64);
+    label(S(L"Ratón", L"Mouse"), 670, 270, 64);
     slider(ID_SENSITIVITY, 734, 264, 230, 5, 200, 50);
-    label(L"Mapeo PS3", 348, 304, 112);
-    combo(ID_MAP_MODE, 468, 298, 280, {L"Editar teclado y ratón", L"Editar mando"});
-    add(L"BUTTON", L"Restablecer", ID_DEFAULTS, 770, 298, 194, 26, WS_TABSTOP);
+    label(S(L"Mapeo PS3", L"PS3 mapping"), 348, 304, 112);
+    combo(ID_MAP_MODE, 468, 298, 280,
+          {S(L"Editar teclado y ratón", L"Edit keyboard and mouse"), S(L"Editar mando", L"Edit controller")});
+    add(L"BUTTON", S(L"Restablecer", L"Reset"), ID_DEFAULTS, 770, 298, 194, 26, WS_TABSTOP);
     for (int i = 0; i < ACTION_COUNT; ++i) {
         int column = i / 13, row = i % 13, x = 348 + column * 312, y = 338 + row * 22;
-        label(action_name(i), x, y + 2, 142);
+        label(action_name(i, ui_english), x, y + 2, 142);
         bindings[i] = add(L"BUTTON", L"", ID_BIND + i, x + 144, y, 152, 22, WS_TABSTOP);
     }
     status = add(L"STATIC",
-                 L"Selecciona un botón para asignarlo. Suelta los controles y pulsa la nueva entrada. Esc "
-                 L"cancela; Supr borra.",
+                 S(L"Selecciona un botón para asignarlo. Suelta los controles y pulsa la nueva entrada. Esc "
+                   L"cancela; Supr borra.",
+                   L"Select a button to bind it. Release the controls and press the new input. Esc "
+                   L"cancels; Del clears."),
                  0, 24, 648, 950, 38);
-    add(L"BUTTON", L"Guardar ajustes", ID_SAVE, 656, 690, 150, 30, WS_TABSTOP);
-    add(L"BUTTON", L"Jugar", ID_PLAY, 822, 690, 150, 30, BS_DEFPUSHBUTTON | WS_TABSTOP);
+    add(L"BUTTON", S(L"Guardar ajustes", L"Save settings"), ID_SAVE, 656, 690, 150, 30, WS_TABSTOP);
+    add(L"BUTTON", S(L"Jugar", L"Play"), ID_PLAY, 822, 690, 150, 30,
+        BS_DEFPUSHBUTTON | WS_TABSTOP);
     fill_controls();
     SetTimer(window, 1, 16, nullptr);
+}
+void rebuild_controls() {
+    if (capture >= 0)
+        finish_capture({}, true);
+    for (auto &c : controls)
+        DestroyWindow(c.hwnd);
+    controls.clear();
+    create_controls();
+    layout();
 }
 LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
@@ -510,8 +582,9 @@ LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             capture = id - ID_BIND;
             capture_start = GetTickCount64();
             capture_armed = false;
-            SetWindowTextW(bindings[capture], L"Pulsa una entrada…");
-            message(L"Suelta los controles y pulsa una tecla, botón o eje. Esc cancela; Supr borra.");
+            SetWindowTextW(bindings[capture], S(L"Pulsa una entrada…", L"Press an input…"));
+            message(S(L"Suelta los controles y pulsa una tecla, botón o eje. Esc cancela; Supr borra.",
+                      L"Release the controls and press a key, button or axis. Esc cancels; Del clears."));
         } else if (id == ID_MAP_MODE && HIWORD(wp) == CBN_SELCHANGE)
             update_bindings();
         else if (id == ID_DEVICE && HIWORD(wp) == CBN_SELCHANGE) {
@@ -519,20 +592,27 @@ LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             refresh_devices();
         } else if (id == ID_MOTION && HIWORD(wp) == CBN_SELCHANGE)
             refresh_devices();
-        else if (id == ID_DEFAULTS) {
+        else if (id == ID_UI_LANG && HIWORD(wp) == CBN_SELCHANGE) {
+            read_controls();
+            PostMessageW(window, WM_APP_REBUILD, 0, 0);
+        } else if (id == ID_DEFAULTS) {
             auto d = defaults();
             if (selected(ID_MAP_MODE) == 1)
                 config.gamepad = d.gamepad;
             else
                 config.keyboard = d.keyboard;
             update_bindings();
-            message(L"Mapeo predeterminado restaurado. Guarda para conservarlo.");
+            message(S(L"Mapeo predeterminado restaurado. Guarda para conservarlo.",
+                      L"Default mapping restored. Save to keep it."));
         } else if (id == ID_SAVE)
             save_settings();
         else if (id == ID_PLAY)
             launch();
         return 0;
     }
+    case WM_APP_REBUILD:
+        rebuild_controls();
+        return 0;
     case WM_CLOSE:
         DestroyWindow(hwnd);
         return 0;
@@ -563,6 +643,8 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR, int show) {
     WNDCLASSW wc{};
     wc.lpfnWndProc = wndproc;
     wc.hInstance = instance;
+    wc.hIcon = (HICON)LoadImageW(instance, MAKEINTRESOURCEW(1), IMAGE_ICON, 0, 0,
+                                 LR_DEFAULTSIZE | LR_SHARED);
     wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
     wc.hbrBackground = nullptr;
     wc.lpszClassName = L"bakugan_launcher";
@@ -579,7 +661,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR, int show) {
     fit_window(GetDpiForWindow(hwnd));
     ShowWindow(hwnd, show);
     if (!error.empty())
-        message(error);
+        message(localized(error));
     else if (!input_error.empty())
         message(L"SDL3: " + player::utf8_wide(input_error));
     MSG msg;

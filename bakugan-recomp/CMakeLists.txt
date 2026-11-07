@@ -221,6 +221,9 @@ endif()
 # link error, it is a "no rule to make" for a file nothing can consume.
 if(WIN32 AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/app.rc")
     target_sources(${PROJECT_NAME} PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/app.rc")
+    # GUI subsystem: no console window. main() is kept as the entry point.
+    set_target_properties(${PROJECT_NAME} PROPERTIES WIN32_EXECUTABLE TRUE)
+    target_link_options(${PROJECT_NAME} PRIVATE /ENTRY:mainCRTStartup)
 endif()
 
 target_include_directories(${PROJECT_NAME} PRIVATE
@@ -274,6 +277,9 @@ if(WIN32)
     target_link_libraries(${PROJECT_NAME} PRIVATE "${BAKUGAN_SDL3_LIBRARY}")
     bakugan_copy_sdl3(${PROJECT_NAME})
     add_executable(BakuganLauncher WIN32 launcher.cpp launcher_theme.cpp player_config.cpp gamepad_devices.cpp)
+    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/app.rc")
+        target_sources(BakuganLauncher PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/app.rc")
+    endif()
     target_include_directories(BakuganLauncher PRIVATE "${BAKUGAN_SDL3_ROOT}/include")
     target_link_libraries(BakuganLauncher PRIVATE user32 comdlg32 gdi32 gdiplus comctl32 "${BAKUGAN_SDL3_LIBRARY}")
     bakugan_copy_sdl3(BakuganLauncher)

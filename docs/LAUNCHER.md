@@ -10,9 +10,14 @@ acentos rojos/dorados y el fondo `PS3_GAME/PIC1.PNG` con la imagen
 `PS3_GAME/ICON0.PNG` del dump local. Sin esas imágenes mantiene un tema utilizable.
 Las imágenes no se copian al repositorio ni al paquete.
 
-- Izquierda: salida 720p/1080p/1440p/2160p/automática/monitor; límite 30/60/90/120,
-  frecuencia del monitor o sin límite; ventana/sin bordes; FSR automático, FSR 1
-  o desactivado; nitidez RCAS y anisotropía 1–16×. RCAS: 0 es más nítido, 2 más suave.
+Los ejecutables llevan un icono propio y el juego se compila como aplicación
+Windows: no abre consola. La barra de título del juego muestra sólo
+«Bakugan: Battle Brawlers»; los contadores de FPS/draws quedan en los logs.
+El instalador está documentado en [INSTALLER.md](INSTALLER.md).
+
+- Izquierda: salida 720p/1080p/1440p/2160p/automática/monitor; ventana/sin bordes;
+  FSR automático; nitidez RCAS y anisotropía 1–16×. El límite de FPS es fijo a 30
+  y no se expone en la interfaz. RCAS: 0 es más nítido, 2 más suave.
 - Derecha: idioma, tipo de entrada, mando concreto, modo Sixaxis, zona muerta,
   sensibilidad del ratón y las 25 asignaciones PS3.
 - Idiomas manuales de esta edición EU: inglés, español, francés, alemán, italiano,

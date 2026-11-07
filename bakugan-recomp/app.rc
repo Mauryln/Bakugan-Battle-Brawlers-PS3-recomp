@@ -1,0 +1,30 @@
+/* Icon sourced from the player's own save ICON0.PNG (see assets/make_icon.py). */
+1 ICON "assets/bakugan.ico"
+
+1 VERSIONINFO
+ FILEVERSION 1,0,0,0
+ PRODUCTVERSION 1,0,0,0
+ FILEFLAGSMASK 0x3fL
+ FILEFLAGS 0x0L
+ FILEOS 0x40004L
+ FILETYPE 0x1L
+ FILESUBTYPE 0x0L
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904b0"
+        BEGIN
+            VALUE "CompanyName", "Bakugan Recomp"
+            VALUE "FileDescription", "Bakugan: Battle Brawlers"
+            VALUE "FileVersion", "1.0.0.0"
+            VALUE "InternalName", "BakuganRecomp"
+            VALUE "OriginalFilename", "BakuganRecomp.exe"
+            VALUE "ProductName", "Bakugan: Battle Brawlers"
+            VALUE "ProductVersion", "1.0.0.0"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x0409, 1200
+    END
+END

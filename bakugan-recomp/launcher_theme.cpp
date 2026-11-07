@@ -12,6 +12,7 @@ namespace {
 ULONG_PTR token = 0;
 std::unique_ptr<Gdiplus::Bitmap> background, title;
 HBRUSH panel_brush = nullptr, footer_brush = nullptr;
+bool english = false;
 constexpr COLORREF PANEL = RGB(15, 23, 38), FOOTER = RGB(8, 13, 24), TEXT = RGB(236, 241, 248);
 std::unique_ptr<Gdiplus::Bitmap> load(const std::filesystem::path &path) {
     auto result = std::unique_ptr<Gdiplus::Bitmap>(Gdiplus::Bitmap::FromFile(path.c_str()));
@@ -42,6 +43,9 @@ void initialize(const std::wstring &directory) {
         if (!title)
             title = load(root / L"PS3_GAME/ICON0.PNG");
     }
+}
+void set_english(bool value) {
+    english = value;
 }
 void shutdown() {
     background.reset();
@@ -112,7 +116,8 @@ void paint(HWND window, HDC dc) {
                     OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
     SelectObject(dc, subtitle_font);
     text = {(LONG)(234 * scale), (LONG)(76 * scale), (LONG)(950 * scale), (LONG)(103 * scale)};
-    DrawTextW(dc, L"PREPARA TU PRÓXIMA BATALLA", -1, &text, DT_LEFT | DT_SINGLELINE);
+    DrawTextW(dc, english ? L"PREPARE YOUR NEXT BATTLE" : L"PREPARA TU PRÓXIMA BATALLA", -1, &text,
+              DT_LEFT | DT_SINGLELINE);
     RestoreDC(dc, saved);
     DeleteObject(subtitle_font);
 }

@@ -41,7 +41,7 @@ enum class InputMode { Auto, KeyboardMouse, Gamepad };
 enum class MotionMode { Auto, Sensors, RightStick };
 struct Config {
     std::wstring output = L"1080p", cap = L"30", window = L"borderless";
-    std::wstring fsr = L"auto", language = L"auto";
+    std::wstring fsr = L"auto", language = L"auto", ui_language = L"auto";
     float sharpness = 0.6f, mouse_sensitivity = 0.5f, deadzone = 0.15f;
     int aniso = 16;
     InputMode input = InputMode::Auto;
@@ -50,12 +50,12 @@ struct Config {
     std::array<Binding, ACTION_COUNT> keyboard{}, gamepad{};
     bool mouse_look = true, mouse_left_cross = true;
 };
-const wchar_t *action_name(int action);
+const wchar_t *action_name(int action, bool english = false);
 Config defaults();
 std::wstring config_path();
 bool load(Config &config, const std::wstring &path, std::wstring *error = nullptr);
 bool save(const Config &config, const std::wstring &path, std::wstring *error = nullptr);
-std::wstring binding_name(Binding binding);
+std::wstring binding_name(Binding binding, bool english = false);
 std::wstring binding_text(Binding binding);
 bool parse_binding(const std::wstring &text, Binding &binding);
 void apply_environment(const Config &config, const std::wstring &path);
