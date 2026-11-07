@@ -13,6 +13,7 @@ param(
     [string]$Fsr = 'auto',
     [string]$Name = 'bench',
     [int]$Perf = 0,
+    [int]$KickWait = -1,
     [switch]$NoVsync
 )
 $ErrorActionPreference = 'Stop'
@@ -35,6 +36,7 @@ $env:PS3_OUTPUT = $Output
 $env:PS3_FSR = if ($Fsr -eq 'auto') { $null } else { $Fsr }
 $env:PS3_FPS_CAP = if ($FpsCap -gt 0) { [string]$FpsCap } else { $null }
 $env:PS3_NOVSYNC = if ($NoVsync) { '1' } else { $null }
+$env:PS3_KICKWAIT = if ($KickWait -ge 0) { [string]$KickWait } else { $null }
 $env:RSX_PACK_WORKERS = [string]$PackWorkers
 $env:FRAME_METRICS = '0'
 $env:FRAME_TIMES = $bin

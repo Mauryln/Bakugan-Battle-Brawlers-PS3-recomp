@@ -207,6 +207,10 @@ No prometer 30 FPS ni mejoras de carga sin A/B con imagen y comportamiento idén
 - `PS3_NOVSYNC=1` no cambió el resultado (28,29 FPS): el techo no es Present,
   es trabajo CPU serial. `RSX_PACK_WORKERS=4` empeoró la media (24,4 FPS,
   p99 146 ms) y queda apagado.
+- 720p nativo sin FSR: 28,37 FPS (frente a 28,65 con FSR 1080p). El upscaler no
+  es el cuello; la GPU tampoco.
+- `PS3_KICKWAIT=0`: 29,00 FPS, pero p95 42,5 ms (peor que 41,9). Sin ganancia
+  clara; se mantiene el valor por defecto 4.
 - 60 FPS exige bajar el trabajo de ~35 ms a <16,6 ms por cuadro; no se logra con
   ajustes locales. Requiere solapar walker/submit/render o reducir el coste del
   guest, y debe medirse con la misma arena.
