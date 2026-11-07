@@ -7,6 +7,7 @@
     docs/DEBUG_CONSOLE.md for the rest.
 #>
 param(
+    [switch]$Direct,
     [string]$Elf = "",
     [switch]$VfsFromExe,
     [ValidateSet('Auto', 'Native', 'FSR1')]
@@ -31,6 +32,15 @@ $exe = Join-Path $root "bakugan-recomp\build\BakuganRecomp.exe"
 
 if (-not (Test-Path $exe)) {
     throw "Not built yet: run .venv\Scripts\ninja.exe -C bakugan-recomp\build"
+}
+if (-not $Direct -and $PSBoundParameters.Count -eq 0) {
+    $launcher = Join-Path $root 'bakugan-recomp\build\BakuganLauncher.exe'
+    if (-not (Test-Path $launcher)) {
+        throw 'Falta el launcher: ejecuta .venv\Scripts\ninja.exe -C bakugan-recomp\build BakuganLauncher'
+    }
+    $env:PS3_VFS_ROOT = Join-Path $root 'game'
+    & $launcher
+    return
 }
 if (-not $Elf) {
     $Elf = Join-Path $root "game\PS3_GAME\USRDIR\EBOOT.elf"

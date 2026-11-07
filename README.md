@@ -37,7 +37,7 @@
 > now run at roughly **27–28 FPS**, compared with the earlier **16–17 FPS** reference.
 > Coherent NV3089 row copies reduce CPU work while preserving the visible scene,
 > water and HUD in the checked captures.
-> **No release yet:** real controller mapping remains incomplete,
+> **No release yet:** controller mapping is now available through the launcher; broader hardware validation is pending,
 > and sustained 30 FPS is still a target. The latest optimization has not yet
 > been validated through a complete post-launch duel or across every arena.
 > [Measured improvement](#recent-performance-improvements) · [Guía técnica](docs/PROJECT_GUIDE.md).
@@ -72,10 +72,10 @@ Lifted code is compiled ahead of time; dynamic SPU jobs without a matching recom
 | *Known defect:* mode-select "gate" — 2D layers behind the portrait overlap | ⚠️ |
 | **Performance** — 29.30 FPS in the latest fixed-arena pack comparison, versus the historical ~16–17 FPS; sustained 30 FPS pending | ⚠️ |
 | **Save data** — new game, manual saves (one slot each), load picker, system data | ✅ |
-| **Controller** — XInput pad is simulated, not mapped from the guest library | ❌ |
+| **Controller** — persistent PS3 remapping, SDL3 gamepads, real Sixaxis sensors or right-stick fallback; DS4 tested | ✅ |
 | **Sound effects** — ATRAC3 in `SOUND/*.PAST` | ❌ |
 
-**The game is playable end to end. No release until real controller mapping is finished; performance is the second blocker.**
+**The game is playable end to end. The launcher and controller mapping are implemented; broader hardware coverage and sustained 30 FPS remain release validation work.**
 
 Saves live in `%LOCALAPPDATA%\BakuganRecomp\dev_hdd0\home\00000001\savedata`
 (set `PS3_GAMEDATA_ROOT` to override). The first launch copies the old
@@ -85,6 +85,18 @@ slot, and the system data keeps its fixed directory. Loading draws an in-game
 overlay over the finished frame (the game's `PIC1.PNG` backdrop and each slot's
 `ICON0.PNG`, keyboard/pad/mouse); `PS3_SAVEDATA_UI=0` restores the headless
 defaults. The list/fixed delete entry points share the same callback flow.
+
+## Launcher and controls
+
+Run `tools/run.ps1` without arguments, or open `bakugan-recomp/build/BakuganLauncher.exe`.
+The Bakugan-themed launcher loads its background/title art from your local disc dump; game art is not distributed.
+The user completed a full Bakugan match with this build. The launcher saves output resolution, FSR 1, sharpness, anisotropic filtering, FPS cap,
+window mode, EU language and PS3 button/stick mappings in
+`%LOCALAPPDATA%/BakuganRecomp/player.ini`. Language defaults to Windows.
+SDL3 detects gamepads and real motion sensors; missing sensors fall back to the right stick.
+DS4 mapping and sensor readings were tested; DualSense and Switch Pro need hardware validation.
+Explicit script parameters or `-Direct` retain the developer launch path.
+[Controls, build and validation](docs/LAUNCHER.md).
 
 ## Recent performance improvements
 

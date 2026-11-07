@@ -17,6 +17,7 @@
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <Windows.h>
+#include "input_bridge.h"
 #include <windowsx.h>
 #include <d3d12.h>
 #include <d3dcompiler.h>
@@ -786,11 +787,18 @@ void poll_pad(void)
     static ULONGLONG last_repeat;
     XINPUT_STATE state;
     memset(&state, 0, sizeof state);
-    if (XInputGetState(0, &state) != ERROR_SUCCESS) {
-        previous = 0;
-        return;
+    ps3_host_pad_report mapped{};
+    const bool provider = bakugan_input_gamepad_snapshot(&mapped);
+    WORD now = 0;
+    if (provider) {
+        if (mapped.buttons & (1u << 4)) now |= XINPUT_GAMEPAD_DPAD_UP;
+        if (mapped.buttons & (1u << 6)) now |= XINPUT_GAMEPAD_DPAD_DOWN;
+        if (mapped.buttons & (1u << 14)) now |= XINPUT_GAMEPAD_A;
+        if (mapped.buttons & (1u << 13)) now |= XINPUT_GAMEPAD_B;
+    } else {
+        if (XInputGetState(0, &state) != ERROR_SUCCESS) { previous = 0; return; }
+        now = state.Gamepad.wButtons;
     }
-    const WORD now = state.Gamepad.wButtons;
     if (!g.pad_primed) {
         /* The button that opened the save menu is still held here; only an
          * edge after the picker is visible should act on it. */
@@ -912,8 +920,10 @@ void wait_for_input_release(void)
     for (int i = 0; i < 40; i++) {
         XINPUT_STATE state;
         memset(&state, 0, sizeof state);
-        bool any = XInputGetState(0, &state) == ERROR_SUCCESS &&
-                   state.Gamepad.wButtons != 0;
+        ps3_host_pad_report mapped{};
+        bool any = bakugan_input_gamepad_snapshot(&mapped)
+                       ? mapped.buttons != 0
+                       : (XInputGetState(0, &state) == ERROR_SUCCESS && state.Gamepad.wButtons != 0);
         any = any || (GetAsyncKeyState(VK_RETURN) & 0x8000) != 0;
         any = any || (GetAsyncKeyState(VK_SPACE) & 0x8000) != 0;
         any = any || (GetAsyncKeyState(VK_ESCAPE) & 0x8000) != 0;

@@ -360,6 +360,8 @@ static int pump_timed(void)
 #ifdef _WIN32
     if (r != 0) {
         fprintf(stderr, "[shutdown] window closed; stopping host audio\n");
+        extern void bakugan_input_shutdown();
+        bakugan_input_shutdown();
         cellAudioQuit();
         fflush(NULL);
         ExitProcess(0);
@@ -908,6 +910,8 @@ int main(int argc, char** argv)
      * overlay stands in for it while cellSaveData blocks the guest. */
     extern void bakugan_savedata_overlay_install(const char* vfs_root);
     bakugan_savedata_overlay_install(ppu_vfs_root);
+    extern bool bakugan_input_install();
+    if (!bakugan_input_install()) return 1;
 #endif
 
     /* Install the guest-callback hook, then start the frame clock. It no-ops

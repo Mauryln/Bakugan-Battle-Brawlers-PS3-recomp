@@ -265,9 +265,31 @@ if(WIN32)
         winmm
     )
 
-    # Player-facing selector: 720p/30, 1080p/30 (default), 1080p/60, 1440p/60.
-    add_executable(BakuganLauncher WIN32 launcher.cpp)
-    target_link_libraries(BakuganLauncher PRIVATE user32 comdlg32)
+    include(cmake/SDL3.cmake)
+    target_sources(${PROJECT_NAME} PRIVATE input_bridge.cpp player_config.cpp gamepad_devices.cpp)
+    # Keep SDL headers scoped: changing every lifted PPU compile command would
+    # trigger a large rebuild even though the lifts do not use host input.
+    set_source_files_properties(input_bridge.cpp player_config.cpp gamepad_devices.cpp
+        PROPERTIES INCLUDE_DIRECTORIES "${BAKUGAN_SDL3_ROOT}/include")
+    target_link_libraries(${PROJECT_NAME} PRIVATE "${BAKUGAN_SDL3_LIBRARY}")
+    bakugan_copy_sdl3(${PROJECT_NAME})
+    add_executable(BakuganLauncher WIN32 launcher.cpp launcher_theme.cpp player_config.cpp gamepad_devices.cpp)
+    target_include_directories(BakuganLauncher PRIVATE "${BAKUGAN_SDL3_ROOT}/include")
+    target_link_libraries(BakuganLauncher PRIVATE user32 comdlg32 gdi32 gdiplus comctl32 "${BAKUGAN_SDL3_LIBRARY}")
+    bakugan_copy_sdl3(BakuganLauncher)
+    install(TARGETS BakuganLauncher RUNTIME DESTINATION bin)
+    install(FILES "${BAKUGAN_SDL3_ROOT}/lib/x64/SDL3.dll" DESTINATION bin)
+    install(FILES "${BAKUGAN_SDL3_ROOT}/LICENSE.txt" DESTINATION bin/licenses RENAME SDL3.txt)
+    install(DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/shaders/fsr1" DESTINATION bin/shaders)
+    add_executable(PlayerInputTest EXCLUDE_FROM_ALL
+        ../tools/tests/player_input_test.cpp player_config.cpp gamepad_devices.cpp)
+    target_include_directories(PlayerInputTest PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}" "${BAKUGAN_SDL3_ROOT}/include")
+    target_link_libraries(PlayerInputTest PRIVATE user32 "${BAKUGAN_SDL3_LIBRARY}")
+    bakugan_copy_sdl3(PlayerInputTest)
+    add_executable(PlayerPadProviderTest EXCLUDE_FROM_ALL
+        ../tools/tests/player_pad_provider_test.cpp "${PS3RECOMP_DIR}/libs/input/cellPad.c")
+    target_include_directories(PlayerPadProviderTest PRIVATE "${PS3RECOMP_DIR}" "${PS3RECOMP_DIR}/include")
+    target_link_libraries(PlayerPadProviderTest PRIVATE user32 Xinput9_1_0)
 endif()
 
 # ---------------------------------------------------------------------------

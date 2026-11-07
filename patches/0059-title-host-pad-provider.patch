@@ -1,0 +1,100 @@
+--- a/libs/input/cellPad.c
++++ b/libs/input/cellPad.c
+@@ -12,6 +12,7 @@
+ 
+ #include <time.h>
+ #include "cellPad.h"
++#include "ps3emu/host_input.h"
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <string.h>
+@@ -139,6 +140,14 @@
+ static u32           s_max_connect = 0;
+ static u32           s_port_setting[CELL_PAD_MAX_PORT_NUM];
+ static PadHostState  s_host_state[PAD_MAX_HOST_PORTS];
++static ps3_host_pad_provider s_host_provider;
++static void* s_host_provider_userdata;
++void ps3_pad_set_host_provider(ps3_host_pad_provider provider, void* userdata)
++{
++    s_host_provider = provider;
++    s_host_provider_userdata = userdata;
++}
++
+ /* Per-port "a report has arrived since your last read" flag; see cellPadGetData. */
+ static int s_data_fresh[PAD_MAX_HOST_PORTS];
+ 
+@@ -905,7 +914,26 @@
+      * physical device, which yields no-buttons-pressed data below. */
+ 
+     {
+-    PadHostState* hs = &s_host_state[port_no];
++    PadHostState local_state = s_host_state[port_no];
++    ps3_host_pad_report external = {0};
++    int external_valid = s_host_provider && s_host_provider(port_no, &external, s_host_provider_userdata);
++    if (external_valid) {
++        local_state.buttons = external.buttons;
++        local_state.analog_lx = external.lx; local_state.analog_ly = external.ly;
++        local_state.analog_rx = external.rx; local_state.analog_ry = external.ry;
++        local_state.trigger_l2 = external.l2; local_state.trigger_r2 = external.r2;
++        local_state.press_right = (external.buttons & CELL_PAD_CTRL_RIGHT) ? 255 : 0;
++        local_state.press_left = (external.buttons & CELL_PAD_CTRL_LEFT) ? 255 : 0;
++        local_state.press_up = (external.buttons & CELL_PAD_CTRL_UP) ? 255 : 0;
++        local_state.press_down = (external.buttons & CELL_PAD_CTRL_DOWN) ? 255 : 0;
++        local_state.press_triangle = (external.buttons & CELL_PAD_CTRL_TRIANGLE) ? 255 : 0;
++        local_state.press_circle = (external.buttons & CELL_PAD_CTRL_CIRCLE) ? 255 : 0;
++        local_state.press_cross = (external.buttons & CELL_PAD_CTRL_CROSS) ? 255 : 0;
++        local_state.press_square = (external.buttons & CELL_PAD_CTRL_SQUARE) ? 255 : 0;
++        local_state.press_l1 = (external.buttons & CELL_PAD_CTRL_L1) ? 255 : 0;
++        local_state.press_r1 = (external.buttons & CELL_PAD_CTRL_R1) ? 255 : 0;
++    }
++    PadHostState* hs = &local_state;
+     u32 setting = s_port_setting[port_no];
+ 
+     /* Determine data length based on port settings */
+@@ -1122,13 +1150,20 @@
+             { CELL_PAD_BTN_OFFSET_DIGITAL2, 0x08, CELL_PAD_BTN_OFFSET_PRESS_R1 },
+             { CELL_PAD_BTN_OFFSET_DIGITAL2, 0x01, CELL_PAD_BTN_OFFSET_PRESS_L2 },
+             { CELL_PAD_BTN_OFFSET_DIGITAL2, 0x02, CELL_PAD_BTN_OFFSET_PRESS_R2 } };
+-        for (unsigned k = 0; k < sizeof pm / sizeof pm[0]; k++)
++        for (unsigned k = 0; k < sizeof pm / sizeof pm[0]; k++) {
++            if (external_valid && !s_rec.replaying &&
++                (pm[k].off == CELL_PAD_BTN_OFFSET_PRESS_L2 ||
++                 pm[k].off == CELL_PAD_BTN_OFFSET_PRESS_R2))
++                continue;
+             if ((data->button[pm[k].word] & pm[k].bit) && data->button[pm[k].off] < 255)
+                 data->button[pm[k].off] = 255;
++        }
+     }
+ 
+     /* Sensor data (only meaningful if SENSOR_ON) */
+-    if (setting & CELL_PAD_SETTING_SENSOR_ON) {
++    if ((setting & CELL_PAD_SETTING_SENSOR_ON) && external_valid && external.sensors_valid && !s_rec.replaying) {
++        memcpy(&data->button[CELL_PAD_BTN_OFFSET_SENSOR_X], external.sensors, sizeof(external.sensors));
++    } else if (setting & CELL_PAD_SETTING_SENSOR_ON) {
+         int up = 0, down = 0, left = 0, right = 0;
+         int forward = (data->button[CELL_PAD_BTN_OFFSET_DIGITAL1] & CELL_PAD_CTRL_R3) != 0;
+ #ifdef _WIN32
+--- /dev/null
++++ b/include/ps3emu/host_input.h
+@@ -0,0 +1,21 @@
++#ifndef PS3EMU_HOST_INPUT_H
++#define PS3EMU_HOST_INPUT_H
++#include "ps3types.h"
++#ifdef __cplusplus
++extern "C" {
++#endif
++/* Optional title host input provider. Install before guest threads start.
++ * The callback returns an owned snapshot and must be safe from any guest thread.
++ * Returning zero preserves the existing backend for that port. */
++typedef struct ps3_host_pad_report {
++    u16 buttons;
++    u8 lx, ly, rx, ry, l2, r2;
++    u16 sensors[4];
++    u8 sensors_valid;
++} ps3_host_pad_report;
++typedef int (*ps3_host_pad_provider)(u32 port, ps3_host_pad_report* out, void* userdata);
++void ps3_pad_set_host_provider(ps3_host_pad_provider provider, void* userdata);
++#ifdef __cplusplus
++}
++#endif
++#endif

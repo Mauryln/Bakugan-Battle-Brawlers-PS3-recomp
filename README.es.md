@@ -15,7 +15,7 @@
 <img src="https://img.shields.io/badge/status-jugable%20de%20principio%20a%20fin-yellow?style=flat-square" alt="Jugable de principio a fin; rendimiento limitado por el motor">
 </p>
 
-<p><a href="README.md">English</a> · <a href="docs/STATUS.md">Estado</a> · <a href="docs/ARCHITECTURE.md">Arquitectura</a> · <a href="docs/PERFORMANCE.md">Rendimiento</a></p>
+<p><a href="README.md">English</a> · <a href="docs/PROJECT_GUIDE.md">Guía técnica</a> · <a href="docs/LAUNCHER.md">Launcher y controles</a></p>
 
 </div>
 
@@ -37,10 +37,10 @@
 > medidas alcanzan aproximadamente **27–28 FPS**, frente a la referencia anterior
 > de **16–17 FPS**. Las copias coherentes por filas de NV3089 reducen trabajo CPU
 > y conservan escenario, agua y HUD en las capturas revisadas.
-> **Todavía no hay release:** faltan guardado y mapeo real del control; los 30 FPS
+> **Todavía no hay release:** el launcher y el mapeo están implementados; los 30 FPS
 > sostenidos siguen pendientes. La última optimización aún no se validó en un
 > duelo completo posterior al lanzamiento ni en todas las arenas.
-> [Mejora medida](#mejoras-recientes-de-rendimiento) · [Estado](docs/STATUS.md).
+> [Mejora medida](#mejoras-recientes-de-rendimiento) · [Estado](docs/PROJECT_GUIDE.md).
 
 [Bakugan: Battle Brawlers](https://es.wikipedia.org/wiki/Bakugan:_Battle_Brawlers) (2009) nunca salió en PC. Este proyecto levanta el código **PPU (CPU) y SPU (DSP)** del juego a C++ de forma estática con [ps3recomp](https://github.com/sp00nznet/ps3recomp) y lo enlaza contra un runtime HLE pequeño: el resultado es un `.exe` normal que dibuja por Direct3D 12. El juego completo es jugable; los menús van a 30 FPS y la comparación más reciente de arena fija promedió 29,30 FPS con subida paralela de vértices. Queda alcanzar 30 FPS sostenidos y reducir los tirones.
 
@@ -72,10 +72,22 @@ El código levantado se compila por adelantado; los trabajos SPU dinámicos sin 
 | *Defecto conocido:* el "gate" del selector de modo — las capas 2D tras el retrato se solapan | ⚠️ |
 | **Rendimiento** — 29,30 FPS en la última comparación de pack en arena fija, frente a ~16–17 FPS históricos; 30 FPS sostenidos pendientes | ⚠️ |
 | **Guardado** — cargar funciona, escribir la partida está incompleto | ❌ |
-| **Control** — el pad XInput se simula, no se traduce desde la librería del juego | ❌ |
+| **Control** — remapeo PS3 persistente, mandos SDL3, Sixaxis real o palanca R; DS4 probado | ✅ |
 | **Efectos de sonido** — ATRAC3 en `SOUND/*.PAST` | ❌ |
 
-**El juego es jugable de principio a fin. No habrá release hasta cerrar el guardado y el mapeo real del control; el rendimiento es el tercer bloqueo.**
+**El juego es jugable de principio a fin. El launcher y el mapeo están implementados; faltan ampliar las pruebas de hardware y validar 30 FPS sostenidos para el lanzamiento.**
+
+## Launcher y controles
+
+Ejecuta `tools/run.ps1` sin argumentos o abre `bakugan-recomp/build/BakuganLauncher.exe`.
+El launcher con estética Bakugan carga el fondo y la imagen del título del dump local; no distribuye assets.
+El usuario completó una partida Bakugan con esta build. El launcher guarda resolución de salida, FSR 1, nitidez, filtrado anisotrópico, límite de FPS,
+modo de ventana, idioma EU y mapeo de botones y palancas PS3 en
+`%LOCALAPPDATA%/BakuganRecomp/player.ini`. El idioma predeterminado sigue Windows.
+SDL3 detecta mandos y sensores reales; sin sensores se utiliza la palanca derecha.
+Se probaron mapeo y sensores de DS4; DualSense y Switch Pro requieren validación física.
+Los parámetros explícitos del script o `-Direct` conservan el arranque de desarrollo.
+[Controles, compilación y validación](docs/LAUNCHER.md).
 
 ## Mejoras recientes de rendimiento
 
@@ -129,7 +141,7 @@ límites de direcciones y fallbacks de coherencia. No requiere toolkit ni datos 
 
 ## Se busca ayuda
 
-1. **Rendimiento.** Reducir tirones de carga y alcanzar 30 FPS sostenidos, conservando efectos y cuadros completos. Lo ya medido y lo descartado está en [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md).
+1. **Rendimiento.** Reducir tirones de carga y alcanzar 30 FPS sostenidos, conservando efectos y cuadros completos. Lo ya medido y lo descartado está en [`docs/SESSION_20261107_WALKER.md`](docs/SESSION_20261107_WALKER.md).
 2. **Guardado.** Cargar una partida funciona; escribirla está incompleto.
 3. **Control.** El pad se simula desde el camino del teclado en vez de traducirse desde la librería de input del juego.
 4. **Lo que queda de audio.** Las partituras de menú y el mezclador SPU funcionan; los efectos `.PAST` son ATRAC3 y siguen en silencio, y quedan cortes por revisar. `libs/audio/`.
