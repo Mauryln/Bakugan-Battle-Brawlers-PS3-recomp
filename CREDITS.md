@@ -16,7 +16,9 @@ SPURS LF-queue fix, keyboard input and everything else in `bakugan-recomp/`,
 
 - `tools/fetch_rpcs3.py` downloads the portable [RPCS3](https://rpcs3.net)
   build, used exactly once to decrypt the retail `EBOOT.BIN`. The game is never
-  run in RPCS3 for this project.
+  run in RPCS3 for this project. The Windows installer bundles a minimal RPCS3
+  (`rpcs3.exe --decrypt`) so each player can extract `EBOOT.elf` from their own
+  dump. RPCS3 is GPLv2; source is at <https://github.com/RPCS3/rpcs3>.
 - Media Foundation (Windows) decodes the H.264/AAC videos.
 
 ## Game

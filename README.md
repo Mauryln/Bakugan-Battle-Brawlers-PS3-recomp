@@ -90,13 +90,15 @@ defaults. The list/fixed delete entry points share the same callback flow.
 
 Run `tools/run.ps1` without arguments, or open `bakugan-recomp/build/BakuganLauncher.exe`.
 The Bakugan-themed launcher loads its background/title art from your local disc dump; game art is not distributed.
-The user completed a full Bakugan match with this build. The launcher saves output resolution, FSR 1, sharpness, anisotropic filtering, FPS cap,
+The user completed a full Bakugan match with this build. The launcher saves output resolution, sharpness, anisotropic filtering, the fixed 30 FPS cap,
 window mode, EU language and PS3 button/stick mappings in
 `%LOCALAPPDATA%/BakuganRecomp/player.ini`. Language defaults to Windows.
 SDL3 detects gamepads and real motion sensors; missing sensors fall back to the right stick.
 DS4 mapping and sensor readings were tested; DualSense and Switch Pro need hardware validation.
 Explicit script parameters or `-Direct` retain the developer launch path.
 [Controls, build and validation](docs/LAUNCHER.md).
+[Windows installer](docs/INSTALLER.md).
+[EBOOT.elf extraction](docs/EBOOT_ELF.md).
 
 ## Recent performance improvements
 
