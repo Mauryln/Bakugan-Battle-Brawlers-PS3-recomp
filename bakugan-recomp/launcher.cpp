@@ -20,16 +20,17 @@
 #define ID_LAUNCH  104
 #define ID_STATUS  105
 
-struct Preset { const char* label; const char* output; int cap; };
+struct Preset { const char* label; const char* output; const char* cap; };
 static const Preset kPresets[] = {
-    {"720p / 30 FPS",              "720p", 30},
-    {"1080p / 30 FPS (default)",   "1080p", 30},
-    {"1080p / 60 FPS",             "1080p", 0},
-    {"1440p / 60 FPS",             "1440p", 0},
-    {"Personalizado",              "1080p", 0},
+    {"720p / 30 FPS",              "720p",  "30"},
+    {"1080p / 30 FPS (default)",   "1080p", "30"},
+    {"1080p / 60 FPS",             "1080p", "60"},
+    {"1080p / monitor",            "1080p", "monitor"},
+    {"1440p / 60 FPS",             "1440p", "60"},
+    {"Personalizado",              "1080p", "0"},
 };
 static const char* kOutputs[] = {"native", "1080p", "1440p", "2160p"};
-static const char* kCaps[] = {"30", "60", "0"};
+static const char* kCaps[] = {"30", "60", "90", "120", "monitor", "0"};
 
 static char s_dir[MAX_PATH];
 static HWND s_preset, s_output, s_cap, s_status;
@@ -77,6 +78,7 @@ static void launch(int preset_index, const char* output, const char* cap)
     SetEnvironmentVariableA("PS3_FSR", "auto");
     SetEnvironmentVariableA("PS3_FSR_SHARPNESS", "0.5");
     SetEnvironmentVariableA("PS3_FPS_CAP", strcmp(cap, "0") ? cap : NULL);
+    SetEnvironmentVariableA("PS3_TICK_HZ", atoi(cap) > 60 ? cap : NULL);
     SetEnvironmentVariableA("PS3_WINDOW_MODE", "borderless");
 
     char cmd[MAX_PATH * 4];
@@ -100,11 +102,13 @@ static void sync_preset(void)
 {
     int i = (int)SendMessageA(s_preset, CB_GETCURSEL, 0, 0);
     if (i < 0) i = 1;
-    if (i < 4) {
+    if (i < 5) {
         for (int o = 0; o < 4; ++o)
             if (!strcmp(kOutputs[o], kPresets[i].output))
                 SendMessageA(s_output, CB_SETCURSEL, o, 0);
-        SendMessageA(s_cap, CB_SETCURSEL, kPresets[i].cap == 30 ? 0 : 1, 0);
+        for (int c = 0; c < 6; ++c)
+            if (!strcmp(kCaps[c], kPresets[i].cap))
+                SendMessageA(s_cap, CB_SETCURSEL, c, 0);
     }
 }
 
@@ -150,7 +154,7 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             int oi = (int)SendMessageA(s_output, CB_GETCURSEL, 0, 0);
             int ci = (int)SendMessageA(s_cap, CB_GETCURSEL, 0, 0);
             if (oi >= 0 && oi < 4) snprintf(out, sizeof out, "%s", kOutputs[oi]);
-            if (ci >= 0 && ci < 3) snprintf(cap, sizeof cap, "%s", kCaps[ci]);
+            if (ci >= 0 && ci < 6) snprintf(cap, sizeof cap, "%s", kCaps[ci]);
             launch((int)SendMessageA(s_preset, CB_GETCURSEL, 0, 0), out, cap);
         }
         return 0;
@@ -172,8 +176,9 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR, int show)
 
     const char* cli = GetCommandLineA();
     if (cli && strstr(cli, "--preset 720p30")) { launch(0, "720p", "30"); return 0; }
-    if (cli && strstr(cli, "--preset 1080p60")) { launch(2, "1080p", "0"); return 0; }
-    if (cli && strstr(cli, "--preset 1440p60")) { launch(3, "1440p", "0"); return 0; }
+    if (cli && strstr(cli, "--preset 1080p60")) { launch(2, "1080p", "60"); return 0; }
+    if (cli && strstr(cli, "--preset 1080pmonitor")) { launch(3, "1080p", "monitor"); return 0; }
+    if (cli && strstr(cli, "--preset 1440p60")) { launch(4, "1440p", "60"); return 0; }
     if (cli && strstr(cli, "--preset 1080p30")) { launch(1, "1080p", "30"); return 0; }
 
     WNDCLASSA wc{};

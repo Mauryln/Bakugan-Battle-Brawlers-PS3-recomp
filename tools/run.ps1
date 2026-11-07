@@ -18,8 +18,10 @@ param(
     [ValidateSet('Auto', 'On', 'Off')]
     [string]$FSR = 'Auto',
     [double]$Sharpness = 0.5,
-    [ValidateSet(0, 30, 60)]
-    [int]$FpsCap = 0,
+    [ValidateSet('0', '30', '60', '90', '120', 'monitor')]
+    [string]$FpsCap = '0',
+    [ValidateSet(0, 60, 90, 120)]
+    [int]$TickHz = 0,
     [ValidateSet('Windowed', 'Borderless')]
     [string]$WindowMode = 'Windowed'
 )
@@ -47,7 +49,8 @@ elseif ($FSR -eq 'On') { $env:PS3_FSR = 'fsr1' }
 elseif ($FSR -eq 'Off') { $env:PS3_FSR = '0' }
 else { $env:PS3_FSR = $null }
 $env:PS3_FSR_SHARPNESS = $Sharpness.ToString('0.00', [Globalization.CultureInfo]::InvariantCulture)
-$env:PS3_FPS_CAP = if ($FpsCap -gt 0) { [string]$FpsCap } else { $null }
+$env:PS3_FPS_CAP = if ($FpsCap -ne '0') { $FpsCap } else { $null }
+$env:PS3_TICK_HZ = if ($TickHz -gt 0) { [string]$TickHz } else { $null }
 $env:PS3_WINDOW_MODE = $WindowMode.ToLowerInvariant()
 
 Write-Host "VFS root: $env:PS3_VFS_ROOT"

@@ -34,14 +34,21 @@ Al ejecutar el binario directamente, `PS3_FSR=fsr1` activa el procesado;
 | --- | --- | --- |
 | 720p / 30 FPS | 720p | 30 |
 | 1080p / 30 FPS (default) | 1080p | 30 |
-| 1080p / 60 FPS | 1080p | sin tope |
-| 1440p / 60 FPS | 1440p | sin tope |
+| 1080p / 60 FPS | 1080p | 60 |
+| 1080p / monitor | 1080p | refresco del monitor |
+| 1440p / 60 FPS | 1440p | 60 |
 
 El launcher fija `PS3_INTERNAL=720`, `PS3_OUTPUT`, `PS3_FSR=auto`,
 `PS3_FPS_CAP` y `PS3_WINDOW_MODE=borderless`, busca `EBOOT.elf` y arranca el
-juego. `--preset 720p30|1080p30|1080p60|1440p60` permite probarlo sin GUI.
-Las variables equivalentes siguen disponibles en `tools/run.ps1`:
-`-RenderHeight`, `-Output`, `-FSR`, `-Sharpness`, `-FpsCap`.
+juego. `--preset 720p30|1080p30|1080p60|1080pmonitor|1440p60` permite probarlo
+sin GUI. Las variables equivalentes siguen disponibles en `tools/run.ps1`:
+`-RenderHeight`, `-Output`, `-FSR`, `-Sharpness`, `-FpsCap`, `-TickHz`.
+
+`PS3_FPS_CAP` acepta `30`, `60`, `90`, `120`, `monitor` o `0` (sin tope). Es un
+techo de presentación, no una garantía: en batalla el coste CPU sigue limitando
+a ~28-29 FPS. Para 90/120 el launcher fija también `PS3_TICK_HZ` al mismo valor
+(experimental: el guest puede avanzar su lógica más rápido). El valor validado
+para jugar es 30 o 60 con `PS3_TICK_HZ=60`.
 
 ## Por qué el render interno sigue siendo 1280x720
 

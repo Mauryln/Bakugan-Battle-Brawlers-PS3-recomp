@@ -210,6 +210,9 @@ No prometer 30 FPS ni mejoras de carga sin A/B con imagen y comportamiento idén
 - 60 FPS exige bajar el trabajo de ~35 ms a <16,6 ms por cuadro; no se logra con
   ajustes locales. Requiere solapar walker/submit/render o reducir el coste del
   guest, y debe medirse con la misma arena.
+- Topes de presentación: `PS3_FPS_CAP=30|60|90|120|monitor|0`. Verificado 30.00
+  exacto; 60/90 no elevan el FPS de batalla porque el renderer sigue limitado
+  por CPU. `PS3_TICK_HZ=90/120` es experimental (acelera la lógica del guest).
 
 
 ## 8. Diagnóstico y validación para agentes

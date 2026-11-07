@@ -216,19 +216,32 @@ static void present_guest_frame(void)
     InterlockedIncrement(&g_frames_presented);
 }
 
-static unsigned frame_clock_due_ticks(unsigned long long now,
-                                      unsigned long long* next_tick)
+/* The vblank tick drives the guest frame loop. 60 Hz is the title's native
+ * cadence; PS3_TICK_HZ=90/120 is an experiment for high-refresh monitors (the
+ * guest may then run its logic faster, so keep 60 unless validated). */
+static double s_tick_ms = 0.0;
+static void tick_rate_init(void)
 {
-    if (now < *next_tick) return 0;
-    unsigned long long due = (now - *next_tick) / 16 + 1;
+    if (s_tick_ms > 0.0) return;
+    const char* value = getenv("PS3_TICK_HZ");
+    double hz = value ? atof(value) : 60.0;
+    if (hz < 30.0 || hz > 240.0) hz = 60.0;
+    s_tick_ms = 1000.0 / hz;
+}
+
+static unsigned frame_clock_due_ticks(unsigned long long now, double* next_tick)
+{
+    if ((double)now < *next_tick) return 0;
+    double due_d = ((double)now - *next_tick) / s_tick_ms + 1.0;
+    unsigned due = (unsigned)due_d;
     /* A blocked render thread cannot replay seconds of display interrupts.
      * Bound catch-up work and resume at real time after a long stall. */
     if (due > 4) {
-        *next_tick = now + 16;
+        *next_tick = (double)now + s_tick_ms;
         return 4;
     }
-    *next_tick += due * 16;
-    return (unsigned)due;
+    *next_tick += (double)due * s_tick_ms;
+    return due;
 }
 
 static double s_wait_s = 0.0; unsigned s_wait_n = 0;
@@ -242,7 +255,21 @@ static void fps_cap_wait(void)
 {
     static int cap = -1;
     static double next = 0.0;
-    if (cap < 0) { const char* e = getenv("PS3_FPS_CAP"); cap = e ? atoi(e) : 0; }
+    if (cap < 0) {
+        const char* e = getenv("PS3_FPS_CAP");
+        if (e && (!strcmp(e, "monitor") || !strcmp(e, "auto"))) {
+#ifdef _WIN32
+            DEVMODEW mode{}; mode.dmSize = sizeof mode;
+            cap = (EnumDisplaySettingsW(NULL, ENUM_CURRENT_SETTINGS, &mode) &&
+                   mode.dmDisplayFrequency > 1) ? (int)mode.dmDisplayFrequency : 60;
+#else
+            cap = 60;
+#endif
+        } else {
+            cap = e ? atoi(e) : 0;
+        }
+        if (cap < 0 || cap > 240) cap = 0;
+    }
     if (cap <= 0) return;
     if (s_qpc_freq2 == 0.0) { LARGE_INTEGER f; QueryPerformanceFrequency(&f); s_qpc_freq2 = (double)f.QuadPart; }
     LARGE_INTEGER c; QueryPerformanceCounter(&c);
@@ -362,7 +389,8 @@ static DWORD WINAPI frame_clock(LPVOID)
     fprintf(stderr, "[frame_clock] host tid=%lu\n", (unsigned long)GetCurrentThreadId());
 
     unsigned  last_flip = 0;
-    ULONGLONG next_tick = GetTickCount64();
+    double next_tick = (double)GetTickCount64();
+    tick_rate_init();
 
     for (;;) {
 #ifdef _WIN32
