@@ -175,7 +175,7 @@ endif()
 add_executable(${PROJECT_NAME}
     main.cpp
     stubs.cpp
-    savedata_ui.cpp
+    savedata_overlay.cpp
     ${PS3RECOMP_SCAFFOLD}
     ${HLE_NID_TABLE}
     ${RECOMP_SOURCES}

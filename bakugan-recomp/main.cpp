@@ -823,10 +823,10 @@ int main(int argc, char** argv)
 #ifdef _WIN32
     extern void bakugan_install_video();
     bakugan_install_video();
-    /* The firmware's save-data applet does not exist here; the native picker
-     * stands in for it while cellSaveData blocks the guest. */
-    extern void bakugan_savedata_ui_install(void);
-    bakugan_savedata_ui_install();
+    /* The firmware's save-data applet does not exist here; the in-game
+     * overlay stands in for it while cellSaveData blocks the guest. */
+    extern void bakugan_savedata_overlay_install(const char* vfs_root);
+    bakugan_savedata_overlay_install(ppu_vfs_root);
 #endif
 
     /* Install the guest-callback hook, then start the frame clock. It no-ops
