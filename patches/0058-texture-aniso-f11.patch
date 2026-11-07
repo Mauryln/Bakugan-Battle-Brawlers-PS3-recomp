@@ -1,0 +1,180 @@
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index 3522c80..f2a1489 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -496,11 +524,27 @@ static D3D12_SAMPLER_DESC rsx_sampler_desc(u32 address, u32 filter, u32 control,
+     d.MaxLOD = minf >= 3 ? (float)((control >> 7) & 0xFFFu) / 256.0f : 0.0f;
+     if (d.MaxLOD < d.MinLOD) d.MaxLOD = d.MinLOD;
+     int bias = (int)(filter & 0x1FFFu); /* signed 5.8 fixed point */
+     if (bias & 0x1000) bias -= 0x2000;
+     d.MipLODBias = (float)bias / 256.0f;
+-    d.MaxAnisotropy = 1;
++    /* Cheap texture-detail win: 16x anisotropic on trilinear samplers. The
++     * RSX itself had no aniso, so this is an enhancement, not fidelity; it is
++     * env-gated so captures can A/B it. PS3_LOD_BIAS is optional and negative
++     * values sharpen the mip selection. */
++    { static int aniso = -1;
++      if (aniso < 0) { const char* e = getenv("PS3_ANISO"); aniso = e ? atoi(e) : 16;
++                       if (aniso < 1 || aniso > 16) aniso = 1; }
++      if (aniso > 1 && mn == D3D12_FILTER_TYPE_LINEAR &&
++          mg == D3D12_FILTER_TYPE_LINEAR && mp == D3D12_FILTER_TYPE_LINEAR) {
++          d.Filter = D3D12_FILTER_ANISOTROPIC;
++          d.MaxAnisotropy = (UINT)aniso;
++      } else {
++          d.MaxAnisotropy = 1;
++      } }
++    { static int init = 0; static float extra = 0.0f;
++      if (!init) { const char* e = getenv("PS3_LOD_BIAS"); extra = e ? (float)atof(e) : 0.0f; init = 1; }
++      d.MipLODBias += extra; }
+     d.ComparisonFunc = D3D12_COMPARISON_FUNC_ALWAYS;
+     d.BorderColor[0] = (float)((border >> 16) & 255u) / 255.0f;
+     d.BorderColor[1] = (float)((border >> 8) & 255u) / 255.0f;
+     d.BorderColor[2] = (float)(border & 255u) / 255.0f;
+     d.BorderColor[3] = (float)((border >> 24) & 255u) / 255.0f;
+@@ -797,22 +860,64 @@ static double s_lock_sx = 0.0, s_lock_sy = 0.0;
+ static u32    s_lock_n  = 0;
+ 
+ /* ---------------------------------------------------------------------------
+  * Win32 window
+  * -----------------------------------------------------------------------*/
++static RECT     s_windowed_rect;
++static LONG_PTR s_windowed_style;
++static int      s_fullscreen;
++
++static void toggle_fullscreen(HWND hwnd)
++{
++    if (!s_fullscreen) {
++        GetWindowRect(hwnd, &s_windowed_rect);
++        s_windowed_style = GetWindowLongPtrA(hwnd, GWL_STYLE);
++        MONITORINFO mi = {0}; mi.cbSize = sizeof mi;
++        if (!GetMonitorInfoA(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &mi)) return;
++        SetWindowLongPtrA(hwnd, GWL_STYLE,
++            (s_windowed_style & ~(WS_CAPTION | WS_THICKFRAME | WS_MINIMIZEBOX |
++                                  WS_MAXIMIZEBOX | WS_SYSMENU)) | WS_POPUP);
++        SetWindowPos(hwnd, HWND_TOP, mi.rcMonitor.left, mi.rcMonitor.top,
++                     mi.rcMonitor.right - mi.rcMonitor.left,
++                     mi.rcMonitor.bottom - mi.rcMonitor.top,
++                     SWP_FRAMECHANGED | SWP_SHOWWINDOW);
++        s_fullscreen = 1;
++        fprintf(stderr, "[WINDOW] F11 fullscreen on%c", 10);
++    } else {
++        SetWindowLongPtrA(hwnd, GWL_STYLE, s_windowed_style);
++        SetWindowPos(hwnd, HWND_TOP, s_windowed_rect.left, s_windowed_rect.top,
++                     s_windowed_rect.right - s_windowed_rect.left,
++                     s_windowed_rect.bottom - s_windowed_rect.top,
++                     SWP_FRAMECHANGED | SWP_SHOWWINDOW);
++        s_fullscreen = 0;
++        fprintf(stderr, "[WINDOW] F11 fullscreen off%c", 10);
++    }
++}
+ 
+ static LRESULT CALLBACK d3d12_wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
+ {
++    /* The host overlay (save picker) is modal: it sees the message first and
++     * consumes keys/mouse while it is open, including Esc -- which otherwise
++     * closes the game in the switch below. */
++    if (s_host_overlay_ready && s_host_overlay.input &&
++        s_host_overlay.input(s_host_overlay.userdata, msg,
++                             (unsigned long long)wp, (long long)lp))
++        return 0;
++
+     switch (msg) {
+     case WM_CLOSE:
+         s_d3d.window_closed = 1;
+         DestroyWindow(hwnd);
+         return 0;
+     case WM_DESTROY:
+         PostQuitMessage(0);
+         return 0;
+     case WM_KEYDOWN:
++        if (wp == VK_F11) {
++            toggle_fullscreen(hwnd);
++            return 0;
++        }
+         if (wp == VK_ESCAPE) {
+             s_d3d.window_closed = 1;
+             DestroyWindow(hwnd);
+         }
+         return 0;
+@@ -820,31 +925,75 @@ static LRESULT CALLBACK d3d12_wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
+     return DefWindowProcA(hwnd, msg, wp, lp);
+ }
+ 
+ static HWND create_window(u32 width, u32 height, const char* title)
+ {
++    /* Window placement and HWND creation use the same physical-pixel context.
++     * This is local to the render thread; desktop scaling remains unchanged. */
++    if (!SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2))
++        fprintf(stderr, "[WINDOW] Per-monitor DPI context unavailable: %lu\n", GetLastError());
+     WNDCLASSEXA wc = {0};
+     wc.cbSize = sizeof(wc);
+     wc.style = CS_HREDRAW | CS_VREDRAW;
+     wc.lpfnWndProc = d3d12_wndproc;
+     wc.hInstance = GetModuleHandle(NULL);
+     wc.hCursor = LoadCursor(NULL, IDC_ARROW);
+     wc.lpszClassName = "ps3recomp_d3d12";
+     RegisterClassExA(&wc);
+ 
+-    RECT wr = {0, 0, (LONG)width, (LONG)height};
+-    AdjustWindowRect(&wr, WS_OVERLAPPEDWINDOW, FALSE);
++    MONITORINFO monitor = {0}; monitor.cbSize = sizeof(monitor);
++    if (!GetMonitorInfoA(MonitorFromWindow(GetForegroundWindow(),
++                                          MONITOR_DEFAULTTOPRIMARY), &monitor))
++        return NULL;
++    const char* mode = getenv("PS3_WINDOW_MODE");
++    int borderless = mode && strcmp(mode, "borderless") == 0;
++    DWORD style = borderless ? WS_POPUP : WS_OVERLAPPEDWINDOW;
++    RECT area = borderless ? monitor.rcMonitor : monitor.rcWork;
++    LONG area_w = area.right - area.left, area_h = area.bottom - area.top;
++    LONG window_w, window_h;
++    if (borderless) {
++        /* The swap chain is exactly `width x height`; matching the window to it
++         * keeps the picture unstretched when the monitor is not 16:9. Native
++         * output already equals the monitor on a 16:9 display. */
++        window_w = (LONG)width; window_h = (LONG)height;
++    } else {
++        RECT frame = {0, 0, 0, 0};
++        if (!AdjustWindowRect(&frame, style, FALSE)) return NULL;
++        LONG extra_w = frame.right - frame.left, extra_h = frame.bottom - frame.top;
++        LONG available_w = area_w - extra_w, available_h = area_h - extra_h;
++        if (available_w < 1 || available_h < 1) return NULL;
++        double scale = 1.0;
++        if (width > (u32)available_w) scale = (double)available_w / width;
++        if (height * scale > available_h) scale = (double)available_h / height;
++        window_w = (LONG)(width * scale) + extra_w;
++        window_h = (LONG)(height * scale) + extra_h;
++    }
++    LONG x = area.left + (area_w - window_w) / 2;
++    LONG y = area.top + (area_h - window_h) / 2;
+ 
+     /* Keep the display awake (see rsx_null_backend.c). */
+     SetThreadExecutionState(ES_CONTINUOUS | ES_DISPLAY_REQUIRED | ES_SYSTEM_REQUIRED);
+-    return CreateWindowExA(
++    HWND hwnd = CreateWindowExA(
+         0, "ps3recomp_d3d12",
+         title ? title : "ps3recomp (D3D12)",
+-        WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+-        CW_USEDEFAULT, CW_USEDEFAULT,
+-        wr.right - wr.left, wr.bottom - wr.top,
++        style | WS_VISIBLE,
++        x, y, window_w, window_h,
+         NULL, NULL, GetModuleHandle(NULL), NULL);
++    if (hwnd) {
++        GetWindowRect(hwnd, &s_windowed_rect);
++        s_windowed_style = GetWindowLongPtrA(hwnd, GWL_STYLE);
++        s_fullscreen = borderless;
++        RECT actual, client;
++        if (GetWindowRect(hwnd, &actual) && GetClientRect(hwnd, &client))
++            fprintf(stderr, "[WINDOW] mode=%s monitor=%ld,%ld %ldx%ld window=%ld,%ld %ldx%ld client=%ldx%ld dpi=%u\n",
++                    borderless ? "borderless" : "windowed", monitor.rcMonitor.left, monitor.rcMonitor.top,
++                    monitor.rcMonitor.right - monitor.rcMonitor.left,
++                    monitor.rcMonitor.bottom - monitor.rcMonitor.top,
++                    actual.left, actual.top, actual.right - actual.left, actual.bottom - actual.top,
++                    client.right, client.bottom, GetDpiForWindow(hwnd));
++    }
++    return hwnd;
+ }
+ 
+ /* ---------------------------------------------------------------------------
+  * D3D12 initialization
+  * -----------------------------------------------------------------------*/
