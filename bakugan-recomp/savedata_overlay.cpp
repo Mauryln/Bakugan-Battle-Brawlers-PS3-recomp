@@ -565,6 +565,7 @@ bool create_canvas_upload(UINT width, UINT height)
     bd.Height = 1;
     bd.DepthOrArraySize = 1;
     bd.MipLevels = 1;
+    bd.SampleDesc.Count = 1;   /* required for buffers; {} leaves it zero */
     bd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
     if (FAILED(g.device->CreateCommittedResource(&up, D3D12_HEAP_FLAG_NONE, &bd,
             D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&g.upload)))) {
