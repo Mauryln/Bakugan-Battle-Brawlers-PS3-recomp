@@ -1,0 +1,196 @@
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -449,6 +449,8 @@
+         out += stride;
+     }
+ }
++#include "rsx_pack_workers.inc"
++
+
+ static u32 vp_compact_input_layout(u32 mask, D3D12_INPUT_ELEMENT_DESC* layout)
+ {
+@@ -4883,7 +4885,7 @@
+     }
+ }
+
+-static int vp_upload_compact_frame(void)
++static int vp_upload_compact_frame(int parallel)
+ {
+     u32 bytes = 0;
+     for (u32 i = 0; i < s_d3d.draw_count && i < MAX_DRAWS; ++i) {
+@@ -4922,6 +4924,19 @@
+         s_d3d.vp_vb = resource; s_d3d.vp_vb_upload = mapped;
+         s_d3d.vp_gpu_capacity = capacity;
+         fprintf(stderr, "[VPVB] GPU upload grew to %u bytes per frame\n", capacity);
++    }
++    if (parallel) {
++        u32 runs = 0;
++        for (u32 i = 0; i < s_d3d.draw_count && i < MAX_DRAWS; ++i) {
++            const D3D12DrawRecord* dr = &s_d3d.draws[i];
++            if (!dr->is_vp || dr->is_clear) continue;
++            VPPackRun* run = &s_pack.runs[runs++];
++            run->dst = (char*)s_d3d.vp_vb_upload +
++                (u64)s_d3d.vp_parity * s_d3d.vp_gpu_capacity + dr->gpu_byte_offset;
++            run->src = (char*)s_d3d.vp_vb_mapped + dr->vb_byte_offset;
++            run->count = dr->vertex_count; run->mask = dr->gpu_input_mask;
++        }
++        if (vp_pack_workers_begin(runs, bytes)) return 1;
+     }
+     for (u32 i = 0; i < s_d3d.draw_count && i < MAX_DRAWS; ++i) {
+         D3D12DrawRecord* dr = &s_d3d.draws[i];
+@@ -5287,6 +5302,9 @@
+             if (dr->is_vp && dr->rt_mrt[_m])
+                 off_rt_get(dr->rt_mrt[_m], dr->rt_w, dr->rt_h, dr->rt_fmt);
+     }
++
++    int pack_parallel = vp_pack_workers_active();
++    if (pack_parallel && !vp_upload_compact_frame(1)) return;
+
+     /* Per-frame VP textures + guest-FP pipelines: for each VP draw, upload the
+      * texture it had bound at submit time into a resource-cache slot (plasma
+@@ -5501,7 +5519,8 @@
+     }
+
+     flush_start = perf_on() ? perf_now() : 0.0;
+-    if (!vp_upload_compact_frame()) return;
++    if (pack_parallel) vp_pack_workers_join();
++    else if (!vp_upload_compact_frame(0)) return;
+     if (perf_on()) s_perf_flush += perf_now() - flush_start;
+
+     /* Transition render target to RENDER_TARGET state */
+@@ -8921,6 +8940,7 @@
+
+ void rsx_d3d12_backend_shutdown(void)
+ {
++    vp_pack_workers_shutdown();
+     if (!s_d3d.initialized) return;
+
+     wait_for_gpu();
+diff --git a/libs/video/rsx_pack_workers.inc b/libs/video/rsx_pack_workers.inc
+new file mode 100644
+--- /dev/null
++++ b/libs/video/rsx_pack_workers.inc
+@@ -0,0 +1,122 @@
++/* Closed-frame upload copies only. The FIFO owner keeps all D3D12 calls and
++ * freezes source, destination, parity and capacity until the batch join. */
++#include <process.h>
++#include <emmintrin.h>
++typedef struct VPPackRun {
++    const void* src;
++    void* dst;
++    u32 count, mask;
++} VPPackRun;
++static struct {
++    SRWLOCK lock;
++    CONDITION_VARIABLE work, idle;
++    HANDLE thread[4], event;
++    VPPackRun runs[MAX_DRAWS];
++    struct { u32 first, end; } jobs[4];
++    u32 threads, next, jobs_count, pending;
++    int initialized, active, stop;
++} s_pack = {SRWLOCK_INIT, CONDITION_VARIABLE_INIT, CONDITION_VARIABLE_INIT};
++
++static unsigned __stdcall vp_pack_worker(void* unused)
++{
++    (void)unused;
++    for (;;) {
++        AcquireSRWLockExclusive(&s_pack.lock);
++        while (s_pack.next == s_pack.jobs_count && !s_pack.stop)
++            SleepConditionVariableSRW(&s_pack.work, &s_pack.lock, INFINITE, 0);
++        if (s_pack.next == s_pack.jobs_count && s_pack.stop) {
++            ReleaseSRWLockExclusive(&s_pack.lock); return 0;
++        }
++        u32 job = s_pack.next++;
++        u32 first = s_pack.jobs[job].first, end = s_pack.jobs[job].end;
++        ReleaseSRWLockExclusive(&s_pack.lock);
++        for (u32 r = first; r < end; ++r) {
++            const VPPackRun* run = &s_pack.runs[r];
++            vp_pack_vertex_stream(run->dst, run->src, run->count, run->mask);
++        }
++        /* WC stores must drain on the writer before completion is published. */
++        _mm_sfence();
++        AcquireSRWLockExclusive(&s_pack.lock);
++        if (--s_pack.pending == 0) WakeAllConditionVariable(&s_pack.idle);
++        ReleaseSRWLockExclusive(&s_pack.lock);
++    }
++}
++static void vp_pack_workers_join(void)
++{
++    if (!s_pack.initialized) return;
++    AcquireSRWLockExclusive(&s_pack.lock);
++    while (s_pack.pending)
++        SleepConditionVariableSRW(&s_pack.idle, &s_pack.lock, INFINITE, 0);
++    ReleaseSRWLockExclusive(&s_pack.lock);
++}
++static void vp_pack_workers_shutdown(void)
++{
++    vp_pack_workers_join();
++    AcquireSRWLockExclusive(&s_pack.lock);
++    s_pack.stop = 1;
++    ReleaseSRWLockExclusive(&s_pack.lock);
++    WakeAllConditionVariable(&s_pack.work);
++    for (u32 i = 0; i < s_pack.threads; ++i) {
++        WaitForSingleObject(s_pack.thread[i], INFINITE);
++        CloseHandle(s_pack.thread[i]);
++    }
++    s_pack.threads = 0; s_pack.active = 0;
++    if (s_pack.event) { CloseHandle(s_pack.event); s_pack.event = NULL; }
++}
++static int vp_pack_workers_active(void)
++{
++    if (!s_pack.initialized) {
++        s_pack.initialized = 1;
++        const char* value = getenv("RSX_PACK_WORKERS");
++        int count = value ? atoi(value) : 0;
++        if (count >= 1 && count <= 4) {
++            for (int i = 0; i < count; ++i) {
++                HANDLE h = (HANDLE)_beginthreadex(NULL, 0, vp_pack_worker, NULL, 0, NULL);
++                if (!h) { vp_pack_workers_shutdown(); return 0; }
++                s_pack.thread[s_pack.threads++] = h;
++            }
++            s_pack.active = 1;
++            const char* event = getenv("RSX_PACK_WORKERS_EVENT");
++            if (event && *event) {
++                SetLastError(ERROR_SUCCESS);
++                s_pack.event = CreateEventA(NULL, TRUE, TRUE, event);
++                DWORD error = GetLastError();
++                if (!s_pack.event || error == ERROR_ALREADY_EXISTS) {
++                    fprintf(stderr, "[PACK AB invalid] event error=%lu\n", error);
++                    vp_pack_workers_shutdown(); return 0;
++                }
++            }
++            fprintf(stderr, "[PACK] %u workers, closed staging, aligned frame batches\n", s_pack.threads);
++        }
++    }
++    if (s_pack.event) {
++        DWORD result = WaitForSingleObject(s_pack.event, 0);
++        if (result == WAIT_OBJECT_0) s_pack.active = 1;
++        else if (result == WAIT_TIMEOUT) s_pack.active = 0;
++        else { fprintf(stderr, "[PACK AB invalid] poll failed\n"); vp_pack_workers_shutdown(); }
++    }
++    return s_pack.active;
++}
++static int vp_pack_workers_begin(u32 runs, u32 bytes)
++{
++    if (!s_pack.active || !runs || bytes < 1024u * 1024u) return 0;
++    /* Partition only on 64-byte output boundaries. Adjacent workers never
++     * share a WC line; offsets and the original compact layout stay intact. */
++    u32 parts = s_pack.threads, jobs = 0, first = 0;
++    u64 done = 0, target = ((u64)bytes + parts - 1u) / parts;
++    for (u32 i = 0; i < runs; ++i) {
++        const VPPackRun* r = &s_pack.runs[i];
++        done += (u64)r->count * vp_vertex_stride(r->mask);
++        if (i + 1u < runs && jobs + 1u < parts && done >= target &&
++            !((uintptr_t)s_pack.runs[i + 1u].dst & 63u)) {
++            s_pack.jobs[jobs].first = first; s_pack.jobs[jobs++].end = i + 1u;
++            first = i + 1u; target = ((u64)bytes * (jobs + 1u) + parts - 1u) / parts;
++        }
++    }
++    s_pack.jobs[jobs].first = first; s_pack.jobs[jobs++].end = runs;
++    AcquireSRWLockExclusive(&s_pack.lock);
++    s_pack.next = 0; s_pack.jobs_count = jobs; s_pack.pending = jobs;
++    ReleaseSRWLockExclusive(&s_pack.lock);
++    WakeAllConditionVariable(&s_pack.work);
++    return 1;
++}

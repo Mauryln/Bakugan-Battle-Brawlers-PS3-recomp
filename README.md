@@ -19,6 +19,12 @@
 
 </div>
 
+> **2026-11-07 — less serial walker work.** Two CPU workers now pack the closed
+> vertex staging while the owner prepares materials. In eight balanced arena
+> windows, frame_clock fell from **80.1% to 69.0% of one core**; average output
+> changed from **28.71 to 29.30 FPS**, with better p95/p99. Total process CPU was
+> similar. **Stable 30 FPS remains a target.** [Measurements and limits](docs/SESSION_20261107_WALKER.md).
+
 > **New: FSR 1 output at 1080p.** Official AMD EASU + RCAS upscale the complete
 > 720p frame to 1080p. Windowed output fits the monitor; borderless mode and
 > per-monitor DPI handling are available. The checked arena averaged **28.02 FPS**;

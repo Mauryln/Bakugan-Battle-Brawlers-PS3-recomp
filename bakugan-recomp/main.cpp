@@ -669,6 +669,9 @@ int main(int argc, char** argv)
      * menu frames accumulate. Preserve the game's own 30 Hz pacing. */
     if (!getenv("RSX_ACCUM_FRAME")) _putenv_s("RSX_ACCUM_FRAME", "1");
     if (!getenv("GCM_FULL_FRAMES")) _putenv_s("GCM_FULL_FRAMES", "1");
+    /* Pack frozen vertex staging while the owner prepares draw materials.
+     * Preserve RSX_PACK_WORKERS=0 as the synchronous diagnostic path. */
+    if (!getenv("RSX_PACK_WORKERS")) _putenv_s("RSX_PACK_WORKERS", "2");
     /* 1 ms timer resolution. The default granularity is about 15.6 ms, which
      * inflates every shorter wait the title makes and throttles the whole
      * thing. POSIX timers are already fine-grained. */

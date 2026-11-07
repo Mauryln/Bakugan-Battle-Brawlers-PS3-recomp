@@ -19,6 +19,12 @@
 
 </div>
 
+> **07/11/2026 — menos trabajo serial del walker.** Dos trabajadores CPU preparan
+> la subida de vértices mientras el dueño prepara materiales. En ocho ventanas
+> balanceadas de arena, frame_clock bajó del **80,1% al 69,0% de un núcleo**;
+> la media pasó de **28,71 a 29,30 FPS**, con mejor p95/p99. La CPU total del
+> proceso fue similar. **Siguen pendientes los 30 FPS estables.** [Mediciones y límites](docs/SESSION_20261107_WALKER.md).
+
 > **Nuevo: salida FSR 1 a 1080p.** EASU + RCAS oficiales de AMD reescalan el
 > cuadro completo de 720p a 1080p. La ventana se ajusta al monitor e incluye modo
 > sin bordes y gestión de DPI. La arena medida promedió **28,02 FPS**:
