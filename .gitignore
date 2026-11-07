@@ -2,8 +2,8 @@
 # Game content. Everything here is rebuilt from the user's own disc image by
 # tools/pipeline.py and must never be committed.
 # ---------------------------------------------------------------------------
-iso/
 bakugan-nx/
+iso/
 game/
 gamedata/
 analysis/
@@ -75,3 +75,8 @@ famous-ref/
 !docs/img/*.gif
 
 shadercache/
+
+# Local agent installation and workstation checkpoints
+.agents/
+skills-lock.json
+docs/changes/

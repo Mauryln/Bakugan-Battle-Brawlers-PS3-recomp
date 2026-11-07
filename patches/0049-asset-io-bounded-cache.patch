@@ -1,0 +1,693 @@
+diff --git a/runtime/ppu/ppu_fs.cpp b/runtime/ppu/ppu_fs.cpp
+index 4d54b72..8dd5062 100644
+--- a/runtime/ppu/ppu_fs.cpp
++++ b/runtime/ppu/ppu_fs.cpp
+@@ -13,6 +13,7 @@
+  * Context-aware HLE: guest pointers (path, buffers, out params) are read/written
+  * through vm_base in big-endian.
+  */
++#include "ps3emu/asset_io.h"
+ #include "ppu_recomp.h"      /* ppu_context */
+ #include "../../libs/filesystem/edat.h"
+ #include "ps3emu/nid.h"      /* ps3_compute_nid */
+@@ -278,6 +279,7 @@ static void cellFsOpen(ppu_context* ctx)
+     }
+     int fd = fd_alloc_file(f);
+     if (fd < 0) { fclose(f); ctx->gpr[3] = (uint64_t)(int64_t)CELL_FS_EIO; return; }
++    ps3_asset_io_attach(f, gpath, flags);
+     if (fd_ptr) vm_write32(fd_ptr, (uint32_t)fd);
+     g_fd_usm[fd] = (strstr(gpath, ".usm") != nullptr) ? 1 : 0;
+     /* FS_CALLER=1: name the guest function that opened each file. A title whose
+@@ -399,6 +401,7 @@ static void cellFsClose(ppu_context* ctx)
+         fprintf(stderr, "[fs] close fd=%d  (by %s)\n", fd, w); }
+     if (fd >= 0 && fd < FS_MAX && g_files[fd]) {
+         if (g_fd_usm[fd] && getenv("PS3_FSLOG_READS")) fprintf(stderr, "[USMRD] CLOSE usm fd=%d\n", fd);
++        ps3_asset_io_detach(g_files[fd]);
+         fclose(g_files[fd]); g_files[fd] = nullptr; g_fd_usm[fd] = 0;
+     }
+     ctx->gpr[3] = CELL_OK;
+@@ -437,7 +440,7 @@ static void cellFsRead(ppu_context* ctx)
+     long fpos_before = ftell(g_files[fd]);
+     if (ppu_vm_size && (uint64_t)buf + nbytes > ppu_vm_size) nbytes = ppu_vm_size - buf;
+     fs_prefault(buf, nbytes);
+-    size_t n = fread(vm_base + buf, 1, (size_t)nbytes, g_files[fd]);   /* raw bytes, no swap */
++    size_t n = ps3_asset_io_read(g_files[fd], vm_base + buf, (size_t)nbytes);   /* raw bytes, no swap */
+     /* PS3_FSLOG_EOF=<fd>,<bytes>: report end-of-file past <bytes> on one descriptor.
+      * The intro cinematic is 28 seconds and this port renders it at a few frames
+      * a second, so it cannot be watched to its end -- truncating the stream makes
+@@ -843,17 +846,6 @@ static void cellFsSdataOpenByFd(ppu_context* ctx)
+  * submit call returns. A title that submits, THEN arms the thing the callback
+  * signals, would miss it -- move completion to a worker thread if one shows up.
+  */
+-#ifdef _WIN32
+-#  define HOST_FSEEK64(f,off) _fseeki64((f), (__int64)(off), SEEK_SET)
+-#  define HOST_FTELL64(f)     _ftelli64(f)
+-#  define HOST_LOCKFILE(f)    _lock_file(f)
+-#  define HOST_UNLOCKFILE(f)  _unlock_file(f)
+-#else
+-#  define HOST_FSEEK64(f,off) fseeko((f), (off_t)(off), SEEK_SET)
+-#  define HOST_FTELL64(f)     ftello(f)
+-#  define HOST_LOCKFILE(f)    flockfile(f)
+-#  define HOST_UNLOCKFILE(f)  funlockfile(f)
+-#endif
+ 
+ static uint32_t guest_be32(uint32_t a)
+ {
+@@ -893,20 +885,10 @@ static void cellFsAioRead(ppu_context* ctx)
+     if (fd >= 0 && fd < FS_MAX && g_files[fd]) {
+         if (ppu_vm_size && (uint64_t)buf + size > ppu_vm_size) size = ppu_vm_size - buf;
+         fs_prefault(buf, size);
+-        /* AIO reads are absolute: they must not move the fd's own position,
+-         * and the guest issues them from several threads at once (FIOS media
+-         * threads, audio streamers) on the same fd as its plain reads. A bare
+-         * seek + read on the shared FILE* did both: another thread's seek
+-         * could land between the two, and the next cellFsRead continued from
+-         * wherever the AIO stopped. Hold the stream lock across seek, read
+-         * and the seek back (stdio's own calls take the same lock). */
+-        FILE* f = g_files[fd];
+-        HOST_LOCKFILE(f);
+-        const int64_t pos = (int64_t)HOST_FTELL64(f);
+-        if (HOST_FSEEK64(f, offset) == 0)
+-            n = fread(vm_base + buf, 1, (size_t)size, f);
+-        if (pos >= 0) HOST_FSEEK64(f, pos);
+-        HOST_UNLOCKFILE(f);
++        /* Positional reads preserve the descriptor cursor. Cache misses use
++         * a separate native handle; fallback streams retain locked stdio I/O.
++         * Completion remains on this guest context, as before. */
++        n = ps3_asset_io_read_at(g_files[fd], vm_base + buf, (size_t)size, offset);
+         err = CELL_OK;
+     }
+     if (getenv("PS3_FSLOG"))
+diff --git a/runtime/syscalls/sys_fs.c b/runtime/syscalls/sys_fs.c
+index 505e9ca..a27854d 100644
+--- a/runtime/syscalls/sys_fs.c
++++ b/runtime/syscalls/sys_fs.c
+@@ -3,6 +3,7 @@
+  */
+ 
+ #include "sys_fs.h"
++#include "ps3emu/asset_io.h"
+ #include "../../libs/filesystem/edat.h"
+ #include "../memory/vm.h"
+ #include <string.h>
+@@ -470,6 +471,7 @@ int64_t sys_fs_open(ppu_context* ctx)
+     sys_fs_fd_info* f = &g_sys_fs_fds[slot];
+     f->active = 1;
+     f->fp     = fp;
++    ps3_asset_io_attach(fp, ps3_path, (uint32_t)flags);
+     f->flags  = flags;
+     strncpy(f->path, host_path, sizeof(f->path) - 1);
+     f->path[sizeof(f->path) - 1] = '\0';
+@@ -512,7 +514,7 @@ int64_t sys_fs_read(ppu_context* ctx)
+      * as a read error on every movie and never decoded a frame -- solid green
+      * video. ppu_fs.cpp fs_prefault is the same fix for cellFs. */
+     if (size) vm_commit(buf_addr, (uint32_t)size);
+-    size_t nread = fread(buf, 1, (size_t)size, f->fp);
++    size_t nread = ps3_asset_io_read(f->fp, buf, (size_t)size);
+ 
+     /* PS3_FSSTAT=1: how the guest reads its data. Loading a 1.8 GB archive is
+      * cheap if it comes in large blocks and catastrophic if it comes in 512-byte
+@@ -623,6 +625,7 @@ int64_t sys_fs_close(ppu_context* ctx)
+         return (int64_t)(int32_t)CELL_EBADF;
+ 
+     if (f->fp) {
++        ps3_asset_io_detach(f->fp);
+         fclose(f->fp);
+         f->fp = NULL;
+     }
+diff --git a/include/ps3emu/asset_io.h b/include/ps3emu/asset_io.h
+new file mode 100644
+index 0000000..9e079d9
+--- /dev/null
++++ b/include/ps3emu/asset_io.h
+@@ -0,0 +1,31 @@
++#ifndef PS3EMU_ASSET_IO_H
++#define PS3EMU_ASSET_IO_H
++#include <stdint.h>
++#include <stddef.h>
++#include <stdio.h>
++#ifdef __cplusplus
++extern "C" {
++#endif
++/* Register only immutable disc/app_home opens with unmodified read-only flags.
++ * The owner must detach before fclose. Unregistered streams retain stdio behavior.
++ * Absolute reads never move the stream cursor; sequential reads do. */
++typedef struct ps3_asset_io_stats {
++    uint64_t cache_hits, host_reads, host_bytes, evictions;
++    uint64_t resident_bytes, budget_bytes;
++    uint64_t buffer_allocations;
++    uint64_t preloaded_blocks;
++    uint64_t preload_hits;
++    uint64_t demand_reads, demand_us;
++} ps3_asset_io_stats;
++void ps3_asset_io_attach(FILE* stream, const char* guest_path, uint32_t flags);
++void ps3_asset_io_detach(FILE* stream);
++size_t ps3_asset_io_read(FILE* stream, void* dst, size_t size);
++size_t ps3_asset_io_read_at(FILE* stream, void* dst, size_t size, uint64_t offset);
++void ps3_asset_io_get_stats(ps3_asset_io_stats* out);
++void ps3_asset_io_report(void);
++/* Optional host-side barrier for diagnostics/tests; guest reads never use it. */
++void ps3_asset_io_wait_idle(void);
++#ifdef __cplusplus
++}
++#endif
++#endif
+diff --git a/runtime/io/asset_io.cpp b/runtime/io/asset_io.cpp
+new file mode 100644
+index 0000000..838d8a3
+--- /dev/null
++++ b/runtime/io/asset_io.cpp
+@@ -0,0 +1,533 @@
++/* Immutable game data: shared bounded block cache with positional host I/O.
++ * Never cache writable mounts. No guest callbacks or guest addresses live here.
++ */
++#include "ps3emu/asset_io.h"
++#include <algorithm>
++#include <atomic>
++#include <array>
++#include <cerrno>
++#include <cstring>
++#include <cstdlib>
++#include <condition_variable>
++#include <chrono>
++#include <deque>
++#include <list>
++#include <memory>
++#include <mutex>
++#include <thread>
++#include <unordered_map>
++#include <vector>
++#ifdef _WIN32
++#define WIN32_LEAN_AND_MEAN
++#define NOMINMAX
++#include <windows.h>
++#include <io.h>
++#define IO_TELL _ftelli64
++#define IO_SEEK _fseeki64
++#define IO_LOCK _lock_file
++#define IO_UNLOCK _unlock_file
++#else
++#include <sys/stat.h>
++#include <unistd.h>
++#define IO_TELL ftello
++#define IO_SEEK fseeko
++#define IO_LOCK flockfile
++#define IO_UNLOCK funlockfile
++#endif
++
++namespace {
++constexpr size_t BLOCK_SIZE = 64 * 1024;
++constexpr size_t MAX_CACHED_READ = 1024 * 1024;
++constexpr size_t MAX_TRACE_RECORDS = 4096;
++constexpr char TRACE_MAGIC[8] = {'P', 'S', '3', 'I', 'O', '0', '1', '\0'};
++
++struct stream_lock {
++    FILE* f;
++    explicit stream_lock(FILE* stream) : f(stream) { IO_LOCK(f); }
++    ~stream_lock() { IO_UNLOCK(f); }
++};
++
++struct source {
++    std::array<uint64_t, 5> identity{};
++    uint64_t size = 0;
++#ifdef _WIN32
++    HANDLE handle = INVALID_HANDLE_VALUE;
++    ~source() { if (handle != INVALID_HANDLE_VALUE) CloseHandle(handle); }
++#else
++    int handle = -1;
++    ~source() { if (handle >= 0) close(handle); }
++#endif
++    std::unique_ptr<std::array<char, 512>> guest_path;
++};
++
++// Local cache metadata, same host/endian as the recording; never contains assets.
++struct trace_record {
++    std::array<uint64_t, 5> identity;
++    uint64_t offset, size;
++    std::array<char, 512> guest_path;
++};
++static_assert(sizeof(trace_record) == 568, "trace format changed: bump magic");
++struct preload_job { std::shared_ptr<source> file; uint64_t offset, size; };
++
++struct block {
++    std::mutex mutex;
++    std::vector<unsigned char> bytes;
++    size_t valid = 0;
++    bool loaded = false;
++    bool prefetched = false; // protected by this block's mutex
++    bool speculative = false; // protected by cache_state::mutex
++    explicit block() : bytes(BLOCK_SIZE) {}
++};
++// Full identity equality avoids aliasing distinct files even on hash collisions.
++struct cache_key {
++    std::array<uint64_t, 5> identity;
++    uint64_t offset;
++    bool operator==(const cache_key& other) const
++    {
++        return offset == other.offset && identity == other.identity;
++    }
++};
++struct cache_key_hash {
++    size_t operator()(const cache_key& key) const
++    {
++        size_t hash = (size_t)key.offset;
++        for (uint64_t word : key.identity)
++            hash ^= (size_t)word + size_t(0x9e3779b97f4a7c15ull) + (hash << 6) + (hash >> 2);
++        return hash;
++    }
++};
++struct cache_entry {
++    std::shared_ptr<block> data;
++    std::list<cache_key>::iterator lru;
++};
++
++struct cache_state {
++    std::mutex mutex;
++    std::unordered_map<FILE*, std::shared_ptr<source>> streams;
++    std::unordered_map<cache_key, cache_entry, cache_key_hash> blocks;
++    std::list<cache_key> lru;
++    size_t budget = 64 * 1024 * 1024;
++    std::atomic<uint64_t> hits{0}, reads{0}, bytes{0}, evictions{0};
++    std::atomic<uint64_t> requests{0};
++    uint64_t buffer_allocations = 0; // guarded by mutex; measures allocation churn
++    size_t speculative_blocks = 0;
++    std::atomic<uint64_t> preloaded_blocks{0};
++    std::atomic<uint64_t> preload_hits{0};
++    std::mutex trace_mutex, queue_mutex;
++    FILE* recording = nullptr;
++    size_t recorded = 0;
++    std::vector<trace_record> trace;
++    std::deque<preload_job> jobs;
++    std::condition_variable queue_changed;
++    std::thread worker;
++    std::atomic<bool> stopping{false};
++    bool active = false;
++    bool announced = false;
++    bool stats = false;
++    bool streaming = false;
++    bool timing = false;
++    std::atomic<uint64_t> demand_reads{0}, demand_us{0};
++    cache_state()
++    {
++        if (const char* value = std::getenv("PS3_IO_CACHE_MB")) {
++            char* end = nullptr;
++            unsigned long mb = std::strtoul(value, &end, 10);
++            if (*value && !*end && mb <= 1024) budget = size_t(mb) * 1024 * 1024;
++        }
++        const char* value = std::getenv("PS3_IO_STATS");
++        stats = value && std::strcmp(value, "0");
++        value = std::getenv("PS3_IO_TIMING");
++        timing = value && std::strcmp(value, "0");
++        if (!budget) return;
++        // Recording wins over replay. Flush complete records so ExitProcess can
++        // leave a useful trace without relying on C++ destructors at game exit.
++        const char* record_path = std::getenv("PS3_IO_TRACE_RECORD");
++        if (record_path && *record_path) {
++            recording = std::fopen(record_path, "wb");
++            if (recording) {
++                if (std::fwrite(TRACE_MAGIC, 1, sizeof TRACE_MAGIC, recording) != sizeof TRACE_MAGIC) {
++                    std::fclose(recording); recording = nullptr;
++                } else std::fflush(recording);
++            }
++            streaming = recording != nullptr;
++            return;
++        }
++        const char* preload_path = std::getenv("PS3_IO_PRELOAD");
++        if (!preload_path || !*preload_path) return;
++        FILE* input = std::fopen(preload_path, "rb");
++        if (!input) return;
++        char magic[8];
++        if (std::fread(magic, 1, sizeof magic, input) == sizeof magic && !std::memcmp(magic, TRACE_MAGIC, sizeof magic)) {
++            try {
++                trace_record entry{};
++                while (trace.size() < MAX_TRACE_RECORDS && std::fread(&entry, 1, sizeof entry, input) == sizeof entry) {
++                    if (!entry.guest_path[0] || entry.guest_path.back() || !entry.size || entry.size > MAX_CACHED_READ ||
++                        entry.offset >= entry.identity[2] || entry.size > entry.identity[2] - entry.offset) continue;
++                    trace.push_back(entry);
++                }
++            } catch (const std::bad_alloc&) { trace.clear(); }
++        }
++        std::fclose(input);
++        streaming = !trace.empty();
++    }
++    ~cache_state()
++    {
++        { std::lock_guard<std::mutex> guard(queue_mutex); stopping = true; }
++        queue_changed.notify_all();
++        if (worker.joinable()) worker.join();
++        if (recording) std::fclose(recording);
++        if (stats) std::fprintf(stderr,
++            "[asset_io] hits=%llu host_reads=%llu host_MB=%.2f evictions=%llu cache_MB=%.2f/%.2f\n",
++            (unsigned long long)hits.load(), (unsigned long long)reads.load(),
++            bytes.load() / 1048576.0, (unsigned long long)evictions.load(),
++            blocks.size() * BLOCK_SIZE / 1048576.0, budget / 1048576.0);
++    }
++};
++cache_state& state() { static cache_state s; return s; }
++
++struct demand_timer {
++    cache_state* counters = nullptr;
++    std::chrono::steady_clock::time_point start;
++    demand_timer()
++    {
++        auto& s = state();
++        if (s.timing) { counters = &s; start = std::chrono::steady_clock::now(); }
++    }
++    ~demand_timer()
++    {
++        if (!counters) return;
++        auto us = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start).count();
++        counters->demand_reads.fetch_add(1, std::memory_order_relaxed);
++        counters->demand_us.fetch_add((uint64_t)us, std::memory_order_relaxed);
++    }
++};
++
++std::shared_ptr<source> find_source(FILE* f)
++{
++    auto& s = state();
++    std::lock_guard<std::mutex> guard(s.mutex);
++    auto it = s.streams.find(f);
++    return it == s.streams.end() ? nullptr : it->second;
++}
++
++void report_stats()
++{
++    ps3_asset_io_stats snapshot{};
++    ps3_asset_io_get_stats(&snapshot);
++    std::fprintf(stderr, "[asset_io] hits=%llu host_reads=%llu host_MB=%.2f evictions=%llu cache_MB=%.2f/%.2f preload=%llu used=%llu demand_reads=%llu demand_ms=%.3f\n",
++        (unsigned long long)snapshot.cache_hits, (unsigned long long)snapshot.host_reads,
++        snapshot.host_bytes / 1048576.0, (unsigned long long)snapshot.evictions,
++        snapshot.resident_bytes / 1048576.0, snapshot.budget_bytes / 1048576.0,
++        (unsigned long long)snapshot.preloaded_blocks, (unsigned long long)snapshot.preload_hits,
++        (unsigned long long)snapshot.demand_reads, snapshot.demand_us / 1000.0);
++}
++
++size_t host_read(const source& src, void* dst, size_t count, uint64_t offset)
++{
++    size_t done = 0;
++    while (done < count) {
++        const size_t part = std::min(count - done, size_t(16 * 1024 * 1024));
++#ifdef _WIN32
++        OVERLAPPED op{};
++        op.Offset = (DWORD)(offset + done);
++        op.OffsetHigh = (DWORD)((offset + done) >> 32);
++        op.hEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
++        if (!op.hEvent) break;
++        DWORD got = 0;
++        BOOL ok = ReadFile(src.handle, (unsigned char*)dst + done, (DWORD)part, &got, &op);
++        if (!ok && GetLastError() == ERROR_IO_PENDING)
++            ok = GetOverlappedResult(src.handle, &op, &got, TRUE);
++        CloseHandle(op.hEvent);
++        if (!ok) break;
++#else
++        ssize_t got = pread(src.handle, (unsigned char*)dst + done, part, (off_t)(offset + done));
++        if (got < 0 && errno == EINTR) continue;
++        if (got < 0) break;
++#endif
++        state().reads.fetch_add(1, std::memory_order_relaxed);
++        state().bytes.fetch_add((uint64_t)got, std::memory_order_relaxed);
++        done += (size_t)got;
++        if ((size_t)got < part) break;
++    }
++    return done;
++}
++
++template<bool Speculative = false, bool Streaming = false>
++std::shared_ptr<block> acquire_block(const source& src, uint64_t offset)
++{
++    auto& s = state();
++    const cache_key key{src.identity, offset};
++    std::lock_guard<std::mutex> guard(s.mutex);
++    auto it = s.blocks.find(key);
++    if (it != s.blocks.end()) {
++        if constexpr (!Speculative) {
++            s.lru.splice(s.lru.begin(), s.lru, it->second.lru);
++            s.hits.fetch_add(1, std::memory_order_relaxed);
++            if constexpr (Streaming) {
++                if (it->second.data->speculative) { it->second.data->speculative = false; --s.speculative_blocks; }
++            }
++        }
++        return it->second.data;
++    }
++    if constexpr (Speculative) {
++        if (s.speculative_blocks >= std::min(size_t(256), s.budget / BLOCK_SIZE / 4) ||
++        (s.blocks.size() + 1) * BLOCK_SIZE > s.budget) return nullptr;
++    }
++    std::shared_ptr<block> data;
++    while ((s.blocks.size() + 1) * BLOCK_SIZE > s.budget) {
++        auto victim = s.lru.end();
++        for (auto p = s.lru.end(); p != s.lru.begin();) {
++            --p;
++            if (s.blocks.at(*p).data.use_count() == 1) { victim = p; break; }
++        }
++        // All storage is pinned by current readers: bypass without allocating.
++        if (victim == s.lru.end()) return nullptr;
++        if constexpr (Streaming) {
++            if (s.blocks.at(*victim).data->speculative) --s.speculative_blocks;
++        }
++        // No reader owns this block: retain its allocation without clearing 64 KB.
++        data = std::move(s.blocks.at(*victim).data);
++        s.blocks.erase(*victim);
++        s.lru.erase(victim);
++        s.evictions.fetch_add(1, std::memory_order_relaxed);
++    }
++    if (!data) {
++        data = std::make_shared<block>();
++        ++s.buffer_allocations;
++    }
++    data->valid = 0;
++    data->loaded = false;
++    data->prefetched = false;
++    data->speculative = Speculative;
++    s.lru.push_front(key);
++    auto position = s.lru.begin();
++    if constexpr (Speculative) s.lru.splice(s.lru.end(), s.lru, position);
++    try { s.blocks.emplace(key, cache_entry{data, position}); }
++    catch (...) { s.lru.erase(position); throw; }
++    if constexpr (Speculative) ++s.speculative_blocks;
++    return data;
++}
++
++void record_read(const source& src, uint64_t offset, size_t count)
++{
++    auto& s = state();
++    if (!s.recording || !src.guest_path) return;
++    std::lock_guard<std::mutex> guard(s.trace_mutex);
++    if (s.recorded >= MAX_TRACE_RECORDS) return;
++    const trace_record entry{src.identity, offset, count, *src.guest_path};
++    if (std::fwrite(&entry, 1, sizeof entry, s.recording) == sizeof entry && !std::fflush(s.recording))
++        ++s.recorded;
++    else s.recorded = MAX_TRACE_RECORDS;
++}
++
++void preload_worker(cache_state& s)
++{
++#ifdef _WIN32
++    // This adjusts I/O as well as CPU priority; only the current worker changes.
++    const bool background = SetThreadPriority(GetCurrentThread(), THREAD_MODE_BACKGROUND_BEGIN) != 0;
++    if (!background) SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
++#endif
++    for (;;) {
++        preload_job job;
++        {
++            std::unique_lock<std::mutex> lock(s.queue_mutex);
++            s.queue_changed.wait(lock, [&] { return s.stopping.load() || !s.jobs.empty(); });
++            if (s.stopping) break;
++            job = std::move(s.jobs.front()); s.jobs.pop_front(); s.active = true;
++        }
++        try {
++            uint64_t end = job.offset + job.size;
++            for (uint64_t base = job.offset / BLOCK_SIZE * BLOCK_SIZE; base < end && !s.stopping; base += BLOCK_SIZE) {
++                auto data = acquire_block<true, true>(*job.file, base);
++                if (!data) continue;
++                std::unique_lock<std::mutex> lock(data->mutex, std::try_to_lock);
++                if (!lock.owns_lock() || data->loaded) continue;
++                size_t want = (size_t)std::min<uint64_t>(BLOCK_SIZE, job.file->size - base);
++                data->valid = host_read(*job.file, data->bytes.data(), want, base);
++                data->loaded = data->valid == want;
++                data->prefetched = data->loaded;
++                if (data->loaded) s.preloaded_blocks.fetch_add(1, std::memory_order_relaxed);
++            }
++        } catch (const std::bad_alloc&) { /* Speculation must never stop gameplay. */ }
++        { std::lock_guard<std::mutex> guard(s.queue_mutex); s.active = false; }
++        s.queue_changed.notify_all();
++    }
++#ifdef _WIN32
++    if (background) SetThreadPriority(GetCurrentThread(), THREAD_MODE_BACKGROUND_END);
++#endif
++}
++
++void schedule_preload(const std::shared_ptr<source>& src)
++{
++    auto& s = state();
++    if (s.trace.empty() || !src->guest_path) return;
++    std::lock_guard<std::mutex> guard(s.queue_mutex);
++    for (const auto& entry : s.trace) {
++        if (s.jobs.size() >= 64 || s.stopping) break;
++        if (entry.identity != src->identity || std::strcmp(entry.guest_path.data(), src->guest_path->data())) continue;
++        if (!s.worker.joinable()) s.worker = std::thread([&s] { preload_worker(s); });
++        s.jobs.push_back({src, entry.offset, entry.size});
++        s.queue_changed.notify_all();
++    }
++}
++
++template<bool Streaming>
++size_t cached_read_impl(const source& src, void* dst, size_t count, uint64_t offset)
++{
++    auto& s = state();
++    if (s.stats && (s.requests.fetch_add(1, std::memory_order_relaxed) & 511) == 511)
++        report_stats();
++    if (offset >= src.size) return 0;
++    count = (size_t)std::min<uint64_t>(count, src.size - offset);
++    if (count > MAX_CACHED_READ) return host_read(src, dst, count, offset);
++    if constexpr (Streaming) {
++        if (s.recording && count) record_read(src, offset, count);
++    }
++    size_t done = 0;
++    while (done < count) {
++        uint64_t base = (offset + done) / BLOCK_SIZE * BLOCK_SIZE;
++        size_t inside = (size_t)(offset + done - base);
++        size_t part = std::min(count - done, BLOCK_SIZE - inside);
++        auto data = acquire_block<false, Streaming>(src, base);
++        if (!data) return done + host_read(src, (unsigned char*)dst + done, count - done, offset + done);
++        std::lock_guard<std::mutex> guard(data->mutex);
++        if (!data->loaded) {
++            const size_t want = (size_t)std::min<uint64_t>(BLOCK_SIZE, src.size - base);
++            data->valid = host_read(src, data->bytes.data(), want, base);
++            data->loaded = data->valid == want; // failed/short blocks are retried
++        }
++        if (inside >= data->valid) break;
++        if constexpr (Streaming) {
++            if (data->prefetched) { s.preload_hits.fetch_add(1, std::memory_order_relaxed); data->prefetched = false; }
++        }
++        part = std::min(part, data->valid - inside);
++        std::memcpy((unsigned char*)dst + done, data->bytes.data() + inside, part);
++        done += part;
++    }
++    return done;
++}
++
++}
++
++extern "C" void ps3_asset_io_attach(FILE* f, const char* path, uint32_t flags)
++{
++    // Only immutable mount points; never cache save data even when opened rb.
++    if (!f || !path || flags || !state().budget) return;
++    if (std::strncmp(path, "/dev_bdvd/", 10) && std::strncmp(path, "/app_home/", 10)) return;
++    if (std::strstr(path, "..")) return;
++    try {
++        auto src = std::make_shared<source>();
++        if (state().streaming && std::strlen(path) < 512) {
++            src->guest_path = std::make_unique<std::array<char, 512>>();
++            std::strcpy(src->guest_path->data(), path);
++        }
++#ifdef _WIN32
++        HANDLE original = (HANDLE)_get_osfhandle(_fileno(f));
++        BY_HANDLE_FILE_INFORMATION info{};
++        if (!GetFileInformationByHandle(original, &info) || (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) return;
++        src->handle = ReOpenFile(original, GENERIC_READ,
++            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, FILE_FLAG_OVERLAPPED);
++        if (src->handle == INVALID_HANDLE_VALUE) return;
++        src->size = (uint64_t(info.nFileSizeHigh) << 32) | info.nFileSizeLow;
++        src->identity = {info.dwVolumeSerialNumber,
++            (uint64_t(info.nFileIndexHigh) << 32) | info.nFileIndexLow, src->size,
++            (uint64_t(info.ftLastWriteTime.dwHighDateTime) << 32) | info.ftLastWriteTime.dwLowDateTime, 0};
++#else
++        struct stat info{};
++        if (fstat(fileno(f), &info) || !S_ISREG(info.st_mode)) return;
++        src->handle = dup(fileno(f));
++        if (src->handle < 0) return;
++        src->size = (uint64_t)info.st_size;
++#ifdef __APPLE__
++        const uint64_t nanoseconds = (uint64_t)info.st_mtimespec.tv_nsec;
++#else
++        const uint64_t nanoseconds = (uint64_t)info.st_mtim.tv_nsec;
++#endif
++        src->identity = {(uint64_t)info.st_dev, (uint64_t)info.st_ino, src->size,
++            (uint64_t)info.st_mtime, nanoseconds};
++#endif
++        auto& s = state();
++        {
++            std::lock_guard<std::mutex> guard(s.mutex);
++            s.streams[f] = src;
++            if (s.stats && !s.announced) {
++                std::fprintf(stderr, "[asset_io] enabled: %zu MB, %zu KB blocks; first immutable open '%s'\n",
++                    s.budget / (1024 * 1024), BLOCK_SIZE / 1024, path);
++                s.announced = true;
++            }
++        }
++        schedule_preload(src);
++    } catch (const std::bad_alloc&) { /* Optional cache: retain original I/O. */ }
++    catch (const std::system_error&) { /* A missing worker leaves demand reads intact. */ }
++}
++
++extern "C" void ps3_asset_io_detach(FILE* f)
++{
++    auto& s = state();
++    bool registered;
++    {
++        std::lock_guard<std::mutex> guard(s.mutex);
++        registered = s.streams.erase(f) != 0;
++    }
++    if (registered && s.stats) report_stats();
++}
++
++extern "C" size_t ps3_asset_io_read(FILE* f, void* dst, size_t size)
++{
++    demand_timer timer;
++    if (!state().budget || !size) return std::fread(dst, 1, size, f);
++    stream_lock guard(f);
++    auto src = find_source(f);
++    int64_t offset = IO_TELL(f);
++    // Use stdio for EOF/short reads, preserving feof/ferror exactly there.
++    if (!src || offset < 0 || (uint64_t)offset > src->size || size > src->size - (uint64_t)offset)
++        return std::fread(dst, 1, size, f);
++    size_t got;
++    try {
++        got = state().streaming ? cached_read_impl<true>(*src, dst, size, (uint64_t)offset)
++                                : cached_read_impl<false>(*src, dst, size, (uint64_t)offset);
++    }
++    catch (const std::bad_alloc&) { return std::fread(dst, 1, size, f); }
++    if (got != size) return std::fread(dst, 1, size, f);
++    if (IO_SEEK(f, offset + (int64_t)got, SEEK_SET)) return 0;
++    return got;
++}
++
++extern "C" size_t ps3_asset_io_read_at(FILE* f, void* dst, size_t size, uint64_t offset)
++{
++    demand_timer timer;
++    if (offset > INT64_MAX) return 0;
++    auto src = find_source(f);
++    if (src) {
++        try {
++            return state().streaming ? cached_read_impl<true>(*src, dst, size, offset)
++                                     : cached_read_impl<false>(*src, dst, size, offset);
++        }
++        catch (const std::bad_alloc&) { return host_read(*src, dst, size, offset); }
++    }
++    stream_lock guard(f);
++    int64_t previous = IO_TELL(f);
++    if (previous < 0 || IO_SEEK(f, (int64_t)offset, SEEK_SET)) return 0;
++    size_t got = std::fread(dst, 1, size, f);
++    IO_SEEK(f, previous, SEEK_SET);
++    return got;
++}
++
++extern "C" void ps3_asset_io_get_stats(ps3_asset_io_stats* out)
++{
++    if (!out) return;
++    auto& s = state();
++    std::lock_guard<std::mutex> guard(s.mutex);
++    *out = {s.hits.load(), s.reads.load(), s.bytes.load(), s.evictions.load(),
++        s.blocks.size() * BLOCK_SIZE, s.budget, s.buffer_allocations, s.preloaded_blocks.load(), s.preload_hits.load(),
++        s.demand_reads.load(), s.demand_us.load()};
++}
++
++extern "C" void ps3_asset_io_wait_idle(void)
++{
++    auto& s = state();
++    std::unique_lock<std::mutex> lock(s.queue_mutex);
++    s.queue_changed.wait(lock, [&] { return s.jobs.empty() && !s.active; });
++}
++
++extern "C" void ps3_asset_io_report(void) { report_stats(); }
