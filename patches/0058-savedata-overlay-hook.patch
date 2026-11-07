@@ -1,0 +1,198 @@
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index 3522c80..f8f4fa4 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -379,6 +380,31 @@ typedef struct {
+ } D3D12State;
+ 
+ static D3D12State s_d3d;
++static rsx_d3d12_output_pass s_output_pass;
++static int s_output_pass_ready;
++static rsx_d3d12_host_overlay s_host_overlay;
++static int s_host_overlay_ready;
++
++int rsx_d3d12_backend_set_host_overlay(const rsx_d3d12_host_overlay* overlay)
++{
++    if (s_d3d.device) return -1;
++    if (!overlay) { memset(&s_host_overlay, 0, sizeof(s_host_overlay)); return 0; }
++    if (!overlay->initialize || !overlay->record || !overlay->input || !overlay->shutdown)
++        return -1;
++    s_host_overlay = *overlay;
++    return 0;
++}
++
++int rsx_d3d12_backend_set_output_pass(const rsx_d3d12_output_pass* pass)
++{
++    if (s_d3d.device) return -1;
++    if (!pass) { memset(&s_output_pass, 0, sizeof(s_output_pass)); return 0; }
++    if (!pass->initialize || !pass->record || !pass->shutdown ||
++        !pass->width || !pass->height || pass->width > 8192 || pass->height > 8192)
++        return -1;
++    s_output_pass = *pass;
++    return 0;
++}
+ 
+ typedef struct VPDiagnosticOptions {
+     int vertex_dump;
+@@ -802,6 +849,14 @@ static u32    s_lock_n  = 0;
+ 
+ static LRESULT CALLBACK d3d12_wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
+ {
++    /* The host overlay (save picker) is modal: it sees the message first and
++     * consumes keys/mouse while it is open, including Esc -- which otherwise
++     * closes the game in the switch below. */
++    if (s_host_overlay_ready && s_host_overlay.input &&
++        s_host_overlay.input(s_host_overlay.userdata, msg,
++                             (unsigned long long)wp, (long long)lp))
++        return 0;
++
+     switch (msg) {
+     case WM_CLOSE:
+         s_d3d.window_closed = 1;
+@@ -989,13 +1085,48 @@ static int init_d3d12(u32 width, u32 height)
+ 
+     for (u32 i = 0; i < FRAME_COUNT; i++) {
+         hr = s_d3d.swap_chain->lpVtbl->GetBuffer(
+-            s_d3d.swap_chain, i, &IID_ID3D12Resource, (void**)&s_d3d.render_targets[i]);
++            s_d3d.swap_chain, i, &IID_ID3D12Resource,
++            s_output_pass.record ? (void**)&s_d3d.output_targets[i] : (void**)&s_d3d.render_targets[i]);
+         if (FAILED(hr)) return -1;
+ 
++        if (s_output_pass.record) {
++            D3D12_HEAP_PROPERTIES hp = {0}; hp.Type = D3D12_HEAP_TYPE_DEFAULT;
++            D3D12_RESOURCE_DESC desc = {0};
++            desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
++            desc.Width = width; desc.Height = height;
++            desc.DepthOrArraySize = 1; desc.MipLevels = 1;
++            desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
++            desc.SampleDesc.Count = 1;
++            desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
++            hr = s_d3d.device->lpVtbl->CreateCommittedResource(s_d3d.device, &hp,
++                D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_COMMON, NULL,
++                &IID_ID3D12Resource, (void**)&s_d3d.render_targets[i]);
++            if (FAILED(hr)) return -1;
++        }
++
+         s_d3d.device->lpVtbl->CreateRenderTargetView(
+             s_d3d.device, s_d3d.render_targets[i], NULL, rtv_handle);
+         rtv_handle.ptr += s_d3d.rtv_descriptor_size;
+     }
++    if (s_output_pass.record) {
++        if (s_output_pass.initialize(s_output_pass.userdata, s_d3d.device,
++                                    s_d3d.cmd_queue, width, height) != 0)
++            return -1;
++        s_output_pass_ready = 1;
++        fprintf(stderr, "[OUTPUT] internal=%ux%u presentation=%ux%u\n",
++                width, height, s_output_pass.width, s_output_pass.height);
++    }
++
++    if (s_host_overlay.initialize &&
++        s_host_overlay.initialize(s_host_overlay.userdata, s_d3d.device, s_d3d.cmd_queue,
++                                  width, height,
++                                  s_output_pass.record ? s_output_pass.width : width,
++                                  s_output_pass.record ? s_output_pass.height : height) == 0) {
++        s_host_overlay_ready = 1;
++        fprintf(stderr, "[OVERLAY] host overlay ready%c", 10);
++    } else if (s_host_overlay.initialize) {
++        fprintf(stderr, "[OVERLAY] host overlay init failed; continuing without it%c", 10);
++    }
+ 
+     /* ---------------------------------------------------------------
+      * Depth/stencil buffer
+@@ -6191,6 +6345,40 @@ skip_dump_consider: ;
+         s_d3d.cmd_list->lpVtbl->ResourceBarrier(s_d3d.cmd_list, 1, &barrier);
+     }
+ 
++    if (s_output_pass_ready && s_present_this_frame) {
++        if (s_output_pass.record(s_output_pass.userdata, s_d3d.cmd_list,
++                                s_d3d.render_targets[fi], s_d3d.output_targets[fi], fi) != 0) {
++            fprintf(stderr, "[OUTPUT] recording failed; closing output\n");
++            s_d3d.window_closed = 1;
++        }
++    }
++
++    /* Host overlay (save picker) on the final target: after FSR when it is on,
++     * otherwise straight on the swap-chain backbuffer. The target enters and
++     * leaves RENDER_TARGET inside this block; whatever state the rest of the
++     * present path expects is restored. */
++    if (s_host_overlay_ready && s_present_this_frame) {
++        ID3D12Resource* ot = s_output_pass_ready ? s_d3d.output_targets[fi]
++                                                 : s_d3d.render_targets[fi];
++        u32 ow = s_output_pass_ready ? s_output_pass.width : s_d3d.width;
++        u32 oh = s_output_pass_ready ? s_output_pass.height : s_d3d.height;
++        D3D12_RESOURCE_STATES before = s_output_pass_ready
++            ? D3D12_RESOURCE_STATE_COMMON : D3D12_RESOURCE_STATE_PRESENT;
++        if (ot && ow && oh) {
++            D3D12_RESOURCE_BARRIER ob = {0};
++            ob.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
++            ob.Transition.pResource = ot;
++            ob.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
++            ob.Transition.StateBefore = before;
++            ob.Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
++            s_d3d.cmd_list->lpVtbl->ResourceBarrier(s_d3d.cmd_list, 1, &ob);
++            s_host_overlay.record(s_host_overlay.userdata, s_d3d.cmd_list, ot, fi, ow, oh);
++            ob.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
++            ob.Transition.StateAfter = before;
++            s_d3d.cmd_list->lpVtbl->ResourceBarrier(s_d3d.cmd_list, 1, &ob);
++        }
++    }
++
+     /* Close and execute */
+     s_d3d.cmd_list->lpVtbl->Close(s_d3d.cmd_list);
+     ID3D12CommandList* cmd_lists[] = {(ID3D12CommandList*)s_d3d.cmd_list};
+@@ -8856,6 +9063,13 @@ void rsx_d3d12_backend_shutdown(void)
+     for (u32 i = 0; i < FRAME_COUNT; i++) {
+         if (s_d3d.cmd_allocators[i]) s_d3d.cmd_allocators[i]->lpVtbl->Release(s_d3d.cmd_allocators[i]);
+         if (s_d3d.render_targets[i]) s_d3d.render_targets[i]->lpVtbl->Release(s_d3d.render_targets[i]);
++        if (s_d3d.output_targets[i]) s_d3d.output_targets[i]->lpVtbl->Release(s_d3d.output_targets[i]);
++    }
++    if (s_output_pass_ready) {
++        s_output_pass.shutdown(s_output_pass.userdata); s_output_pass_ready = 0;
++    }
++    if (s_host_overlay_ready) {
++        s_host_overlay.shutdown(s_host_overlay.userdata); s_host_overlay_ready = 0;
+     }
+     if (s_d3d.rtv_heap) s_d3d.rtv_heap->lpVtbl->Release(s_d3d.rtv_heap);
+     if (s_d3d.swap_chain) s_d3d.swap_chain->lpVtbl->Release(s_d3d.swap_chain);
+diff --git a/libs/video/rsx_d3d12_backend.h b/libs/video/rsx_d3d12_backend.h
+index 6b45811..abb3383 100644
+--- a/libs/video/rsx_d3d12_backend.h
++++ b/libs/video/rsx_d3d12_backend.h
+@@ -40,6 +40,37 @@ extern "C" {
+  * Returns 0 on success, -1 on failure. */
+ int rsx_d3d12_backend_init(u32 width, u32 height, const char* title);
+ 
++/* Optional host output pass, registered before backend init. Guest render
++ * dimensions stay unchanged. Resources enter/leave record in COMMON state;
++ * record owns its descriptors and records on the supplied direct command list.
++ * Return 0 on success. All callbacks run on the render thread. */
++typedef struct rsx_d3d12_output_pass {
++    u32 width, height;
++    void* userdata;
++    int (*initialize)(void* userdata, void* device, void* queue, u32 input_width, u32 input_height);
++    int (*record)(void* userdata, void* command_list, void* input, void* output, u32 frame_index);
++    void (*shutdown)(void* userdata);
++} rsx_d3d12_output_pass;
++int rsx_d3d12_backend_set_output_pass(const rsx_d3d12_output_pass* pass);
++
++/* Optional host-drawn overlay (the save-data picker). It runs after the frame
++ * and after the output pass, on the finished presentation target, so it is
++ * visible regardless of FSR. `record` receives the target already transitioned
++ * to RENDER_TARGET and the backend restores the state it found. `input` sees
++ * window messages before the backend and returns non-zero to consume them. All
++ * callbacks run on the render thread. */
++typedef struct rsx_d3d12_host_overlay {
++    void* userdata;
++    int (*initialize)(void* userdata, void* device, void* queue,
++                      u32 internal_width, u32 internal_height,
++                      u32 output_width, u32 output_height);
++    int (*record)(void* userdata, void* command_list, void* target,
++                  u32 frame_index, u32 width, u32 height);
++    int (*input)(void* userdata, unsigned msg, unsigned long long wparam, long long lparam);
++    void (*shutdown)(void* userdata);
++} rsx_d3d12_host_overlay;
++int rsx_d3d12_backend_set_host_overlay(const rsx_d3d12_host_overlay* overlay);
++
+ /* Shut down the D3D12 backend and release all resources. */
+ void rsx_d3d12_backend_shutdown(void);
+ 

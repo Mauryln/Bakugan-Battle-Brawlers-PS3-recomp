@@ -715,6 +715,98 @@ static void harness_guest_caller(uint32_t opd, uint64_t a0, uint64_t a1,
     ppu_guest_call(opd, a0, a1, a2, a3, a4, a5, a6, a7);
 }
 
+#ifdef _WIN32
+/* Save data belongs to the player, not to the checkout the game happens to be
+ * launched from: default the root to %LOCALAPPDATA%\BakuganRecomp. The toolkit
+ * still honours PS3_GAMEDATA_ROOT, which tests and diagnostics use to point at
+ * a scratch directory, and an explicit value wins over this policy. */
+static void ensure_host_dirs(const char* path)
+{
+    char tmp[1200];
+    snprintf(tmp, sizeof tmp, "%s", path);
+    for (char* p = tmp + 1; *p; p++) {
+        if (*p == '\\' || *p == '/') {
+            char saved = *p;
+            *p = '\0';
+            CreateDirectoryA(tmp, NULL);
+            *p = saved;
+        }
+    }
+    CreateDirectoryA(tmp, NULL);
+}
+
+/* Copy every file under `from` into `to`, never replacing an existing one: a
+ * save made after the move is newer than anything the old tree holds. */
+static void copy_tree_missing(const char* from, const char* to)
+{
+    ensure_host_dirs(to);
+    char search[1300];
+    snprintf(search, sizeof search, "%s\\*", from);
+    WIN32_FIND_DATAA fd;
+    HANDLE h = FindFirstFileA(search, &fd);
+    if (h == INVALID_HANDLE_VALUE) return;
+    do {
+        if (!strcmp(fd.cFileName, ".") || !strcmp(fd.cFileName, "..")) continue;
+        char src[1300], dst[1300];
+        snprintf(src, sizeof src, "%s\\%s", from, fd.cFileName);
+        snprintf(dst, sizeof dst, "%s\\%s", to, fd.cFileName);
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
+            copy_tree_missing(src, dst);
+        else if (GetFileAttributesA(dst) == INVALID_FILE_ATTRIBUTES)
+            CopyFileA(src, dst, TRUE);
+    } while (FindNextFileA(h, &fd));
+    FindClose(h);
+}
+
+#define SAVEDATA_SUBPATH "\\dev_hdd0\\home\\00000001\\savedata"
+
+static void prepare_savedata_root(void)
+{
+    const char* explicit_root = getenv("PS3_GAMEDATA_ROOT");
+    if (explicit_root && *explicit_root) return;   /* caller chose the location */
+
+    const char* local = getenv("LOCALAPPDATA");
+    if (!local || !*local) return;                 /* keep the cwd-relative default */
+
+    char root[1024], savedata[1300], marker[1200];
+    snprintf(root, sizeof root, "%s\\BakuganRecomp", local);
+    snprintf(savedata, sizeof savedata, "%s" SAVEDATA_SUBPATH, root);
+    snprintf(marker, sizeof marker, "%s\\.gamedata-migrated", root);
+    ensure_host_dirs(root);
+    _putenv_s("PS3_GAMEDATA_ROOT", root);
+    printf("[boot] save data root: %s\n", root);
+
+    if (GetFileAttributesA(marker) != INVALID_FILE_ATTRIBUTES) return;
+
+    /* Pre-release builds kept saves beside the disc tree (or the cwd). Copy
+     * that tree once, then leave a marker so a deleted save cannot resurrect
+     * old files on the next boot. */
+    char legacy[1300], from[1300];
+    int migrated = 0;
+    static const char* const kLegacy[] = { "%s\\..\\gamedata", "%s\\gamedata", "." };
+    for (size_t i = 0; i < sizeof kLegacy / sizeof kLegacy[0]; i++) {
+        if (i < 2)
+            snprintf(legacy, sizeof legacy, kLegacy[i], ppu_vfs_root);
+        else
+            snprintf(legacy, sizeof legacy, "%s", kLegacy[i]);
+        snprintf(from, sizeof from, "%s" SAVEDATA_SUBPATH, legacy);
+        if (GetFileAttributesA(from) != INVALID_FILE_ATTRIBUTES) {
+            printf("[boot] migrating save data from %s\n", legacy);
+            copy_tree_missing(from, savedata);
+            migrated = 1;
+            break;
+        }
+    }
+    FILE* f = fopen(marker, "wb");
+    if (f) {
+        fprintf(f, "%s\n", migrated ? legacy : "none");
+        fclose(f);
+    }
+}
+#else
+static void prepare_savedata_root(void) {}
+#endif
+
 int main(int argc, char** argv)
 {
 #if defined(BAKUGAN_SPU_SSE41)
@@ -775,6 +867,7 @@ int main(int argc, char** argv)
 
     derive_vfs_root(argv[1]);
     printf("[boot] VFS root: %s\n", ppu_vfs_root);
+    prepare_savedata_root();
 
     /* Real title id (BLES00758) and title name, from the game's own PARAM.SFO.
      * cellGame/cellSaveData/sceNpTrophy build their /dev_hdd0/game/<id> paths
@@ -811,6 +904,10 @@ int main(int argc, char** argv)
 #ifdef _WIN32
     extern void bakugan_install_video();
     bakugan_install_video();
+    /* The firmware's save-data applet does not exist here; the in-game
+     * overlay stands in for it while cellSaveData blocks the guest. */
+    extern void bakugan_savedata_overlay_install(const char* vfs_root);
+    bakugan_savedata_overlay_install(ppu_vfs_root);
 #endif
 
     /* Install the guest-callback hook, then start the frame clock. It no-ops

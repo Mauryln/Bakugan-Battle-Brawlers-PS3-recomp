@@ -81,9 +81,10 @@ Saves live in `%LOCALAPPDATA%\BakuganRecomp\dev_hdd0\home\00000001\savedata`
 (set `PS3_GAMEDATA_ROOT` to override). The first launch copies the old
 `./gamedata` tree there once. `cellSaveDataListSave2` gives every manual save
 its own `...-NN` slot, `cellSaveDataFixedSave2` checkpoints update the current
-slot, and the system data keeps its fixed directory. Loading uses a native
-picker window (`PS3_SAVEDATA_UI=0` restores the headless defaults); the
-list/fixed delete entry points share the same callback flow.
+slot, and the system data keeps its fixed directory. Loading draws an in-game
+overlay over the finished frame (the game's `PIC1.PNG` backdrop and each slot's
+`ICON0.PNG`, keyboard/pad/mouse); `PS3_SAVEDATA_UI=0` restores the headless
+defaults. The list/fixed delete entry points share the same callback flow.
 
 ## Recent performance improvements
 
