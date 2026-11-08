@@ -28,6 +28,10 @@ El instalador copia los datos de PS3_GAME y extrae EBOOT.elf automáticamente
 con el RPCS3 portable incluido. Si RPCS3 no pudiera, puedes seleccionar tu
 EBOOT.elf descifrado de respaldo.
 
+También copia `shadercache/fp_v3.cache`, ya compilada por el backend. RPCS3
+sólo descifra EBOOT; no compila los shaders D3D12 del port. Los shaders que
+falten se compilan en el primer uso y se añaden a la caché.
+
 Al terminar, abre "Bakugan: Battle Brawlers" desde el escritorio, el menú Inicio
 o BakuganLauncher.exe de la carpeta instalada, y pulsa Jugar. El launcher se
 cierra solo al iniciar el juego.
@@ -59,8 +63,12 @@ ESTADO Y LÍMITES
   build incluye correcciones de caché/vértices y de invalidación al cargar
   partidas, pero falta validación amplia en más PC y partidas.
 - Cierre al entrar en algunas arenas de Battle Arena: en investigación. Se oculta
-  el slot 00 vacío del menú de carga y se incluye una caché de shaders completa.
-  Si vuelve a ocurrir, envía el log indicado arriba.
+  el slot 00 vacío del menú de carga y se incluye una caché de shaders v3
+  compilada por el backend (la v2 obsoleta se ignora). Si vuelve a ocurrir,
+  envía el log indicado arriba. RPCS3 no compila estos shaders; sólo descifra
+  EBOOT.BIN.
+- Historia/otras arenas con HUD o texturas incorrectas: en investigación; la
+  caché v3 se regenera con el backend actual. Enviar log si persiste.
 - Cobertura de mandos limitada: DS4 probado; DualSense/Switch Pro pendientes.
 - El sistema de guardado funciona, pero quedan casos límite por validar.
 - No hay actualizador automático.

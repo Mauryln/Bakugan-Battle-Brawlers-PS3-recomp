@@ -21,8 +21,10 @@ La versión del juego es BLES00758 (Europa, disco).
   incompleto y el slot `00` vacío se oculta del menú de carga.
 - Correcciones de caché de vértices y de invalidación de páginas al cargar
   partidas, leer archivos o decodificar PNG.
-- Se incluye una caché de shaders validada y el juego escribe un log en
-  `%LOCALAPPDATA%\BakuganRecomp\BakuganRecomp.log` para diagnosticar cierres.
+- Se incluye `shadercache/fp_v3.cache` compilada por el backend y el juego
+  escribe un log en `%LOCALAPPDATA%\BakuganRecomp\BakuganRecomp.log` para
+  diagnosticar cierres. La caché v2 antigua se ignora para no reutilizar DXBC
+  obsoleto.
 
 ## Limitaciones conocidas
 
@@ -36,6 +38,10 @@ La versión del juego es BLES00758 (Europa, disco).
   build oculta el slot 00 vacío del menú de carga, incluye una caché de shaders
   completa y escribe un log de ejecución; confirmar si desaparece. Si vuelve a
   cerrarse, adjuntar `%LOCALAPPDATA%\BakuganRecomp\BakuganRecomp.log`.
+- **Historia/otras arenas con HUD o texturas incorrectas:** en investigación.
+  La caché de shaders v3 se regenera con el backend actual y la v2 obsoleta se
+  ignora; si persiste, adjuntar el log. No se puede usar RPCS3 para compilar
+  estos shaders: RPCS3 sólo descifra EBOOT.BIN.
 - Cobertura de hardware incompleta: DS4 probado; DualSense y Switch Pro sin
   validación física.
 - Sistema de guardado con casos límite pendientes (escritura, slots antiguos y
@@ -79,8 +85,8 @@ Ajustes: `%LOCALAPPDATA%\BakuganRecomp\player.ini`
 - Launcher instalado arranca el juego instalado, sin consola y con el título
   limpio; el launcher se cierra al iniciar el juego.
 - Replays de historia y batalla usados para validar imagen y HUD.
-- Caché de shaders validada incluida en el instalador; el juego escribe log en
-  `%LOCALAPPDATA%\BakuganRecomp\BakuganRecomp.log`.
+- Caché de shaders `fp_v3.cache` incluida; el juego escribe log en
+  `%LOCALAPPDATA%\BakuganRecomp\BakuganRecomp.log`. La v2 antigua se ignora.
 
 ## Gracias
 

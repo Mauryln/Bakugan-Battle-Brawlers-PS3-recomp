@@ -218,6 +218,7 @@ namespace BakuganInstaller
             totalBytes = 0; copiedBytes = 0;
             CountTree(payload);
             CopyTree(payload, o.Dir, 0, 30);
+            try { File.Delete(Path.Combine(o.Dir, "shadercache", "fp_v2.cache")); } catch { }
             log.AppendLine("payload copied to " + o.Dir);
 
             bool already;

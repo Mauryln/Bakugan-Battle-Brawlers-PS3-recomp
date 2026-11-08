@@ -1,0 +1,11 @@
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -2695,7 +2695,7 @@
+  *
+  * Format, all host order: [u64 source hash][u32 size][size bytes of DXBC]... */
+-#define FP_CACHE_FILE "shadercache/fp_v2.cache"
++#define FP_CACHE_FILE "shadercache/fp_v3.cache"
+ #define FP_CACHE_MAX_RECORD (1u << 20)
+ #define FP_CACHE_MAX_FILE   (1u << 26)
+ /* Written field by field: sizeof(struct) would carry alignment padding. */

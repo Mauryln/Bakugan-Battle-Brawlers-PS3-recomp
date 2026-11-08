@@ -105,7 +105,7 @@ Guest escribe comandos GCM al FIFO
 ### Shaders, PSO y caché
 
 - Vertex program guest → HLSL mediante `vp_get_vs`, caché por hash.
-- Fragment program → HLSL mediante `rsx_fp_decompiler.c`, compilación con `D3DCompile` y caché en `shadercache/fp_v2.cache` (registros con hash, tamaño y cabecera DXBC validada).
+- Fragment program → HLSL mediante `rsx_fp_decompiler.c`, compilación con `D3DCompile` y caché en `shadercache/fp_v3.cache` (registros con hash, tamaño y cabecera DXBC validada). El nombre lleva versión: una caché antigua no se reutiliza tras cambiar el decompilador.
 - `vp_get_fp_pso` combina VS/FP, blend, RT, máscara de color, cull, depth y alpha; el prepass prepara PSO.
 - **No hacer `free()` de bytecode que pertenece al contenedor de caché**: se observó corrupción de heap y cierre del juego tras el primer draw.
 - Borrar caché de shaders solo con propósito diagnóstico y tras respaldo: provoca recompilaciones y tirones en el primer uso.

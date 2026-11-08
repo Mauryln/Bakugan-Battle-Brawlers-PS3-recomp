@@ -17,6 +17,23 @@ payload\             BakuganLauncher.exe, BakuganRecomp.exe, SDL3.dll,
 Para distribuir, entrega juntos `BakuganSetup.exe` y la carpeta `payload`
 (~130 MB, la mayor parte es RPCS3). No se empaqueta ningún dato del juego.
 
+## Shaders
+
+El instalador copia `shadercache/fp_v3.cache`, una caché DXBC ya compilada por
+el backend del port. **RPCS3 no compila estos shaders**: sólo se usa para
+`--decrypt` del EBOOT. El nombre lleva versión para que una caché antigua
+(`fp_v2.cache`) no se reutilice tras cambiar el decompilador.
+
+Si una escena usa un shader que no está en la caché, el juego lo compila en el
+primer uso y lo añade. Para regenerar/ampliar la caché con más rutas grabadas:
+
+```powershell
+.\tools\warm_shaders.ps1
+# o con más replays:
+.\tools\warm_shaders.ps1 -Replays historia,arena,mi_arena -Seconds 480,240,240
+```
+
+
 ## Uso
 
 1. Selecciona la ISO del disco propio.

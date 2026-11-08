@@ -23,10 +23,11 @@ Copy-Item (Join-Path $PSScriptRoot 'RPCS3_LICENSE.txt') (Join-Path $payload 'lic
 
 # Ship the validated shader container so the installed game does not have to
 # compile every arena FP on first entry (and starts with a complete cache).
-$shaderCache = Join-Path $root 'shadercache\fp_v2.cache'
+$shaderCache = Join-Path $root 'shadercache\fp_v3.cache'
 if (Test-Path $shaderCache) {
     New-Item -ItemType Directory -Force -Path (Join-Path $payload 'shadercache') | Out-Null
-    Copy-Item $shaderCache (Join-Path $payload 'shadercache\fp_v2.cache') -Force
+    Remove-Item (Join-Path $payload 'shadercache\fp_v2.cache') -Force -ErrorAction SilentlyContinue
+    Copy-Item $shaderCache (Join-Path $payload 'shadercache\fp_v3.cache') -Force
 }
 
 # RPCS3 --decrypt helper. Only the top-level executable/DLLs and the portable
