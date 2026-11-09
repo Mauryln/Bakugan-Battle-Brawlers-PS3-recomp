@@ -119,6 +119,7 @@ int      cellGcm_take_flip_pending(void);
 void     cellGcm_rsx_process_fifo(void);      /* drain get -> put */
 #ifdef _WIN32
 void     cellGcm_fifo_kick_wait(unsigned ms);
+int      cellGcm_fifo_has_commands(void);
 #endif
 unsigned cellGcm_flip_request_count(void);
 }
@@ -235,15 +236,15 @@ static void tick_rate_init(void)
     s_tick_ms = 1000.0 / hz;
 }
 
-static unsigned frame_clock_due_ticks(unsigned long long now, double* next_tick)
+static unsigned frame_clock_due_ticks(double now, double* next_tick)
 {
-    if ((double)now < *next_tick) return 0;
-    double due_d = ((double)now - *next_tick) / s_tick_ms + 1.0;
+    if (now < *next_tick) return 0;
+    double due_d = (now - *next_tick) / s_tick_ms + 1.0;
     unsigned due = (unsigned)due_d;
     /* A blocked render thread cannot replay seconds of display interrupts.
      * Bound catch-up work and resume at real time after a long stall. */
     if (due > 4) {
-        *next_tick = (double)now + s_tick_ms;
+        *next_tick = now + s_tick_ms;
         return 4;
     }
     *next_tick += (double)due * s_tick_ms;
@@ -398,26 +399,37 @@ static DWORD WINAPI frame_clock(LPVOID)
     fprintf(stderr, "[frame_clock] host tid=%lu\n", (unsigned long)GetCurrentThreadId());
 
     unsigned  last_flip = 0;
-    double next_tick = (double)GetTickCount64();
+    LARGE_INTEGER _qpc_init;
+    QueryPerformanceCounter(&_qpc_init);
+    double next_tick = (double)_qpc_init.QuadPart * 1000.0 / s_qpc_freq;
     tick_rate_init();
 
     for (;;) {
 #ifdef _WIN32
         /* A guest waiting on an RSX reference wakes the consumer immediately.
          * A fixed sleep here adds a scheduler delay to every render-pass fence. */
-        { LARGE_INTEGER _a, _b; QueryPerformanceCounter(&_a);
-        /* Waiting here is pure latency: the drain below runs regardless, so a
-         * long timeout only delays the work. PS3_KICKWAIT sets it in ms. */
         static int kw = -1;
-        if (kw < 0) { const char* e = getenv("PS3_KICKWAIT"); kw = e ? atoi(e) : 4; }
-        cellGcm_fifo_kick_wait(kw);
-        QueryPerformanceCounter(&_b);
-        s_wait_s += (double)(_b.QuadPart - _a.QuadPart) / s_qpc_freq;
-        s_wait_n++; }
+        if (kw < 0) { const char* e = getenv("PS3_KICKWAIT"); kw = e ? atoi(e) : 1; }
+        if (kw > 0 && !cellGcm_fifo_has_commands()) {
+            unsigned spun = 0;
+            while (spun < 64 && !cellGcm_fifo_has_commands()) {
+                YieldProcessor();
+                spun++;
+            }
+            if (!cellGcm_fifo_has_commands()) {
+                LARGE_INTEGER _a, _b; QueryPerformanceCounter(&_a);
+                cellGcm_fifo_kick_wait(kw);
+                QueryPerformanceCounter(&_b);
+                s_wait_s += (double)(_b.QuadPart - _a.QuadPart) / s_qpc_freq;
+                s_wait_n++;
+            }
+        }
 #else
         Sleep(4);
 #endif
-        ULONGLONG now = GetTickCount64();
+        LARGE_INTEGER _qpc_now;
+        QueryPerformanceCounter(&_qpc_now);
+        double now = (double)_qpc_now.QuadPart * 1000.0 / s_qpc_freq;
 
         unsigned due = frame_clock_due_ticks(now, &next_tick);
         s_outer_n++; s_due_sum += due;
@@ -437,18 +449,28 @@ static DWORD WINAPI frame_clock(LPVOID)
             /* Drain the FIFO every tick. This is what writes the RSX sync-fence
              * labels the game's per-frame logic blocks on, so it has to keep
              * advancing at 60 Hz even while present() throttles. */
-            if (rsx_ok) { LARGE_INTEGER _a, _b; QueryPerformanceCounter(&_a);
+            if (rsx_ok) {
+                LARGE_INTEGER _a, _b; QueryPerformanceCounter(&_a);
                 cellGcm_rsx_process_fifo();
                 QueryPerformanceCounter(&_b);
                 s_drain_s += (double)(_b.QuadPart - _a.QuadPart) / s_qpc_freq;
-                s_drain_n++; }
+                s_drain_n++;
+                unsigned fc = cellGcm_flip_request_count();
+                if (fc != last_flip) {
+                    cellGcm_take_flip_pending();
+                    present_timed();
+                    last_flip = fc;
+                } else if (fc == 0) {
+                    rsx_backend_present();
+                }
+            }
         }
 
         /* Drain at the outer cadence too, not only on the 16 ms tick: titles
          * fence every render pass on a label the drain writes, and one wave of
          * those at 16 ms apiece paces the guest into single-figure frame rates.
          * The real RSX writes them in microseconds. */
-        if (rsx_ok) {
+        if (rsx_ok && due == 0) {
             if (cellGcm_take_flip_pending()) {
                 present_timed();
                 last_flip = cellGcm_flip_request_count();

@@ -1,0 +1,344 @@
+# BAKUGAN PS3 RECOMP — INVESTIGACIÓN AUTÓNOMA DE RENDIMIENTO
+
+Actúa como ingeniero senior de motores gráficos, C/C++, recompilación estática de PS3, D3D12, RSX, SPU, optimización multihilo y profiling de CPU.
+
+**Objetivo:** investigar defectos de implementación, cuellos de botella y oportunidades de optimización para alcanzar 30 FPS sostenidos o más en Bakugan: Battle Brawlers (BLES00758), manteniendo toda la fidelidad gráfica, sonora y funcional.
+
+Trabaja autónomamente, utilizando Ponytail y las skills disponibles para reducir trabajo repetitivo y consumo de tokens.
+
+## 1. Repositorio y aislamiento obligatorio
+
+Repositorio:
+
+`C:\Users\Varelis\Proyects\ps3recomp`
+
+Rama de referencia:
+
+`codex/pyrus-postprocess`
+
+Esta rama contiene correcciones gráficas y de audio importantes que todavía estoy revisando en otra sesión.
+
+**NO MODIFIQUES ESTA RAMA.**
+
+Antes de cualquier cambio:
+
+1. Inspecciona `git status`, HEAD, diferencias sin commit y archivos ignorados relevantes.
+2. Lee `PROJECT_GUIDE.md` y `PYRUS_RENDER_AUDIO.md`, si existen, sin asumir que reflejan perfectamente el HEAD actual.
+3. Comprueba el estado del toolkit `ps3recomp-src`, que tiene modificaciones locales independientes.
+4. Crea un worktree separado basado en el estado de `codex/pyrus-postprocess`, incluyendo sus correcciones actuales.
+
+Nombre propuesto de la nueva rama:
+
+`codex/performance-investigation`
+
+Directorio propuesto:
+
+`C:\Users\Varelis\Proyects\ps3recomp-performance`
+
+IMPORTANTE: `git worktree add` solo incluye cambios confirmados en commits. Si `codex/pyrus-postprocess` tiene cambios sin commit, no los pierdas ni los transfieras mediante operaciones destructivas.
+
+En ese caso, crea una copia aislada y verificable de los archivos modificados, conservando los originales, o detente antes de modificar código si no puedes garantizar el aislamiento.
+
+El toolkit `ps3recomp-src` está ignorado por Git y puede contener modificaciones esenciales. No asumas que aparecerá automáticamente en el worktree nuevo. Prepara una copia independiente del toolkit y verifica los parches necesarios, sin modificar ni reaplicar parches sobre el original.
+
+No uses `git reset --hard`, `git clean`, `git stash` sobre la rama original ni cambies su HEAD.
+
+No hagas commits ni push sin autorización.
+
+Todas las compilaciones, pruebas, logs y cambios experimentales deben quedar dentro del entorno aislado.
+
+## 2. Condiciones de rendimiento
+
+El Performance Boost del procesador está desactivado intencionalmente para simular una PC menos potente.
+
+No debes:
+- Activar Performance Boost.
+- Cambiar el plan de energía.
+- Modificar frecuencias de CPU o GPU.
+- Reducir efectos gráficos.
+- Eliminar draws o geometría.
+- Desactivar audio.
+- Modificar la velocidad de simulación del juego.
+
+Configuración de referencia:
+- Render interno: 720p.
+- Salida: 1080p con FSR1.
+- Compilación: Release.
+- Límite inicial: 30 FPS.
+- Misma escena y cámara para comparaciones A/B.
+
+Objetivo inicial: 30 FPS sostenidos, frametimes estables y mínima cantidad de cuadros superiores a 33,33 ms.
+
+Si se alcanza ese objetivo, realiza una prueba separada con un límite superior para medir el rendimiento disponible, sin alterar la velocidad de la lógica del guest.
+
+No afirmes que se alcanzan más de 30 FPS mientras el limitador de 30 esté activo.
+
+## 3. AutoPad — Automatización obligatoria
+
+Herramienta:
+
+`tools\autopad.ps1`
+
+Rutas grabadas:
+- `pyrus`: arena Pyrus, vista de apuntado, 3155 flips (~105 s).
+- `random-arena`: arena y personaje aleatorios, 2859 flips.
+- `cards`: cartas y HUD, 2654 flips.
+
+Comandos:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\autopad.ps1 list
+
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\autopad.ps1 verify
+
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\autopad.ps1 play pyrus -TimeoutSec 420
+
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\autopad.ps1 play random-arena -TimeoutSec 420
+```
+
+El script:
+- Copia la baseline a un gamedata aislado.
+- Utiliza `PS3_SAVEDATA_CHOICE=BLES00758-PLAYER-DATA-00`.
+- Desactiva el selector mediante `PS3_SAVEDATA_UI=0`.
+- Aísla LOCALAPPDATA.
+- Configura `PS3_VERBOSE=0`.
+- Utiliza `PAD_CLOCK=flips`.
+- Espera `[cellPad] PAD_REPLAY done`.
+- Deja el juego abierto al terminar la ruta.
+
+Códigos de salida:
+- 0: replay completado.
+- 2: timeout, proceso posiblemente abierto.
+- 3: juego terminado prematuramente.
+
+Logs:
+
+`diagnostics\autopad\runs\<ruta>-<fecha>\stdout.log`
+
+`diagnostics\autopad\runs\<ruta>-<fecha>\stderr.log`
+
+No utilices `PAD_AUTOPRESS` ni `PAD_SCRIPT` para navegar menús.
+
+No edites manualmente `diagnostics\autopad\routes.json`.
+
+### Controles adicionales
+
+Detener el replay en un flip:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\autopad.ps1 play pyrus -StopAtFlip 3000 -TimeoutSec 420
+```
+
+Control posterior mediante archivo:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\autopad.ps1 play pyrus -PadFile diagnostics\autopad\live.txt
+```
+
+Ejemplo de pulso:
+
+```powershell
+Set-Content diagnostics\autopad\live.txt '0x4000 2'
+```
+
+Botones:
+- START: `0x0008`
+- Cross: `0x4000`
+- Circle: `0x2000`
+- UP: `0x0010`
+- DOWN: `0x0040`
+- LEFT: `0x0080`
+- RIGHT: `0x0020`
+
+Para métricas utiliza las opciones existentes:
+
+`-Set PERF=1,FRAME_METRICS=1,"FRAME_TIMES=<ruta>\ft.bin"`
+
+Para capturas:
+
+`-Set "RSX_CAP_TRIGGER=<ruta>\trigger","RSX_CAP_DIR=<ruta>\captures"`
+
+También puedes usar `RSX_CAP_FLIP=3140`, si corresponde.
+
+Comprueba la sintaxis efectiva del script antes de construir comandos complejos.
+
+### Validación obligatoria
+
+1. `autopad.ps1 verify` debe validar rutas, SHA256 y baseline.
+2. El replay debe terminar con código 0 y `AUTOPAD result=done`.
+3. Confirma la escena mediante captura o inspección visual.
+4. Comprueba geometría, HUD, cartas, efectos y personajes.
+5. Solo entonces realiza mediciones.
+6. Cierra normalmente mediante `CloseMainWindow` o Alt+F4.
+7. Comprueba que el PID desaparezca.
+
+Nunca uses `Stop-Process -Force` ni `taskkill /F`.
+
+Si AutoPad no funciona desde el worktree, investiga las dependencias y rutas absolutas. No ejecutes una build que pueda modificar archivos del repositorio original.
+
+## 4. Investigación prioritaria del rendimiento
+
+Investiga estos subsistemas, en este orden inicial, ajustándolo según la evidencia:
+
+1. `frame_clock`: trabajo serial, tiempos de espera y dependencia entre etapas.
+2. `vfetch`: decodificación de atributos, conversión de formatos RSX y coste por vértice.
+3. Walker FIFO: interpretación de comandos, callbacks y sincronización.
+4. Blits NV3089: copias, escalado, accesos guest y costes de memoria.
+5. Preparación de SRV: creación, binding, reutilización y redundancias.
+6. Caché de texturas: invalidación, generaciones de páginas y transferencias.
+7. Preparación de PSO: cache misses, compilación y trabajo repetido.
+8. Sincronización PPU/SPU: bloqueos, eventos, colas y esperas.
+9. Contención entre hilos: mutex, atomics, busy-wait y scheduling.
+
+Para cada subsistema:
+
+- Localiza las funciones relevantes.
+- Inspecciona implementaciones y rutas de ejecución.
+- Identifica posibles defectos algorítmicos.
+- Busca trabajo redundante o serialización innecesaria.
+- Mide antes de modificar.
+- Formula hipótesis comprobables.
+- Diseña una optimización mínima.
+- Implementa en la rama experimental.
+- Compila y ejecuta tests.
+- Compara resultados A/B.
+
+Distingue entre tiempos solapados y tiempos acumulables. No sumes métricas que se ejecutan concurrentemente.
+
+No asumas que la GPU es el cuello de botella. Compruébalo mediante mediciones.
+
+## 5. Optimizaciones históricas y advertencias
+
+Consulta `PROJECT_GUIDE.md` antes de repetir experimentos.
+
+Ya se investigaron, con resultados limitados o negativos:
+- Compactación de staging de vértices.
+- Caché VP con bajo porcentaje de aciertos.
+- GPU vertex fetch sin espejo persistente.
+- SIMD manual y `restrict`.
+- Procesamiento de strips en lotes.
+- `PS3_KICKWAIT=0`.
+- `RSX_PACK_WORKERS=4`.
+- Caché experimental de I/O.
+- `SRV_SHADOW`.
+
+No repitas esas implementaciones sin una hipótesis nueva y evidencia concreta.
+
+Hipótesis arquitectónicas pendientes:
+- Separar walker y submit mediante productor/consumidor.
+- Espejo persistente de memoria guest en VRAM.
+- Especialización de blits NV3089.
+- Reducción de sincronizaciones y trabajo serial.
+
+Estas ideas no son mejoras confirmadas. Evalúa su viabilidad antes de implementar cambios grandes.
+
+## 6. Restricciones técnicas
+
+No modificar:
+- Fuentes generadas en `recompiled/`.
+- Fuentes generadas en `spu/`.
+- Rama original `codex/pyrus-postprocess`.
+- Rama `main`.
+- Toolkit original.
+- Guardados reales del usuario.
+
+Conservar:
+- Corrección de profundidad de Pyrus.
+- HUD y cinemáticas.
+- Render targets offscreen.
+- Texturas y SRV correctos.
+- Comportamiento de audio.
+- Semántica de memoria guest.
+- Orden de draws y primitivas.
+- Limpieza correcta de recursos al cerrar.
+
+No activar globalmente:
+- `SPU_CH_BLOCK=1`
+- `PS3_NOVSYNC=1`
+- `SRV_SHADOW=1`
+
+No alterar buffers de audio, reloj del guest o sincronización global para fabricar FPS.
+
+Una mejora que elimine geometría, efectos o audio es una regresión, no una optimización.
+
+## 7. Metodología autónoma
+
+No necesito interactuar durante la investigación.
+
+Puedes:
+- Leer código.
+- Crear instrumentación.
+- Ejecutar scripts.
+- Compilar.
+- Analizar logs.
+- Crear tests.
+- Aplicar cambios experimentales reversibles.
+- Comparar builds.
+- Revertir únicamente tus propios cambios dentro del entorno aislado.
+
+No necesitas detenerte después de una sola hipótesis.
+
+Prioriza:
+1. Perfilado de referencia.
+2. Identificación del cuello de botella dominante.
+3. Correcciones de bajo riesgo.
+4. Comparación A/B.
+5. Validación gráfica.
+6. Documentación de resultados.
+
+Usa Ponytail y Todas las skills instalas o instala nuevas si es necesario para reducir consumo de tokens y obtener mejores diagnosticos y correciones de codigo:
+- Busca símbolos antes de leer archivos completos.
+- Filtra logs.
+- Evita repetir investigaciones.
+- No generes explicaciones largas entre comandos.
+- Mantén checkpoints compactos de contexto.
+- No ejecutes subagentes innecesarios.
+
+No sacrifiques testing ni fidelidad por ahorrar tokens.
+
+## 8. Modificaciones de Codigo
+Al momento de re escribir y optimizer el codigo no Descartes la mejora aunque sea minima 
+ten en cuenta las limitaciones del Proyecto
+el Objetivo es optimizar y mejorar el rendimiento .
+tienes autorizacion por el usuario para modificar el codigo que sea necesario para lograr esta optimizacion dentro.
+tienes autorizacion para hacer commits de esta rama si consideras que la optimizaciones conseguidas son lo suficiente para ser conservadas y no rompen los graficos del juego.
+no tienes autoriazcion para hacer push ni merge a otras ramas.
+Si consigues 30fps o mas te detienes dejas commit y esperas la autorizacion del usuario.
+
+
+## 9. Informe de resultados
+
+Genera dentro del entorno experimental:
+
+`diagnostics/performance-investigation/RESULTS.md`
+
+Incluye:
+- Rama y worktree utilizados.
+- Estado inicial y protección de la rama original.
+- Configuración de CPU y boost.
+- Baseline de FPS y frametimes.
+- Cuellos de botella confirmados.
+- Defectos de código identificados.
+- Optimizaciones implementadas.
+- Archivos modificados.
+- Pruebas ejecutadas.
+- Comparación A/B.
+- Estado gráfico y sonoro.
+- Riesgos y regresiones.
+- Próximos pasos.
+
+Si alcanzas 30 FPS sostenidos, verifica con una segunda ruta AutoPad.
+
+Si no los alcanzas, informa qué subsistema impide llegar al objetivo y cuál es la siguiente optimización técnicamente justificada.
+
+## 10. Condición final
+
+**Empieza por crear y verificar el aislamiento.**
+
+No toques el trabajo original.
+
+Si no puedes preservar exactamente el estado de `codex/pyrus-postprocess`, incluidos sus cambios sin commit y las modificaciones del toolkit ignorado, no improvises una copia incompleta: detente antes de modificar código y documenta qué falta.
+
+Una vez confirmado el aislamiento, trabaja autónomamente en optimización y depuración.
+
+No declares éxito basándote únicamente en FPS. Exige fidelidad visual, funcional y pruebas reproducibles.

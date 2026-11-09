@@ -277,6 +277,9 @@ Usar una build Release comparable y cambiar **una sola variable o subsistema por
 
 ### Prueba con boost desactivado (2026-11-09)
 
+La investigación posterior de Pyrus, con el replay manual y la corrección de
+profundidad, está en [PYRUS_RENDER_AUDIO.md](PYRUS_RENDER_AUDIO.md).
+
 En un i7-13620H, Windows reportó `PERFBOOSTMODE=0` en corriente y batería.
 La prueba usó Release, render interno 720p, salida 1080p FSR1 y límite de
 30 FPS. El selector se omitió con `PS3_SAVEDATA_CHOICE=BLES00758-PLAYER-DATA-00`

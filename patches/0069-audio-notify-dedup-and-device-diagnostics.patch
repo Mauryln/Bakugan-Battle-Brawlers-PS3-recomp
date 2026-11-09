@@ -1,0 +1,118 @@
+diff --git a/libs/audio/cellAudio.c b/libs/audio/cellAudio.c
+--- a/libs/audio/cellAudio.c
++++ b/libs/audio/cellAudio.c
+@@ -234,6 +234,11 @@
+ static IAudioRenderClient*  s_wasapi_render = NULL;
+ static HANDLE               s_wasapi_event  = NULL;
+ static UINT32               s_wasapi_buf_frames = 0;
++static struct {
++    ULONGLONG last_submit_ms, max_gap_ms;
++    unsigned empty_padding, failed_submit;
++    int enabled;
++} s_wasapi_health;
+ 
+ static int audio_backend_init(void)
+ {
+@@ -331,6 +336,8 @@
+         return -1;
+     }
+ 
++    memset(&s_wasapi_health, 0, sizeof s_wasapi_health);
++    s_wasapi_health.enabled = getenv("AUDIO_RATE") != NULL;
+     s_wasapi_client->lpVtbl->Start(s_wasapi_client);
+     return 0;
+ }
+@@ -359,7 +366,7 @@
+     if (!s_wasapi_render) return;
+ 
+     UINT32 padding = 0;
+-    s_wasapi_client->lpVtbl->GetCurrentPadding(s_wasapi_client, &padding);
++    HRESULT padding_result = s_wasapi_client->lpVtbl->GetCurrentPadding(s_wasapi_client, &padding);
+ 
+     UINT32 available = s_wasapi_buf_frames - padding;
+     if (num_samples > available) {
+@@ -378,8 +385,21 @@
+         static int mute = -1;
+         if (mute < 0) mute = getenv("PS3_MUTE") ? 1 : 0;
+         memcpy(buf, stereo_samples, num_samples * 2 * sizeof(float));
+-        s_wasapi_render->lpVtbl->ReleaseBuffer(s_wasapi_render, num_samples,
+-                                               mute ? AUDCLNT_BUFFERFLAGS_SILENT : 0);
++        hr = s_wasapi_render->lpVtbl->ReleaseBuffer(s_wasapi_render, num_samples,
++                                                   mute ? AUDCLNT_BUFFERFLAGS_SILENT : 0);
++    }
++    if (s_wasapi_health.enabled) {
++        if (FAILED(padding_result) || FAILED(hr) || !buf) {
++            ++s_wasapi_health.failed_submit;
++        } else {
++            ULONGLONG now = GetTickCount64();
++            if (s_wasapi_health.last_submit_ms) {
++                ULONGLONG gap = now - s_wasapi_health.last_submit_ms;
++                if (gap > s_wasapi_health.max_gap_ms) s_wasapi_health.max_gap_ms = gap;
++                if (!padding) ++s_wasapi_health.empty_padding;
++            }
++            s_wasapi_health.last_submit_ms = now;
++        }
+     }
+ }
+ 
+@@ -544,11 +564,17 @@
+      * registered notify queue, so the game's audio loop (blocked on
+      * sys_event_queue_receive) wakes once per block and writes the next one.
+      * Resolve the queue by its ipc_key (set via cellAudioSetNotifyEventQueue). */
++    u64 keys[CELL_AUDIO_MAX_NOTIFY_EVENT_QUEUES];
++    unsigned count = 0;
++    mutex_lock(&s_audio_mutex);
+     for (int i = 0; i < CELL_AUDIO_MAX_NOTIFY_EVENT_QUEUES; i++) {
+-        if (!s_notify_queues[i].in_use) continue;
+-        uint32_t qid = sys_event_find_queue_by_key(s_notify_queues[i].key);
++        if (s_notify_queues[i].in_use) keys[count++] = s_notify_queues[i].key;
++    }
++    mutex_unlock(&s_audio_mutex);
++    for (unsigned i = 0; i < count; i++) {
++        uint32_t qid = sys_event_find_queue_by_key(keys[i]);
+         if (qid)
+-            sys_event_queue_push_by_id(qid, s_notify_queues[i].key,
++            sys_event_queue_push_by_id(qid, keys[i],
+                                        0 /*CELL_AUDIO_EVENT_MIX*/, 0, 0);
+     }
+ }
+@@ -614,6 +640,11 @@
+                         n * 1000.0 / (now - t0), n ? 100.0 * z / n : 0.0, (g_audio_dropped - d0) * 1000.0 / (now - t0),
+                 #if AUDIO_BACKEND_WASAPI
+                         (unsigned)s_wasapi_buf_frames, 10);
++                fprintf(stderr, "[audio-device] max_submit_gap=%llu ms empty_padding=%u failed_submit=%u\n",
++                        (unsigned long long)s_wasapi_health.max_gap_ms,
++                        s_wasapi_health.empty_padding, s_wasapi_health.failed_submit);
++                s_wasapi_health.max_gap_ms = 0;
++                s_wasapi_health.empty_padding = s_wasapi_health.failed_submit = 0;
+ #else
+                         0u, 10);
+ #endif
+@@ -1026,17 +1057,21 @@
+ 
+     mutex_lock(&s_audio_mutex);
+ 
++    int free_slot = -1;
+     for (int i = 0; i < CELL_AUDIO_MAX_NOTIFY_EVENT_QUEUES; i++) {
+-        if (!s_notify_queues[i].in_use) {
+-            s_notify_queues[i].in_use = 1;
+-            s_notify_queues[i].key = key;
++        if (s_notify_queues[i].in_use && s_notify_queues[i].key == key) {
++            /* Create also registers for titles that never call Set. */
+             mutex_unlock(&s_audio_mutex);
+             return CELL_OK;
+         }
+-    }
+-
++        if (!s_notify_queues[i].in_use && free_slot < 0) free_slot = i;
++    }
++    if (free_slot >= 0) {
++        s_notify_queues[free_slot].in_use = 1;
++        s_notify_queues[free_slot].key = key;
++    }
+     mutex_unlock(&s_audio_mutex);
+-    return CELL_AUDIO_ERROR_PARAM; /* no free slots */
++    return free_slot >= 0 ? CELL_OK : CELL_AUDIO_ERROR_PARAM;
+ }
+ 
+ s32 cellAudioRemoveNotifyEventQueue(u64 key)

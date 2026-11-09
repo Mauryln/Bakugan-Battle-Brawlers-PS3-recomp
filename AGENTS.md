@@ -26,7 +26,9 @@ SPURS fixes and their validation. Use the current replay referenced there;
   or reapply the patch series.**
 - `patches/`: toolkit changes kept for reproducibility. `0049-asset-io-bounded-cache.patch`
   is an unapproved experiment; do not apply it to the healthy reference.
-- `tools/`: `play.ps1`, `run.ps1`, `pad_autopilot.ps1` and `tests/`.
+- `tools/`: `play.ps1`, `run.ps1`, `pad_autopilot.ps1`, `autopad.ps1` and
+  `tests/`. `autopad.ps1` is the route launcher (`list`/`play`/`record`/`verify`)
+  that drives the game to `pyrus` or `cards` with a recorded pad.
   `tools/build.py` and `tools/pipeline.py` were
   deleted; stale references to them in `README.md`, `CONTRIBUTING.md`,
   `bakugan-recomp/README.md` and `tools/run.ps1` error messages are obsolete.
