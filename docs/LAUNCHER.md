@@ -16,14 +16,16 @@ Windows: no abre consola. La barra de título del juego muestra sólo
 El instalador está documentado en [INSTALLER.md](INSTALLER.md).
 
 - Izquierda: salida 720p/1080p/1440p/2160p/automática/monitor (1080p sin bordes
-  predeterminado para nuevas instalaciones); anisotropía 1–16× y nitidez. El selector
-  de FSR se eliminó de la interfaz (el reescalado FSR1 funciona de forma automática al superar 720p).
+  predeterminado en el monitor principal para nuevas instalaciones); anisotropía 1–16×. Los selectores
+  de FSR y nitidez se eliminaron de la interfaz (FSR1 y nitidez RCAS 0.6 funcionan automáticamente al superar 720p).
   El límite de FPS es fijo a 30 con pacing uniforme y no se expone en la interfaz.
-- Derecha: idioma, mando concreto, modo Sixaxis, sensibilidad de giroscopio,
+- Derecha: idioma, mando concreto, sensibilidad de giroscopio/Sixaxis,
   zona muerta y editor interactivo gráfico de gamepad con representación visual
-  completa del mando y detección de conflictos.
+  completa del mando y detección inteligente de conflictos.
 - Entrada simultánea: teclado y mando funcionan en paralelo sin necesidad de
   un selector exclusivo. Se puede alternar entre ambos al instante durante la partida.
+- Sixaxis unificado: giroscopio físico y stick derecho funcionan simultáneamente sin dropdown
+  ni advertencias de conflicto (ambas fuentes se combinan de forma determinista para la bola).
 - Idiomas manuales de esta edición EU: inglés, español, francés, alemán, italiano,
   neerlandés y sueco. «Automático» deja que el HLE consulte el idioma de Windows.
   La selección se comunica mediante `PS3_LANG`; el launcher no modifica assets.

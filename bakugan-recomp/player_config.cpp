@@ -323,6 +323,7 @@ void apply_environment(const Config &c, const std::wstring &path) {
     env(L"PS3_FPS_CAP", L"30");
     env(L"PS3_TICK_HZ", L"");
     env(L"PS3_WINDOW_MODE", c.window);
+    env(L"PS3_WINDOW_MONITOR", L"primary");
     env(L"PS3_LANG", c.language == L"auto" ? L"" : c.language);
     env(L"PS3_VERBOSE", L"0");
     const wchar_t *probes[] = {L"PAD_RECORD",    L"PAD_REPLAY",      L"PAD_FILE",

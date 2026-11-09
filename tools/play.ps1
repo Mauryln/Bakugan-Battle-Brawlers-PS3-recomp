@@ -10,6 +10,7 @@ if (-not (Test-Path $elf)) { Write-Host "Falta $elf"; exit 1 }
 New-Item -ItemType Directory -Path $logDir -Force | Out-Null
 $env:PS3_VFS_ROOT = Join-Path $Root 'game'
 $env:PS3_VERBOSE = '0'
+$env:PS3_WINDOW_MONITOR = 'primary'
 $p = Start-Process $exe -ArgumentList "`"$elf`"" -WorkingDirectory $Root -PassThru `
      -RedirectStandardOutput (Join-Path $logDir 'BakuganRecomp.out.log') `
      -RedirectStandardError (Join-Path $logDir 'BakuganRecomp.log')

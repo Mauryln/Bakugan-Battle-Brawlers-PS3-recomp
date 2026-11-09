@@ -7,7 +7,7 @@ diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
  
 +    const char* monitor_mode = getenv("PS3_WINDOW_MONITOR");
 +    HMONITOR target_monitor;
-+    if (monitor_mode && strcmp(monitor_mode, "primary") == 0) {
++    if (!monitor_mode || strcmp(monitor_mode, "current") != 0) {
 +        POINT primary_origin = {0, 0};
 +        target_monitor = MonitorFromPoint(primary_origin, MONITOR_DEFAULTTOPRIMARY);
 +    } else {

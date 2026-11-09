@@ -37,16 +37,29 @@ inline Report make_report(const std::array<float, ACTION_COUNT> &values, MotionM
     r.ly = stick(values[L_UP], values[L_DOWN]);
     r.rx = stick(values[R_LEFT], values[R_RIGHT]);
     r.ry = stick(values[R_UP], values[R_DOWN]);
-    if (mode != MotionMode::RightStick && real_motion && finite_motion(accel, gyro)) {
-        for (int i = 0; i < 3; ++i)
-            r.sensors[i] = sensor(512.f - accel[i] * (113.f / 9.80665f));
-        r.sensors[3] = sensor(512.f + gyro[1] * (180.f / 3.14159265358979323846f) * (123.f / 90.f));
-    } else {
-        float x = values[R_RIGHT] - values[R_LEFT], y = values[R_DOWN] - values[R_UP];
-        r.sensors[0] = sensor(512.f + x * (x < 0 ? 512.f : 511.f));
-        r.sensors[1] = sensor(399.f + y * (y < 0 ? 399.f : 624.f));
-        r.sensors[3] = sensor(512.f + x * 123.f);
+
+    // Right stick deflection (dedicated to Sixaxis ball tilt in Bakugan)
+    float stick_x = values[R_RIGHT] - values[R_LEFT];
+    float stick_y = values[R_DOWN] - values[R_UP];
+    float stick_s0 = stick_x * (stick_x < 0.f ? 512.f : 511.f);
+    float stick_s1 = stick_y * (stick_y < 0.f ? 399.f : 624.f);
+    float stick_s3 = stick_x * 123.f;
+
+    // Physical sensor input (gyro + accelerometer)
+    bool has_real = (mode != MotionMode::RightStick) && real_motion && finite_motion(accel, gyro);
+    float base_s0 = 512.f, base_s1 = 399.f, base_s2 = 512.f, base_s3 = 512.f;
+    if (has_real) {
+        base_s0 = 512.f - accel[0] * (113.f / 9.80665f);
+        base_s1 = 512.f - accel[1] * (113.f / 9.80665f);
+        base_s2 = 512.f - accel[2] * (113.f / 9.80665f);
+        base_s3 = 512.f + gyro[1] * (180.f / 3.14159265358979323846f) * (123.f / 90.f);
     }
+
+    // Unified Sixaxis sensors: physical gyro + right stick combined simultaneously
+    r.sensors[0] = sensor(base_s0 + stick_s0);
+    r.sensors[1] = sensor(base_s1 + stick_s1);
+    r.sensors[2] = sensor(base_s2);
+    r.sensors[3] = sensor(base_s3 + stick_s3);
     bool press = values[MOTION_THROW] > 0.25f;
     if (press && !pulse.held) {
         pulse.start = now;

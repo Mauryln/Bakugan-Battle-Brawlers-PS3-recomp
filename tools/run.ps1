@@ -66,6 +66,7 @@ $env:PS3_FSR_SHARPNESS = $Sharpness.ToString('0.00', [Globalization.CultureInfo]
 $env:PS3_FPS_CAP = if ($FpsCap -ne '0') { $FpsCap } else { $null }
 $env:PS3_TICK_HZ = if ($TickHz -gt 0) { [string]$TickHz } else { $null }
 $env:PS3_WINDOW_MODE = $WindowMode.ToLowerInvariant()
+$env:PS3_WINDOW_MONITOR = 'primary'
 
 # A stale automation flag changes what the guest receives. Remove them for real:
 # an empty string still satisfies getenv()!=NULL and activates PAD_AUTOPRESS.

@@ -903,6 +903,7 @@ int main(int argc, char** argv)
             set_default("PS3_FSR_SHARPNESS", std::to_wstring(cfg.sharpness));
             set_default("PS3_ANISO", std::to_wstring(cfg.aniso));
             set_default("PS3_WINDOW_MODE", cfg.window);
+            set_default("PS3_WINDOW_MONITOR", L"primary");
             set_default("PS3_FPS_CAP", cfg.cap);
             const bool default_input = !player::has_input_overrides(cfg);
             if (!default_input && !getenv("PS3_PLAYER_CONFIG")) {
@@ -946,7 +947,7 @@ int main(int argc, char** argv)
         if (FILE* file = fopen(report, "wb")) {
             const char* keys[] = {"PS3_DEBUG", "PS3_VERBOSE", "PS3_VFS_ROOT", "PS3_GAMEDATA_ROOT",
                 "PS3_PLAYER_CONFIG", "PS3_INTERNAL", "PS3_OUTPUT", "PS3_FSR", "PS3_FSR_SHARPNESS",
-                "PS3_FPS_CAP", "PS3_TICK_HZ", "PS3_WINDOW_MODE", "PS3_LANG", "PS3_ANISO",
+                "PS3_FPS_CAP", "PS3_TICK_HZ", "PS3_WINDOW_MODE", "PS3_WINDOW_MONITOR", "PS3_LANG", "PS3_ANISO",
                 "PS3_LOD_BIAS", "SPU_INTERP_UNLIFTED", "RSX_ACCUM_FRAME", "GCM_FULL_FRAMES",
                 "RSX_PACK_WORKERS", "PAD_REPLAY", "PAD_CLOCK", "PS3_SAVEDATA_CHOICE"};
             for (const char* key : keys)

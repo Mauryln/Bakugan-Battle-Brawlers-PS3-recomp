@@ -21,11 +21,9 @@ using namespace player;
 enum {
     ID_OUTPUT = 100,
     ID_WINDOW,
-    ID_SHARP,
     ID_ANISO,
     ID_LANG,
     ID_DEVICE,
-    ID_MOTION,
     ID_GYRO_SENS,
     ID_DEADZONE,
     ID_SENSITIVITY,
@@ -94,8 +92,6 @@ int selected(int id) { return (int)SendMessageW(GetDlgItem(window, id), CB_GETCU
 void message(const std::wstring &text) { SetWindowTextW(status, text.c_str()); }
 
 HWND add(const wchar_t *cls, const wchar_t *text, int id, int x, int y, int w, int h, DWORD style = 0) {
-    if (y >= 76)
-        y += 70;
     if (!wcscmp(cls, L"BUTTON") && (style & BS_TYPEMASK) == BS_GROUPBOX) {
         cls = L"STATIC";
         style = 0;
@@ -188,15 +184,13 @@ void refresh_devices(bool force = false) {
         choose(ID_DEVICE, index);
     }
     Device *device = pads.selected(config);
-    std::wstring info = S(L"Sin mando conectado. Sixaxis: palanca R / teclas I J K L.",
-                          L"No controller connected. Sixaxis: right stick / keys I J K L.");
+    std::wstring info = S(L"Sin mando (Stick R / I J K L)",
+                          L"No pad (Right stick / I J K L)");
     if (device) {
         std::array<float, 3> a{}, g{};
-        bool real = selected(ID_MOTION) != 2 && pads.motion(device, a, g);
-        info = real ? S(L"Giroscopio activo -> Stick derecho virtual + Sixaxis.",
-                        L"Gyroscope active -> Virtual right stick + Sixaxis.")
-                    : S(L"Sensores no disponibles o desactivados: Stick derecho.",
-                        L"Sensors unavailable or disabled: Right stick Sixaxis.");
+        bool real = pads.motion(device, a, g);
+        info = real ? S(L"Giroscopio + Stick R activos", L"Gyroscope + Right stick active")
+                    : S(L"Stick R activo (Sin giroscopio)", L"Right stick active (No gyro)");
     }
     SetWindowTextW(sensor_status, info.c_str());
 }
@@ -207,13 +201,13 @@ void read_controls() {
     config.cap = L"30";
     config.window = windows[index(ID_WINDOW, 2)];
     config.fsr = L"auto";
-    config.sharpness = position(ID_SHARP) / 100.f;
+    config.sharpness = 0.6f;
     const int aniso[] = {1, 2, 4, 8, 16};
     config.aniso = aniso[index(ID_ANISO, 5)];
     config.language = languages[index(ID_LANG, 8)];
     config.ui_language = ui_languages[index(ID_UI_LANG, 3)];
     config.input = InputMode::Auto;
-    config.motion = (MotionMode)index(ID_MOTION, 3);
+    config.motion = MotionMode::Auto;
     config.gyro_sensitivity = position(ID_GYRO_SENS) / 100.f;
     config.deadzone = position(ID_DEADZONE) / 100.f;
     config.mouse_sensitivity = position(ID_SENSITIVITY) / 100.f;
@@ -227,12 +221,10 @@ void fill_controls() {
     choose(ID_WINDOW, windows, config.window);
     choose(ID_LANG, languages, config.language);
     choose(ID_UI_LANG, ui_languages, config.ui_language);
-    choose(ID_MOTION, (int)config.motion);
     int a = 0;
     for (int n = config.aniso; n > 1; n /= 2)
         ++a;
     choose(ID_ANISO, a);
-    SendMessageW(GetDlgItem(window, ID_SHARP), TBM_SETPOS, TRUE, (int)(config.sharpness * 100));
     SendMessageW(GetDlgItem(window, ID_DEADZONE), TBM_SETPOS, TRUE, (int)(config.deadzone * 100));
     SendMessageW(GetDlgItem(window, ID_GYRO_SENS), TBM_SETPOS, TRUE, (int)(config.gyro_sensitivity * 100));
     SendMessageW(GetDlgItem(window, ID_SENSITIVITY), TBM_SETPOS, TRUE, (int)(config.mouse_sensitivity * 100));
@@ -326,6 +318,7 @@ void launch() {
         return;
     }
     apply_environment(config, path);
+    SetEnvironmentVariableW(L"PS3_WINDOW_MONITOR", L"primary");
     SetEnvironmentVariableW(L"PS3_PLAYER_CONFIG", path.c_str());
     SetEnvironmentVariableW(L"PS3_VFS_ROOT", elf.parent_path().parent_path().parent_path().c_str());
     SetEnvironmentVariableW(L"PS3_TITLE", L"Bakugan: Battle Brawlers");
@@ -510,10 +503,10 @@ static const ButtonHotspot kButtons[player::ACTION_COUNT] = {
     {player::L_RIGHT, L"L▶", L"Stick L derecha", L"Left stick right", 233.f, 204.f, 20.f, 20.f, false},
     {player::L_DOWN, L"L▼", L"Stick L abajo", L"Left stick down", 203.f, 233.f, 22.f, 20.f, false},
     {player::L_LEFT, L"L◀", L"Stick L izquierda", L"Left stick left", 175.f, 204.f, 20.f, 20.f, false},
-    {player::R_UP, L"R▲", L"Stick R arriba", L"Right stick up", 403.f, 175.f, 22.f, 20.f, false},
-    {player::R_RIGHT, L"R▶", L"Stick R derecha", L"Right stick right", 433.f, 204.f, 20.f, 20.f, false},
-    {player::R_DOWN, L"R▼", L"Stick R abajo", L"Right stick down", 403.f, 233.f, 22.f, 20.f, false},
-    {player::R_LEFT, L"R◀", L"Stick R izquierda", L"Right stick left", 375.f, 204.f, 20.f, 20.f, false}
+    {player::R_UP, L"R▲", L"Stick R arriba (Sixaxis)", L"Right stick up (Sixaxis)", 403.f, 175.f, 22.f, 20.f, false},
+    {player::R_RIGHT, L"R▶", L"Stick R derecha (Sixaxis)", L"Right stick right (Sixaxis)", 433.f, 204.f, 20.f, 20.f, false},
+    {player::R_DOWN, L"R▼", L"Stick R abajo (Sixaxis)", L"Right stick down (Sixaxis)", 403.f, 233.f, 22.f, 20.f, false},
+    {player::R_LEFT, L"R◀", L"Stick R izquierda (Sixaxis)", L"Right stick left (Sixaxis)", 375.f, 204.f, 20.f, 20.f, false}
 };
 
 struct ConflictResult {
@@ -530,6 +523,20 @@ ConflictResult check_conflict(int action, bool is_gamepad) {
     for (int i = 0; i < ACTION_COUNT; ++i) {
         if (i == action)
             continue;
+        // Allowed intentional shared mappings:
+        // 1. R3 (stick click) and MOTION_THROW (Sixaxis gesture impulse) share the same button on gamepad
+        if (is_gamepad && ((action == R3 && i == MOTION_THROW) || (action == MOTION_THROW && i == R3)))
+            continue;
+        // 2. Keyboard directional keys: DPAD and Left Stick intentionally share arrow keys
+        if (!is_gamepad && ((action >= UP && action <= LEFT && i >= L_UP && i <= L_LEFT) ||
+                            (action >= L_UP && action <= L_LEFT && i >= UP && i <= LEFT)))
+            continue;
+        // 3. Right stick directions feed Sixaxis ball tilt directly without conflict
+        if (action >= R_UP && action <= R_LEFT && (i == MOTION_THROW || i == R3))
+            continue;
+        if ((action == MOTION_THROW || action == R3) && i >= R_UP && i <= R_LEFT)
+            continue;
+
         if (map[i].kind == target.kind && map[i].code == target.code) {
             res.conflict = true;
             res.other_action = i;
@@ -812,62 +819,59 @@ LRESULT CALLBACK canvas_wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 void create_controls() {
     apply_ui_language();
     label(S(L"Idioma del launcher", L"Launcher language"), 712, 26, 272);
-    combo(ID_UI_LANG, 712, 46, 272,
+    combo(ID_UI_LANG, 712, 48, 272,
           {S(L"Automático (Windows)", L"Automatic (Windows)"), L"Español", L"English"});
 
     // Panel izquierdo: Pantalla y gráficos
-    add(L"BUTTON", S(L"Pantalla y gráficos", L"Display and graphics"), 0, 16, 76, 302, 558, BS_GROUPBOX);
-    label(S(L"Resolución de salida", L"Output resolution"), 32, 92);
-    combo(ID_OUTPUT, 32, 114, 268,
+    add(L"BUTTON", S(L"Pantalla y gráficos", L"Display and graphics"), 0, 16, 146, 302, 558, BS_GROUPBOX);
+    label(S(L"Resolución de salida", L"Output resolution"), 32, 170, 270);
+    combo(ID_OUTPUT, 32, 192, 268,
           {L"1280 × 720", L"1920 × 1080", L"2560 × 1440", L"3840 × 2160",
            S(L"Automática", L"Automatic"), S(L"Resolución del monitor", L"Monitor resolution")});
-    label(S(L"Modo de ventana", L"Window mode"), 32, 154);
-    combo(ID_WINDOW, 32, 176, 268,
+    label(S(L"Modo de ventana", L"Window mode"), 32, 230, 270);
+    combo(ID_WINDOW, 32, 252, 268,
           {S(L"Sin bordes (Borderless)", L"Borderless windowed"), S(L"Ventana", L"Windowed")});
-    label(S(L"Filtrado anisotrópico", L"Anisotropic filtering"), 32, 216);
-    combo(ID_ANISO, 32, 238, 268, {L"1×", L"2×", L"4×", L"8×", L"16×"});
-    label(S(L"Nitidez: 0 alta · 2 baja", L"Image sharpness: 0 sharp · 2 soft"), 32, 278);
-    slider(ID_SHARP, 28, 300, 276, 0, 200, 60);
+    label(S(L"Filtrado anisotrópico", L"Anisotropic filtering"), 32, 290, 270);
+    combo(ID_ANISO, 32, 312, 268, {L"1×", L"2×", L"4×", L"8×", L"16×"});
 
     add(L"STATIC",
         S(L"El juego se ejecuta a 30 FPS con frame pacing uniforme y FSR1 automático en resoluciones superiores a 720p.",
           L"The game runs at 30 FPS with uniform frame pacing and automatic FSR1 above 720p."),
-        0, 32, 346, 268, 54);
+        0, 32, 356, 268, 52);
 
-    add(L"BUTTON", S(L"Mantener clic derecho: apuntar", L"Hold right click: aim"), ID_MOUSE_LOOK, 32, 420,
-        276, 24, BS_AUTOCHECKBOX | WS_TABSTOP);
-    add(L"BUTTON", S(L"Clic izquierdo: Cruz (X)", L"Left click: Cross (X)"), ID_MOUSE_CROSS, 32, 448, 276,
-        24, BS_AUTOCHECKBOX | WS_TABSTOP);
-    label(S(L"Sensibilidad del ratón", L"Mouse sensitivity"), 32, 484);
-    slider(ID_SENSITIVITY, 28, 508, 276, 5, 200, 50);
+    add(L"BUTTON", S(L"Mantener clic derecho: apuntar", L"Hold right click: aim"), ID_MOUSE_LOOK, 32, 424,
+        268, 24, BS_AUTOCHECKBOX | WS_TABSTOP);
+    add(L"BUTTON", S(L"Clic izquierdo: Cruz (X)", L"Left click: Cross (X)"), ID_MOUSE_CROSS, 32, 452,
+        268, 24, BS_AUTOCHECKBOX | WS_TABSTOP);
+    label(S(L"Sensibilidad del ratón", L"Mouse sensitivity"), 32, 488, 270);
+    slider(ID_SENSITIVITY, 28, 510, 274, 5, 200, 50);
 
-    // Panel derecho: Idioma y controles
-    add(L"BUTTON", S(L"Idioma y controles interactivos", L"Language and interactive controls"), 0, 332, 76, 652, 558, BS_GROUPBOX);
-    label(S(L"Idioma", L"Language"), 348, 92, 60);
-    combo(ID_LANG, 412, 88, 240,
+    add(L"STATIC",
+        S(L"Pantalla principal asignada automáticamente.",
+          L"Primary display selected automatically."),
+        0, 32, 560, 268, 38);
+
+    // Panel derecho: Idioma y controles interactivos
+    add(L"BUTTON", S(L"Idioma y controles interactivos", L"Language and interactive controls"), 0, 332, 146, 652, 558, BS_GROUPBOX);
+    label(S(L"Idioma", L"Language"), 348, 172, 60);
+    combo(ID_LANG, 412, 168, 226,
           {S(L"Automático (Windows)", L"Automatic (Windows)"), L"Español", L"English",
            L"Français", L"Deutsch", L"Italiano", L"Nederlands", L"Svenska"});
-    label(S(L"Mando", L"Controller"), 668, 92, 60);
-    combo(ID_DEVICE, 732, 88, 236, {S(L"Buscando mandos…", L"Searching for controllers…")});
+    label(S(L"Mando", L"Controller"), 654, 172, 60);
+    combo(ID_DEVICE, 718, 168, 250, {S(L"Buscando mandos…", L"Searching for controllers…")});
 
-    label(L"Sixaxis", 348, 126, 60);
-    combo(ID_MOTION, 412, 122, 240,
-          {S(L"Automático: giroscopio si está disponible", L"Automatic: gyro if available"),
-           S(L"Giroscopio preferente (respaldo: stick R)", L"Prefer gyroscope (fallback: stick R)"),
-           S(L"Stick R únicamente", L"Right stick only")});
-    label(S(L"Sensibilidad giro", L"Gyro sensitivity"), 668, 126, 120);
-    slider(ID_GYRO_SENS, 792, 120, 176, 20, 300, 100);
-
-    label(S(L"Zona muerta", L"Deadzone"), 348, 160, 84);
-    slider(ID_DEADZONE, 436, 154, 216, 2, 50, 15);
-    sensor_status = add(L"STATIC", L"", 0, 668, 158, 300, 24);
+    label(S(L"Sensibilidad Sixaxis", L"Sixaxis sensitivity"), 348, 206, 136);
+    slider(ID_GYRO_SENS, 488, 202, 150, 20, 300, 100);
+    label(S(L"Zona muerta", L"Deadzone"), 654, 206, 88);
+    slider(ID_DEADZONE, 746, 202, 114, 2, 50, 15);
+    sensor_status = add(L"STATIC", L"", 0, 866, 204, 102, 24);
 
     // Mapeo interactivo: selector de dispositivo y restablecer
-    label(S(L"Mapeo a editar", L"Mapping to edit"), 348, 194, 110);
-    combo(ID_MAP_MODE, 468, 190, 270,
+    label(S(L"Mapeo a editar", L"Mapping to edit"), 348, 242, 115);
+    combo(ID_MAP_MODE, 468, 238, 260,
           {S(L"Teclado y ratón (simultáneo)", L"Keyboard & Mouse (simultaneous)"),
            S(L"Mando (simultáneo)", L"Controller (simultaneous)")});
-    add(L"BUTTON", S(L"Restaurar predeterminados", L"Reset defaults"), ID_DEFAULTS, 754, 190, 214, 26, WS_TABSTOP);
+    add(L"BUTTON", S(L"Restaurar predeterminados", L"Reset defaults"), ID_DEFAULTS, 740, 238, 228, 28, WS_TABSTOP);
 
     // Canvas interactivo del mando (628 x 396)
     WNDCLASSW cwc{};
@@ -877,20 +881,19 @@ void create_controls() {
     cwc.lpszClassName = L"bakugan_gamepad_canvas";
     RegisterClassW(&cwc);
 
-    int canvas_y = 226;
-    if (canvas_y >= 76)
-        canvas_y += 70;
+    int canvas_x = 344;
+    int canvas_y = 282;
     gamepad_canvas = CreateWindowExW(0, cwc.lpszClassName, L"", WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS,
-                                     344, canvas_y, 628, 396, window,
+                                     canvas_x, canvas_y, 628, 396, window,
                                      (HMENU)ID_GAMEPAD_CANVAS, GetModuleHandleW(nullptr), nullptr);
-    controls.push_back({gamepad_canvas, 344, canvas_y, 628, 396});
+    controls.push_back({gamepad_canvas, canvas_x, canvas_y, 628, 396});
 
     status = add(L"STATIC",
                  S(L"Haz clic en cualquier botón del mando para asignarlo. Teclado y mando funcionan simultáneamente.",
                    L"Click any button on the controller to bind it. Keyboard and controller work simultaneously."),
-                 0, 24, 648, 950, 38);
-    add(L"BUTTON", S(L"Guardar ajustes", L"Save settings"), ID_SAVE, 656, 690, 150, 30, WS_TABSTOP);
-    add(L"BUTTON", S(L"Jugar", L"Play"), ID_PLAY, 822, 690, 150, 30,
+                 0, 24, 724, 620, 56);
+    add(L"BUTTON", S(L"Guardar ajustes", L"Save settings"), ID_SAVE, 660, 730, 150, 38, WS_TABSTOP);
+    add(L"BUTTON", S(L"Jugar", L"Play"), ID_PLAY, 824, 730, 150, 38,
         BS_DEFPUSHBUTTON | WS_TABSTOP);
 
     fill_controls();
@@ -955,9 +958,6 @@ LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             update_bindings();
         else if (id == ID_DEVICE && HIWORD(wp) == CBN_SELCHANGE) {
             read_device();
-            refresh_devices();
-            update_bindings();
-        } else if (id == ID_MOTION && HIWORD(wp) == CBN_SELCHANGE) {
             refresh_devices();
             update_bindings();
         } else if (id == ID_UI_LANG && HIWORD(wp) == CBN_SELCHANGE) {
