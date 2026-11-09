@@ -60,6 +60,14 @@ Close the game with Alt+F4 or `CloseMainWindow`. Never use
 `Stop-Process -Force`/`taskkill /F` without explicit user approval: audio is not
 released and the process can block the next link.
 
+- **PROHIBICIÓN ESTRICTA (NO EJECUTAR EN WINSTA0 / FONDOS OCULTOS):**
+  Queda terminantemente prohibido que los agentes ejecuten el juego o pruebas
+  en estaciones de ventana secundarias (`WinSta0`) o subprocesos de fondo donde
+  la ventana resulte invisible en el escritorio real del usuario. El usuario
+  necesita ver cómo se ve la ventana del juego en su escritorio físico y probarla
+  de forma interactiva. Para pruebas del usuario, indicarle que ejecute
+  `BakuganBrawlers.cmd` o `bakugan-recomp\build\BakuganLauncher.exe` directamente.
+
 ## Tests and verification
 
 - There is no aggregate runner for `tools/tests/`. Each `*_test.c[pp]` is a

@@ -309,6 +309,9 @@ Se diseñó e implementó una caché en disco para los Vertex Shaders (`guest_vp
    - El hilo serial de `frame_clock` consume ~34,5 ms en combate para procesar la lógica del guest y la sumisión de comandos. La GPU opera al 7,5 % de carga.
    - Sostener 60 FPS requeriría procesar el frame completo en menos de 16,67 ms, lo cual es inalcanzable sin una reescritura que paralelice la emulación del PPU/GCM en múltiples hilos host. Por consiguiente, la meta validada y estable para esta arquitectura es 30 FPS con fidelidad visual íntegra.
 
+### Regla de Ejecución Interactiva y Prohibición de WinSta0
+Queda **estrictamente prohibido** ejecutar pruebas o el juego en estaciones de ventana secundarias (`WinSta0`) o contextos de fondo invisibles. El usuario debe poder ver y probar la ventana en su escritorio real de Windows. Toda prueba orientada a validación interactiva debe ejecutarse directamente desde el entorno del usuario mediante `BakuganBrawlers.cmd` o `bakugan-recomp\build\BakuganLauncher.exe`.
+
 ## Estado Final y Conclusiones de Cierre
 
 1. **Cortes de audio**: Completamente resueltos mediante la vectorización SSSE3/SSE2 en `spu_helpers.h`. La carga del núcleo MultiStream bajó de 94,1 % a 74,9 %, los bloques silenciosos en combate se redujeron de 16–134 a **0**, y la grabación loopback WASAPI registró el 100 % de paquetes audibles sin discontinuidades.

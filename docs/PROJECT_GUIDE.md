@@ -171,6 +171,7 @@ una copia limpia del savedata. Detalles y límites en `docs/SCENE_CHECKPOINTS.md
 | Reintroducir `patches/0049-asset-io-bounded-cache.patch` sin aislamiento | Integración no validada visualmente |
 | Nuevos reportes síncronos en `frame_clock` | Pueden perturbar scheduling y tiempos del guest |
 | Concluir que más FPS equivale a optimización | Pueden faltar cientos de draws y geometría |
+| Ejecutar pruebas o el juego en `WinSta0` o escritorios ocultos | PROHIBIDO: el usuario necesita ver e interactuar con la ventana real en su pantalla física |
 
 Otras señales de regresión: atributos half/s16 con `be16lo`/`be16hi` invertidos alteran componentes, a veces solo en cinemáticas; un triángulo transitorio puede deberse a datos del cuadro anterior. No cambiar texturas, SPU o shaders para compensar un fallo de I/O sin evidencia.
 
