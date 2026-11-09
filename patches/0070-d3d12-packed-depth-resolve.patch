@@ -1,0 +1,332 @@
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -117,7 +117,7 @@
+     } tex[RSX_MAX_TEXTURES];
+     int tex_depth[RSX_MAX_TEXTURES];
+     rsx_fp_shadow_desc shadow[RSX_MAX_TEXTURES];
+-    u32 zeta_off, zeta_w, zeta_h, zeta_fmt;
++    u32 zeta_off, zeta_w, zeta_h, zeta_fmt, zeta_gen;
+     int zeta_slot;
+     float viewport_scale[4], viewport_offset[4];
+     int tex_rt[RSX_MAX_TEXTURES];      /* pre-pass: OffRT index sampled by unit, -1 = none */
+@@ -127,6 +127,7 @@
+     int blend;          /* guest blend enable at draw time */
+     u32 blend_key;      /* packed guest blend state (factors+equation), PSO key */
+     u32 depth_key;     /* snapshot: enable, write mask, comparison (PSO key) */
++    u32 packed_depth_units;
+     int depth_bias;
+     float slope_bias;
+     /* Render-to-texture: which colour surface this op targets. 0 = a display
+@@ -233,6 +234,7 @@
+     u32 cull;               /* packed face culling (PSO key) */
+     u32 alpha_ctl;           /* alpha enable/function/reference (PSO key) */
+     u32 depth_key;           /* guest depth comparison/write/enable (PSO key) */
++    u32 packed_depth_units;
+     rsx_fp_shadow_desc shadow[RSX_MAX_TEXTURES];
+     int depth_bias;
+     float slope_bias;
+@@ -2062,7 +2064,8 @@
+                 fprintf(mf, "      depth=%X bias=%d/%g cull=%X actl=%X texrt=%d,%d,%d,%d\n",
+                     r->depth_key, r->depth_bias, r->slope_bias, r->cull, r->alpha_ctl,
+                     r->tex_rt[0],r->tex_rt[1],r->tex_rt[2],r->tex_rt[3]);
+-                fprintf(mf, "      shader_window=%08X\n", r->shader_window);
++                fprintf(mf, "      shader_window=%08X packed_depth=%04X\n",
++                        r->shader_window, r->packed_depth_units);
+                 for (int u = 0; u < RSX_MAX_TEXTURES; u++)
+                     if (r->tex[u].set)
+                         fprintf(mf, "      t%d off=0x%08X fmt=0x%02X (%s%s) %ux%u remap=0x%04X address=%08X filter=%08X control=%08X border=%08X\n", u,
+@@ -2931,10 +2934,47 @@
+     if (isfinite(st->polygon_offset_scale)) *slope = st->polygon_offset_scale;
+ }
+ 
++static int fp_apply_packed_depth(char* hlsl, size_t capacity, u32 units, u32 cube_mask)
++{
++    if (!units) return 0;
++    static const char helper[] =
++        "float4 _rsx_unpack_zeta(float4 depth) {\n"
++        "    uint z = (uint)round(saturate(depth.x) * 16777215.0);\n"
++        "    return float4((z >> 16) & 255, (z >> 8) & 255, z & 255, 0) / 255.0;\n"
++        "}\n";
++    char prefix[6144];
++    memcpy(prefix, helper, sizeof helper);
++    size_t used = sizeof helper - 1;
++    for (u32 unit = 0; unit < RSX_MAX_TEXTURES; ++unit) {
++        if (!(units & (1u << unit))) continue;
++        static const char* const methods[] = {"Sample", "SampleBias", "SampleLevel"};
++        for (u32 mode = 0; mode < sizeof methods / sizeof methods[0]; ++mode) {
++            char sampler[48], call[48];
++            snprintf(sampler, sizeof sampler, cube_mask ? "rsx_tex%u.%s(" : "rsx_tex[%u].%s(", unit, methods[mode]);
++            if (!strstr(hlsl, sampler)) continue;
++            snprintf(call, sizeof call, "_rsx_zeta_sample_%u_%u(", unit, mode);
++            const char* args = mode ? "s, uv, lod" : "s, uv";
++            int written = snprintf(prefix + used, sizeof prefix - used,
++                "#define _rsx_zeta_sample_%u_%u(%s) _rsx_unpack_zeta(%s%s))\n",
++                unit, mode, args, sampler, args);
++            if (written < 0 || (size_t)written >= sizeof prefix - used) return -1;
++            used += (size_t)written;
++            hlsl_replace_all(hlsl, capacity, sampler, call);
++            if (strstr(hlsl, sampler)) return -1;
++        }
++    }
++    size_t length = strlen(hlsl) + 1;
++    if (length + used > capacity) return -1;
++    memmove(hlsl + used, hlsl, length);
++    memcpy(hlsl, prefix, used);
++    return 0;
++}
++
+ static ID3D12PipelineState* vp_get_fp_pso(int vs_idx, u32 fp_addr, u32 blend, int nrt,
+                                           DXGI_FORMAT rtfmt, int exp32, u32 cmask, u32 cull,
+                                           u32 cube_mask, u32 depth_key, u32 alpha_ctl,
+-                                          int depth_bias, float slope_bias, const rsx_fp_shadow_desc* shadow)
++                                          int depth_bias, float slope_bias, const rsx_fp_shadow_desc* shadow,
++                                          u32 packed_depth_units)
+ {
+     if (nrt < 1) nrt = 1; if (nrt > 4) nrt = 4;
+     if (rtfmt == 0) rtfmt = DXGI_FORMAT_R8G8B8A8_UNORM;
+@@ -2992,6 +3032,7 @@
+             s_d3d.vp_fp[i].cull == cull &&
+             s_d3d.vp_fp[i].cube_mask == cube_mask &&
+             s_d3d.vp_fp[i].depth_key == depth_key &&
++            s_d3d.vp_fp[i].packed_depth_units == packed_depth_units &&
+             s_d3d.vp_fp[i].alpha_ctl == alpha_ctl &&
+             s_d3d.vp_fp[i].depth_bias == depth_bias &&
+             s_d3d.vp_fp[i].slope_bias == slope_bias &&
+@@ -3060,6 +3101,8 @@
+     int n = fp_decompile_for_draw(vm_base + off, 4096, fp_ctrl, cube_mask,
+                                   hlsl, sizeof(hlsl), shadow);
+     if (n <= 0) { static int _e=0; if(PS3_LOG_FIRST(_e, 16)) printf("[FP] decompile fail (fp=0x%08X)\n", fp_addr); return NULL; }
++    if (fp_apply_packed_depth(hlsl, sizeof hlsl, packed_depth_units, cube_mask) < 0)
++        return NULL;
+     /* Alpha-masked depth passes must discard transparent fragments before
+      * writing depth. The reference is part of the PSO key, so each compiled
+      * comparison retains the state of its own draw. */
+@@ -3391,6 +3434,7 @@
+     s_d3d.vp_fp[s_d3d.vp_fp_n].cull    = cull;
+     s_d3d.vp_fp[s_d3d.vp_fp_n].cube_mask = cube_mask;
+     s_d3d.vp_fp[s_d3d.vp_fp_n].depth_key = depth_key;
++    s_d3d.vp_fp[s_d3d.vp_fp_n].packed_depth_units = packed_depth_units;
+     memcpy(s_d3d.vp_fp[s_d3d.vp_fp_n].shadow, shadow, sizeof(s_d3d.vp_fp[0].shadow));
+     s_d3d.vp_fp[s_d3d.vp_fp_n].depth_bias = depth_bias;
+     s_d3d.vp_fp[s_d3d.vp_fp_n].slope_bias = slope_bias;
+@@ -3411,7 +3455,7 @@
+     return vp_get_fp_pso(dr->vs_idx, dr->fp_addr, blend, dr_num_rts(dr),
+         dr->rt_off ? rsx_surface_dxgi(dr->rt_fmt) : DXGI_FORMAT_R8G8B8A8_UNORM,
+         dr->fp_exp32, dr->cmask, dr->cull, dr_cube_mask(dr), dr->depth_key,
+-        alpha, dr->depth_bias, dr->slope_bias, dr->shadow);
++        alpha, dr->depth_bias, dr->slope_bias, dr->shadow, dr->packed_depth_units);
+ }
+ 
+ /* Upload the guest texture for a VP draw into a per-frame texture slot
+@@ -4105,6 +4149,7 @@
+ static void dr_record_zeta(D3D12DrawRecord* dr, const rsx_state* st)
+ {
+     if (!st) return;
++    dr->zeta_gen = g_guest_gen;
+     dr->zeta_off = st->surface_zeta_offset;
+     dr->zeta_w = st->surface_clip_w;
+     dr->zeta_h = st->surface_clip_h;
+@@ -4506,6 +4551,72 @@
+         s_rt_alias[s_rt_alias_n].gen = g_guest_gen;
+         s_rt_alias_n++;
+     }
++}
++
++typedef struct {
++    u32 src, dst, width, height, gen, tiles, ready_draw;
++} PackedDepthResolve;
++static PackedDepthResolve s_depth_resolves[4];
++static unsigned s_depth_resolve_count;
++
++static int draw_writes_zeta(const D3D12DrawRecord* draw)
++{
++    return draw->is_vp && draw->zeta_fmt == 2 &&
++        (draw->is_clear ? (draw->clear_mask & 1u) != 0 : (draw->depth_key & 3u) == 3u);
++}
++
++void rsx_d3d12_backend_depth_resolve_tile(u32 dst, u32 src, u32 width, u32 rows, u32 cols)
++{
++    for (u32 d = s_d3d.draw_count; d > 0; --d) {
++        const D3D12DrawRecord* draw = &s_d3d.draws[d - 1];
++        if (!draw_writes_zeta(draw) || !draw->zeta_off || draw->zeta_w != width ||
++            draw->zeta_h != rows || src < draw->zeta_off) continue;
++        u32 delta = src - draw->zeta_off;
++        u32 tile = delta / 4096u;
++        if (delta % 4096u || tile * 512u >= width || dst < delta / 2u) continue;
++        u32 base = dst - delta / 2u;
++        u32 remaining = width - tile * 512u;
++        if (!base || (base & 0xFFFFu) || cols != (remaining < 512u ? remaining : 512u))
++            continue;
++        PackedDepthResolve* resolve = NULL;
++        for (unsigned i = 0; i < s_depth_resolve_count; ++i)
++            if (s_depth_resolves[i].dst == base) { resolve = &s_depth_resolves[i]; break; }
++        if (!resolve) {
++            if (s_depth_resolve_count >= sizeof s_depth_resolves / sizeof s_depth_resolves[0]) return;
++            resolve = &s_depth_resolves[s_depth_resolve_count++];
++            memset(resolve, 0, sizeof *resolve);
++        }
++        if (resolve->src != draw->zeta_off || resolve->width != width ||
++            resolve->height != rows || resolve->ready_draw != s_d3d.draw_count)
++            resolve->tiles = 0;
++        resolve->dst = base;
++        resolve->src = draw->zeta_off;
++        resolve->width = width;
++        resolve->height = rows;
++        resolve->ready_draw = s_d3d.draw_count;
++        resolve->tiles |= 1u << tile;
++        resolve->gen = g_guest_gen;
++        return;
++    }
++}
++
++static const PackedDepthResolve* find_packed_resolve(u32 off, u32 w, u32 h, u32 draw_index)
++{
++    for (unsigned i = 0; i < s_depth_resolve_count; ++i) {
++        const PackedDepthResolve* r = &s_depth_resolves[i];
++        if (r->dst == off && r->width == w && r->height == h && r->ready_draw <= draw_index &&
++            r->tiles == ((1u << ((w + 511u) / 512u)) - 1u)) return r;
++    }
++    return NULL;
++}
++
++static int packed_depth_range_unchanged(u32 address, u32 width, u32 height, u32 gen)
++{
++    const u64 end = (u64)address + (u64)width * height * 4u;
++    if (!address || !width || !height || end > 0x100000000ull) return 0;
++    for (u32 p = address >> 12; p <= (end - 1u) >> 12; ++p)
++        if (g_guest_page_gen[p] > gen) return 0;
++    return 1;
+ }
+ 
+ /* Ensure an RT resource exists for this surface; (re)creates the RTV at
+@@ -5543,10 +5654,25 @@
+      * A texture whose offset matches an offscreen RT samples the RT directly
+      * (tex_slot 1000+idx) -- no guest-memory upload. */
+     double _pre0 = perf_on() ? perf_now() : 0.0;
++    static int packed_depth = -1;
++    static const char* packed_gate;
++    if (packed_depth < 0) {
++        const char* value = getenv("RSX_PACKED_DEPTH");
++        packed_depth = !value || atoi(value) != 0;
++        packed_gate = getenv("RSX_PACKED_DEPTH_GATE");
++    }
++    if (packed_gate) {
++        DWORD attributes = GetFileAttributesA(packed_gate);
++        packed_depth = attributes != INVALID_FILE_ATTRIBUTES;
++    }
++    extern u32 cellGcmResolveLocated(int local, u32 offset);
++    u32 zeta_writer[MAX_DEPTH_SURFACES] = {0};
+     for (int _i = 0; _i < VP_TEX_SLOTS; _i++) s_d3d.vp_tex[_i].used = 0;
+     for (u32 _d = 0; _d < s_d3d.draw_count && _d < MAX_DRAWS; _d++) {
+         D3D12DrawRecord* dr = &s_d3d.draws[_d];
++        if (dr->zeta_slot >= 0 && draw_writes_zeta(dr)) zeta_writer[dr->zeta_slot] = _d + 1;
+         if (!dr->is_vp || dr->is_clear) continue;
++        dr->packed_depth_units = 0;
+         /* Debug: RTT_VIEWRT=<hex raw offset> makes display draws sample that
+          * offscreen RT at t0 (the composite blit then shows it fullscreen). */
+         { static const char* vr = (const char*)1;     /* hoisted: this runs per DRAW */
+@@ -5637,13 +5763,38 @@
+                           D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING);
+                 continue;
+             }
+-            if (dr->tex[_u].set && (dr->tex[_u].fmt & 0x9Fu) == 0x90) {
+-                int zeta = depth_pool_find(dr->tex[_u].raw, dr->tex[_u].w, dr->tex[_u].h);
++            const int packed = packed_depth && dr->tex[_u].fmt == 0xA5 &&
++                (dr->tex[_u].ctrl1 & 0xFFFFu) == 0xA993 &&
++                ((dr->tex[_u].sampler_filter >> 16) & 0x707u) == 0x101u &&
++                dr->tex[_u].mips <= 1 && !dr->tex[_u].cube &&
++                (!dr->tex[_u].pitch || dr->tex[_u].pitch == dr->tex[_u].w * 4u) &&
++                dr->tex[_u].off == cellGcmResolveLocated(1, dr->tex[_u].raw) &&
++                off_rt_find(dr->tex[_u].raw) < 0 && off_rt_alias_find(dr->tex[_u].raw) < 0;
++            if (dr->tex[_u].set && (packed || (dr->tex[_u].fmt & 0x9Fu) == 0x90)) {
++                const u32 raw = dr->tex[_u].raw;
++                const u32 w = dr->tex[_u].w, h = dr->tex[_u].h;
++                const PackedDepthResolve* alias = packed ? find_packed_resolve(raw, w, h, _d) : NULL;
++                int zeta = depth_pool_find(alias ? alias->src : raw, w, h);
++                if (packed && zeta >= 0) {
++                    u32 writer = zeta_writer[zeta];
++                    if (zeta == dr->zeta_slot || !writer || writer > _d ||
++                        (alias && writer > alias->ready_draw) ||
++                        !packed_depth_range_unchanged(dr->tex[_u].off, w, h,
++                            alias ? alias->gen : s_d3d.draws[writer - 1].zeta_gen))
++                        zeta = -1;
++                }
+                 if (zeta >= 0 && !(zeta == dr->zeta_slot && (dr->depth_key & 2u))) {
+-                    rsx_fp_shadow_desc_from_texture(&dr->shadow[_u], dr->tex[_u].fmt,
+-                        2, dr->tex[_u].cube, dr->tex[_u].mips, dr->tex[_u].sampler_filter,
+-                        dr->tex[_u].sampler_address, dr->tex[_u].sampler_control);
+-                    if (dr->shadow[_u].enabled == 2) memset(&dr->shadow[_u], 0, sizeof(dr->shadow[_u]));
++                    if (packed) {
++                        /* The ARGB crossbar exposes depth high/mid/low as RGB.
++                         * shortcut: the alpha/stencil lane is zero until this
++                         * backend supports guest stencil writes. */
++                        dr->packed_depth_units |= 1u << _u;
++                    } else {
++                        rsx_fp_shadow_desc_from_texture(&dr->shadow[_u], dr->tex[_u].fmt,
++                            2, dr->tex[_u].cube, dr->tex[_u].mips, dr->tex[_u].sampler_filter,
++                            dr->tex[_u].sampler_address, dr->tex[_u].sampler_control);
++                        if (dr->shadow[_u].enabled == 2) memset(&dr->shadow[_u], 0, sizeof(dr->shadow[_u]));
++                    }
+                     dr->tex_depth[_u] = zeta;
+                     srv_write(wslot, s_depth_pool.surfaces[zeta].resource,
+                         DXGI_FORMAT_R24_UNORM_X8_TYPELESS, D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING);
+@@ -6391,6 +6542,7 @@
+     vp_staging_frame_end();
+     memset(s_fp_units, 0, sizeof s_fp_units);
+     s_d3d.draw_count = 0;
++    s_depth_resolve_count = 0;
+     s_d3d.vp_parity ^= 1;  /* next frame's records go to the other half */
+ 
+     /* Debug: RTT_SAVERT=<hex raw offset>[:frame] copies that offscreen RT
+@@ -9398,5 +9550,7 @@
+ { (void)pixels; (void)width; (void)height; }
+ void rsx_d3d12_backend_alias_resolve(u32 dst_off, u32 src_off)
+ { (void)dst_off; (void)src_off; }
++void rsx_d3d12_backend_depth_resolve_tile(u32 dst, u32 src, u32 w, u32 h, u32 cols)
++{ (void)dst; (void)src; (void)w; (void)h; (void)cols; }
+ 
+ #endif /* _WIN32 */
+diff --git a/libs/video/cellGcmSys.c b/libs/video/cellGcmSys.c
+--- a/libs/video/cellGcmSys.c
++++ b/libs/video/cellGcmSys.c
+@@ -1047,15 +1047,17 @@
+ static void gcm_row_copy(u32 d, u32 s, u32 n)
+ {
+     extern u8* vm_base;
++    extern void ps3_guest_stamp(uint32_t ea, uint32_t n);
+     const u32 l0 = d & ~127u, l1 = (d + n - 1) & ~127u;
+     int reserved = 0;
+     for (u32 a = l0; a <= l1 && !reserved; a += 128) reserved = spu_coh_is_reserved(a);
+-    if (!reserved) { memmove(vm_base + d, vm_base + s, n); return; }
++    if (!reserved) { memmove(vm_base + d, vm_base + s, n); ps3_guest_stamp(d, n); return; }
+     spu_lockline_lock();
+     memmove(vm_base + d, vm_base + s, n);
+     for (u32 a = l0; a <= l1; a += 128)
+         if (spu_coh_is_reserved(a)) spu_coh_notify_write(a);
+     spu_lockline_unlock();
++    ps3_guest_stamp(d, n);
+ }
+ 
+ static u64 s_scaled_rows = 0, s_scaled_pixels = 0;
+@@ -1128,6 +1130,7 @@
+ /* rsx_d3d12_backend.c: this backend keeps render targets on the GPU, so the
+  * only way a resolved copy can be sampled is to redirect it to the target. */
+ void rsx_d3d12_backend_alias_resolve(u32 dst_off, u32 src_off);
++void rsx_d3d12_backend_depth_resolve_tile(u32 dst, u32 src, u32 width, u32 rows, u32 cols);
+ 
+ static void nv3089_blit(void)
+ {
+@@ -1380,6 +1383,12 @@
+          * its own pixels. */
+         if (s_nv3089.ds_dx != 0x100000u || s_nv3089.dt_dy != 0x100000u)
+             rsx_d3d12_backend_alias_resolve(s_gcm2d.dst_offset, s_nv3089.in_off);
++        if (f == 3 && src_local && dst_local && s_nv3089.ds_dx == 0x200000u &&
++            s_nv3089.dt_dy == 0x100000u && u0 == 16 && v0 == 8 &&
++            !out_x && !out_y && !x0 && !y0 && out_w == 512 && x1 > 0 && y1 > 0 &&
++            dst_pitch % 4u == 0 && dst_pitch <= 4096u * 4u && in_pitch >= 2u * dst_pitch)
++            rsx_d3d12_backend_depth_resolve_tile(s_gcm2d.dst_offset, s_nv3089.in_off,
++                                                 dst_pitch / 4u, y1, x1);
+     }
+     { static int _n = 0; static int cap = -1;
+       if (cap < 0) { const char* e = getenv("NV3089_DBG"); cap = e ? atoi(e) : 0; }

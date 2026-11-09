@@ -6,7 +6,7 @@ recompilación estática del código PPU y SPU de PS3 con
 
 El ejecutable resultante es un programa nativo: no hay emulador ni intérprete en
 tiempo de ejecución. Este directorio **no contiene código del juego**: el
-código en `recompiled/` y `spu/` se regenera con `../tools/pipeline.py` a partir
+código en `recompiled/` y `spu/` se genera con las herramientas del toolkit a partir
 de tu propio disco.
 
 ## Ficheros
@@ -22,19 +22,18 @@ de tu propio disco.
 
 ## Compilar y ejecutar
 
+Desde la raíz del repositorio, con una build Release ya configurada:
+
 ```powershell
-..\.venv\Scripts\python.exe ..\tools\build.py
-..\tools\run.ps1
+.\.venv\Scripts\ninja.exe -C bakugan-recomp\build
+.\BakuganBrawlers.cmd
 ```
 
-`build.py` toma el entorno de MSVC desde `vcvars64.bat` (los headers y librerías
-que clang-cl necesita), usa el CMake y el Ninja del venv del proyecto y compila
-con `clang-cl` — no `cl`, que carece de `__int128`, `__atomic_*` y
-`__builtin_bswap*`.
-
-`run.ps1` fija `PS3_VFS_ROOT=<repo>/game`, de donde `main.cpp` deriva las rutas
-`/dev_hdd0/...` del invitado.
+Se necesita clang-cl, el SDK de Windows, el toolkit y los lifts generados desde
+el dump propio. `cl` no admite las extensiones que requiere el port.
+Los antiguos `tools/build.py` y `tools/pipeline.py` ya no existen.
 
 ## Estado
 
-Ver [`../docs/STATUS.md`](../docs/STATUS.md).
+Ver la [guía vigente](../docs/PROJECT_GUIDE.md) y los
+[defectos y validaciones](../docs/DEFECTOS_Y_INSTALADOR.md).

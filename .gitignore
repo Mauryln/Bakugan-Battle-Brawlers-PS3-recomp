@@ -74,6 +74,7 @@ famous-ref/
 !docs/img/*.png
 !docs/img/*.gif
 !bakugan-recomp/assets/game_icon.png
+!bakugan-recomp/assets/bakugan.ico
 
 shadercache/
 

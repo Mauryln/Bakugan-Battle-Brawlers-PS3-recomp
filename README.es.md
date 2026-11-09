@@ -1,6 +1,5 @@
 <div align="center">
 
-<img src="docs/img/title.jpg" alt="Bakugan: Battle Brawlers como ejecutable nativo de Windows" width="100%">
 
 <h1>Bakugan: Battle Brawlers — recompilación nativa de la versión PS3 para Windows</h1>
 
@@ -15,7 +14,7 @@
 <img src="https://img.shields.io/badge/status-jugable%20de%20principio%20a%20fin-yellow?style=flat-square" alt="Jugable de principio a fin; rendimiento limitado por el motor">
 </p>
 
-<p><a href="README.md">English</a> · <a href="docs/PROJECT_GUIDE.md">Guía técnica</a> · <a href="docs/LAUNCHER.md">Launcher y controles</a></p>
+<p><a href="README.md">English</a> · <a href="docs/PROJECT_GUIDE.md">Guía técnica</a> · <a href="docs/PROJECT_GUIDE.md">Launcher y controles</a></p>
 
 </div>
 
@@ -23,7 +22,7 @@
 > la subida de vértices mientras el dueño prepara materiales. En ocho ventanas
 > balanceadas de arena, frame_clock bajó del **80,1% al 69,0% de un núcleo**;
 > la media pasó de **28,71 a 29,30 FPS**, con mejor p95/p99. La CPU total del
-> proceso fue similar. **Siguen pendientes los 30 FPS estables.** [Mediciones y límites](docs/SESSION_20261107_WALKER.md).
+> proceso fue similar. **Siguen pendientes los 30 FPS estables.** [Mediciones y límites](docs/PROJECT_GUIDE.md).
 
 > Se conservan también reducciones pequeñas del filtro de depuración y copias de tiras; su aumento adicional combinado de FPS sigue sin medirse.
 
@@ -31,13 +30,13 @@
 > cuadro completo de 720p a 1080p. La ventana se ajusta al monitor e incluye modo
 > sin bordes y gestión de DPI. La arena medida promedió **28,02 FPS**:
 > mejora la resolución de salida, **sin aumento demostrado de FPS**.
-> [Uso y límites](docs/FSR.md) · [Resultados de sesión](docs/SESSION_20261106_FSR.md).
+> [Uso y límites](docs/PROJECT_GUIDE.md) · [Resultados de sesión](docs/PROJECT_GUIDE.md).
 >
 > **06/11/2026 — gran mejora de rendimiento en batalla.** Las escenas de arena
 > medidas alcanzan aproximadamente **27–28 FPS**, frente a la referencia anterior
 > de **16–17 FPS**. Las copias coherentes por filas de NV3089 reducen trabajo CPU
 > y conservan escenario, agua y HUD en las capturas revisadas.
-> **Todavía no hay release:** el launcher y el mapeo están implementados; los 30 FPS
+> **Todavía no hay release:** el mapeo está implementado; launcher e instalador quedan aplazados; los 30 FPS
 > sostenidos siguen pendientes. La última optimización aún no se validó en un
 > duelo completo posterior al lanzamiento ni en todas las arenas.
 > [Mejora medida](#mejoras-recientes-de-rendimiento) · [Estado](docs/PROJECT_GUIDE.md).
@@ -48,7 +47,6 @@ El código levantado se compila por adelantado; los trabajos SPU dinámicos sin 
 
 | | |
 |---|---|
-| ![Menús de arranque](docs/img/newgame.jpg) | ![Intro narrativa](docs/img/intro.jpg) |
 | Flujo de título, aviso de guardado, carga, nueva partida / continuar | Intro narrativa — H.264/AAC con Media Foundation |
 
 ## Estado
@@ -77,17 +75,17 @@ El código levantado se compila por adelantado; los trabajos SPU dinámicos sin 
 
 **El juego es jugable de principio a fin. El launcher y el mapeo están implementados; faltan ampliar las pruebas de hardware y validar 30 FPS sostenidos para el lanzamiento.**
 
-## Launcher y controles
+## Arranque y controles
 
-Ejecuta `tools/run.ps1` sin argumentos o abre `bakugan-recomp/build/BakuganLauncher.exe`.
-El launcher con estética Bakugan carga el fondo y la imagen del título del dump local; no distribuye assets.
-El usuario completó una partida Bakugan con esta build. El launcher guarda resolución de salida, FSR 1, nitidez, filtrado anisotrópico, límite de FPS,
-modo de ventana, idioma EU y mapeo de botones y palancas PS3 en
-`%LOCALAPPDATA%/BakuganRecomp/player.ini`. El idioma predeterminado sigue Windows.
-SDL3 detecta mandos y sensores reales; sin sensores se utiliza la palanca derecha.
-Se probaron mapeo y sensores de DS4; DualSense y Switch Pro requieren validación física.
-Los parámetros explícitos del script o `-Direct` conservan el arranque de desarrollo.
-[Controles, compilación y validación](docs/LAUNCHER.md).
+Ejecuta `BakuganBrawlers.cmd` desde la raíz del repositorio. Los logs quedan en
+`%LOCALAPPDATA%\BakuganRecomp`. El launcher y el instalador antiguos se retiraron;
+su reconstrucción queda aplazada hasta validar el runtime.
+
+El ejecutable lee gráficos, idioma y controles personalizados de
+`%LOCALAPPDATA%\BakuganRecomp\player.ini`; el entorno explícito tiene prioridad.
+El render interno sigue a 1280x720 y FSR1 escala la salida.
+Consulta la [guía técnica](docs/PROJECT_GUIDE.md) y los
+[defectos vigentes](docs/DEFECTOS_Y_INSTALADOR.md).
 
 ## Mejoras recientes de rendimiento
 
@@ -105,7 +103,7 @@ Las cifras de subida corresponden a ocho ventanas balanceadas de 30 segundos en
 el mismo proceso, anteriores a las dos adiciones pequeñas. La combinación final
 está compilada y conservada; **su ganancia adicional no está medida y siguen
 pendientes los 30 FPS estables**.
-[Resultados completos, pruebas y opciones de rollback](docs/SESSION_20261107_WALKER.md).
+[Resultados completos, pruebas y opciones de rollback](docs/PROJECT_GUIDE.md).
 
 La referencia histórica de 16–17 FPS y las observaciones anteriores de 27–28 FPS
 proceden de ejecuciones diferentes: muestran avance, no un porcentaje A/B.
@@ -141,7 +139,7 @@ límites de direcciones y fallbacks de coherencia. No requiere toolkit ni datos 
 
 ## Se busca ayuda
 
-1. **Rendimiento.** Reducir tirones de carga y alcanzar 30 FPS sostenidos, conservando efectos y cuadros completos. Lo ya medido y lo descartado está en [`docs/SESSION_20261107_WALKER.md`](docs/SESSION_20261107_WALKER.md).
+1. **Rendimiento.** Reducir tirones de carga y alcanzar 30 FPS sostenidos, conservando efectos y cuadros completos. Lo ya medido y lo descartado está en [`docs/PROJECT_GUIDE.md`](docs/PROJECT_GUIDE.md).
 2. **Guardado.** Cargar una partida funciona; escribirla está incompleto.
 3. **Control.** El pad se simula desde el camino del teclado en vez de traducirse desde la librería de input del juego.
 4. **Lo que queda de audio.** Las partituras de menú y el mezclador SPU funcionan; los efectos `.PAST` son ATRAC3 y siguen en silencio, y quedan cortes por revisar. `libs/audio/`.

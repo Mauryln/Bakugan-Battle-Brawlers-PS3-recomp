@@ -1,0 +1,54 @@
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -377,6 +377,9 @@
+     u64 frame_count;
+     u64 last_fps_time;
+     u32 fps;
++    u64 fps_title_start;
++    u32 fps_title_presents;
++    int fps_title_enabled;
+ 
+     int initialized;
+ } D3D12State;
+@@ -6747,16 +6750,27 @@
+          * clock (tearing is expected). */
+         static int novsync = -1;
+         if (novsync < 0) novsync = getenv("PS3_NOVSYNC") ? 1 : 0;
+-        s_d3d.swap_chain->lpVtbl->Present(s_d3d.swap_chain, novsync ? 0 : 1, 0);
++        HRESULT result = s_d3d.swap_chain->lpVtbl->Present(s_d3d.swap_chain, novsync ? 0 : 1, 0);
++        if (s_d3d.fps_title_enabled && result == S_OK) {
++            u64 now = GetTickCount64();
++            if (!s_d3d.fps_title_start) s_d3d.fps_title_start = now;
++            else ++s_d3d.fps_title_presents;
++            u64 elapsed = now - s_d3d.fps_title_start;
++            if (elapsed >= 1000) {
++                char title[160];
++                snprintf(title, sizeof(title), "%s | FPS: %.1f", g_rsx_title_base,
++                         1000.0 * s_d3d.fps_title_presents / (double)elapsed);
++                SetWindowTextA(s_d3d.hwnd, title);
++                s_d3d.fps_title_start = now;
++                s_d3d.fps_title_presents = 0;
++            }
++        }
+     }
+ 
+     move_to_next_frame();
+ 
+     s_d3d.frame_count++;
+ 
+-    /* The title bar keeps the game name only. FPS, draw counts and surface
+-     * sizes stay in the optional logs; showing them in the window made a
+-     * shipped build look like a debug tool. */
+ }
+ 
+ /* ---------------------------------------------------------------------------
+@@ -9187,6 +9201,8 @@
+ 
+     s_d3d.initialized = 1;
+     s_d3d.last_fps_time = GetTickCount64();
++    const char* fps_title = getenv("PS3_FPS_TITLE");
++    s_d3d.fps_title_enabled = fps_title && strcmp(fps_title, "1") == 0;
+ 
+     printf("[D3D12] Backend ready: %ux%u\n", width, height);
+     return 0;

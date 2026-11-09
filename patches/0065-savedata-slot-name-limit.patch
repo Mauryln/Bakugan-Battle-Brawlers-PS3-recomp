@@ -1,0 +1,11 @@
+diff --git a/libs/system/cellSaveData.c b/libs/system/cellSaveData.c
+--- a/libs/system/cellSaveData.c
++++ b/libs/system/cellSaveData.c
+@@ -605,5 +605,7 @@
+ static int savedata_dir_matches(const char* name, const char* prefix)
+ {
++    /* Slot identifiers must survive the guest's fixed-size name field intact. */
++    if (strlen(name) >= CELL_SAVEDATA_DIRNAME_SIZE) return 0;
+     if (!prefix || !prefix[0]) return 1;
+     const char* seg = prefix;
+     for (;;) {

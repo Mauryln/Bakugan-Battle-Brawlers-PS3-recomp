@@ -49,7 +49,7 @@ int main() {
     CHECK(WritePrivateProfileStringW(L"Graphics", L"Output", L"nonsense", path.c_str()));
     CHECK(WritePrivateProfileStringW(L"Keyboard", L"14", L"key:9999", path.c_str()));
     CHECK(load(loaded, path.wstring(), &error));
-    CHECK(loaded.sharpness == 0.6f && loaded.output == L"1080p");
+    CHECK(loaded.sharpness == 0.6f && loaded.output == L"720p");
     CHECK(loaded.keyboard[CROSS].code == 'X');
     CHECK(WritePrivateProfileStringW(L"Player", L"Version", L"999", path.c_str()));
     CHECK(!load(loaded, path.wstring(), &error));
@@ -61,6 +61,16 @@ int main() {
     CHECK(!GetEnvironmentVariableW(L"PAD_AUTOPRESS", env, 128));
     CHECK(!GetEnvironmentVariableW(L"PS3_LANG", env, 128));
     CHECK(GetEnvironmentVariableW(L"PS3_OUTPUT", env, 128) && std::wstring(env) == L"1440p");
+    SetEnvironmentVariableW(L"PS3_DEBUG", L"1");
+    SetEnvironmentVariableW(L"PAD_REPLAY", L"test.padrec");
+    SetEnvironmentVariableW(L"PS3_SAVEDATA_CHOICE", L"BLES00758-PLAYER-DATA-00");
+    apply_environment(c, path.wstring());
+    CHECK(GetEnvironmentVariableW(L"PAD_REPLAY", env, 128) && std::wstring(env) == L"test.padrec");
+    CHECK(GetEnvironmentVariableW(L"PS3_SAVEDATA_CHOICE", env, 128));
+    SetEnvironmentVariableW(L"PS3_DEBUG", nullptr);
+    apply_environment(c, path.wstring());
+    CHECK(!GetEnvironmentVariableW(L"PAD_REPLAY", env, 128));
+    CHECK(!GetEnvironmentVariableW(L"PS3_SAVEDATA_CHOICE", env, 128));
     std::array<float, ACTION_COUNT> v{};
     std::array<float, 3> a{0, 9.80665f, 0}, g{};
     MotionPulse pulse;

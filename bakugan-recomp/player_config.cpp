@@ -104,6 +104,18 @@ Config defaults() {
     c.gamepad[R_LEFT] = {BindingKind::AxisNegative, SDL_GAMEPAD_AXIS_RIGHTX};
     return c;
 }
+bool has_input_overrides(const Config& c) {
+    const Config base = defaults();
+    auto equal_binding = [](const Binding& a, const Binding& b) {
+        return a.kind == b.kind && a.code == b.code;
+    };
+    return c.input != base.input || c.motion != base.motion ||
+           !c.device_guid.empty() || !c.device_serial.empty() ||
+           c.mouse_look != base.mouse_look || c.mouse_left_cross != base.mouse_left_cross ||
+           c.mouse_sensitivity != base.mouse_sensitivity || c.deadzone != base.deadzone ||
+           !std::equal(c.keyboard.begin(), c.keyboard.end(), base.keyboard.begin(), equal_binding) ||
+           !std::equal(c.gamepad.begin(), c.gamepad.end(), base.gamepad.begin(), equal_binding);
+}
 std::wstring config_path() {
     wchar_t root[32768];
     DWORD n = GetEnvironmentVariableW(L"LOCALAPPDATA", root, 32768);
@@ -286,7 +298,11 @@ void apply_environment(const Config &c, const std::wstring &path) {
     auto env = [](const wchar_t *key, const std::wstring &value) {
         SetEnvironmentVariableW(key, value.empty() ? nullptr : value.c_str());
     };
-    env(L"PS3_PLAYER_CONFIG", path);
+    /* "Auto" with no device chosen is the fresh-install default. Leave it on
+     * the port's old input path, which is the one the reference runs use; the
+     * launcher bridge is opt-in by choosing a device or a manual mode. */
+    const bool default_input = !has_input_overrides(c);
+    env(L"PS3_PLAYER_CONFIG", default_input ? L"" : path);
     env(L"PS3_INTERNAL", L"720");
     env(L"PS3_OUTPUT", c.output);
     env(L"PS3_FSR", c.fsr);
@@ -302,7 +318,21 @@ void apply_environment(const Config &c, const std::wstring &path) {
     const wchar_t *probes[] = {L"PAD_RECORD",    L"PAD_REPLAY",      L"PAD_FILE",
                                L"PAD_AUTOPRESS", L"PAD_SCRIPT",      L"PAD_STICK",
                                L"PAD_SWEEP",     L"YDKJ_INJECT_PAD", L"PS3_SAVEDATA_CHOICE"};
-    for (auto k : probes)
-        SetEnvironmentVariableW(k, nullptr);
+    /* Do not forward a renderer diagnostic from whatever shell started the
+     * launcher: these are documented to remove the HUD, cinematics or cards.
+     * PS3_DEBUG=1 is the explicit opt-in for a diagnostic run. */
+    {
+        wchar_t debug[8];
+        if (GetEnvironmentVariableW(L"PS3_DEBUG", debug, 8) == 0) {
+            for (auto k : probes)
+                SetEnvironmentVariableW(k, nullptr);
+            static const wchar_t *const kBreaksImage[] = {
+                L"SRV_SHADOW", L"DRAW_KEEP_TEX", L"DRAW_LAST_TEX", L"DRAW_KEEP_BLEND",
+                L"TEX_MARKEMPTY", L"EMPTYTEX", L"DEPTH_OFF", L"TEX_RESOLVE_AUTO",
+                L"PS3_NOVSYNC", L"SPU_CH_BLOCK"};
+            for (auto k : kBreaksImage)
+                SetEnvironmentVariableW(k, nullptr);
+        }
+    }
 }
 } // namespace player

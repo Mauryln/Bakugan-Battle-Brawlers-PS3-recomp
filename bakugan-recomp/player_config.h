@@ -52,6 +52,7 @@ struct Config {
 };
 const wchar_t *action_name(int action, bool english = false);
 Config defaults();
+bool has_input_overrides(const Config& config);
 std::wstring config_path();
 bool load(Config &config, const std::wstring &path, std::wstring *error = nullptr);
 bool save(const Config &config, const std::wstring &path, std::wstring *error = nullptr);

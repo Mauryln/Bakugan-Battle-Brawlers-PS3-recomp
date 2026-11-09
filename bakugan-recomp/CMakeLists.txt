@@ -176,6 +176,7 @@ add_executable(${PROJECT_NAME}
     main.cpp
     stubs.cpp
     savedata_overlay.cpp
+    scene_state.cpp
     ${PS3RECOMP_SCAFFOLD}
     ${HLE_NID_TABLE}
     ${RECOMP_SOURCES}
@@ -216,9 +217,7 @@ if(PORT_SPU_SSE41 AND SPU_SOURCES AND WIN32 AND CMAKE_SIZEOF_VOID_P EQUAL 8
     endif()
 endif()
 
-# app.rc carries the icon, the version block and the manifest, and needs a
-# resource compiler. Listing it as a source on a host that has none is not a
-# link error, it is a "no rule to make" for a file nothing can consume.
+# Keep version information even when there is no locally generated icon.
 if(WIN32 AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/app.rc")
     target_sources(${PROJECT_NAME} PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/app.rc")
     # GUI subsystem: no console window. main() is kept as the entry point.

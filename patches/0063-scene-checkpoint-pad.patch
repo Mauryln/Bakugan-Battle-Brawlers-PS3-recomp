@@ -1,0 +1,42 @@
+diff --git a/libs/input/cellPad.c b/libs/input/cellPad.c
+index 0eede9d..9840d66 100644
+--- a/libs/input/cellPad.c
++++ b/libs/input/cellPad.c
+@@ -17,6 +17,9 @@
+ #include <stdlib.h>
+ #include <string.h>
+ #include <math.h>
++#ifdef _WIN32
++#include <share.h>   /* _SH_DENYNO: the scene checkpoint tool reads the live file */
++#endif
+ #include "../../runtime/platform/win32_compat.h"   /* GetTickCount64 on POSIX */
+ #include "../../runtime/ppu/ppu_memory.h"   /* GUEST_PTR, vm_write*: guest EA -> host */
+ #include "ps3emu/log_first.h"
+@@ -737,7 +740,13 @@ static void pad_rec_open(void)
+      * overwrite the file being played. */
+     { const char* rc = getenv("PAD_RECORD");
+       if (rc && *rc && !s_rec.replaying) {
++#ifdef _WIN32
++          /* Read-share the live file so an external checkpoint copy can read it
++           * while the guest keeps playing. */
++          FILE* f = _fsopen(rc, "wb", _SH_DENYNO);
++#else
+           FILE* f = fopen(rc, "wb");
++#endif
+           if (!f) {
+               fprintf(stderr, "[cellPad] PAD_RECORD: cannot write %s\n", rc);
+           } else {
+@@ -838,6 +847,13 @@ static void pad_rec_apply(u16* button)
+       button[CELL_PAD_BTN_OFFSET_ANALOG_RIGHT_Y] = e->ry; }
+ }
+ 
++/* Sample the replay is currently showing, or -1 when no replay is advancing.
++ * The scene checkpoint uses it to cut the replay at the current screen. */
++int cellPad_replay_cursor(void)
++{
++    return s_rec.replaying ? s_rec.cur : -1;
++}
++
+ /* HLE args are GUEST effective addresses; guest structs are BIG-ENDIAN. The
+  * vm_write helpers from ppu_memory.h translate + byte-swap. (cellPad was
+  * written for host pointers and was never actually invoked until its NIDs

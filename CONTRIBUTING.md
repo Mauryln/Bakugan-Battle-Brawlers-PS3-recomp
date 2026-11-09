@@ -9,11 +9,9 @@ are smaller than they look.
   `bakugan-recomp/recompiled/`, `bakugan-recomp/spu/` and `ps3recomp-src/` are
   generated from a copyrighted disc and stay out of git. `.gitignore` already
   covers them; check `git status` before you push.
-- **Toolkit changes go in `patches/`, not in `ps3recomp-src/`.** The checkout is
-  disposable: edit it to test, then regenerate the patch with
-  `git -C ps3recomp-src diff > patches/0001-....patch` and reset the checkout.
-  `tools/pipeline.py --only patch` reapplies the series; it is idempotent and
-  recognises overlapping patches.
+- **Preserve the local toolkit checkout.** It has independent history and local
+  changes. Do not reset, rebase, switch branches or reapply the patch series.
+  Preserve focused fixes as patches after validation; see [AGENTS.md](AGENTS.md).
 - **Measurements beat guesses.** Every fix here started with an env knob
   (`RSX_CAP`, `VDEFDBG`, `VTXALLF`, `RTT_STAT`, `MTDBG`, ...). If you think you
   found a bug, capture the evidence first — it usually turns out to be elsewhere.
@@ -45,13 +43,17 @@ problem twice.
 
 ## Tests
 
-`tools/test_*.py` are standalone checks. Most need the toolkit checkout, a
-compiler and sometimes a local MP4; `test_pipeline_patches.py` runs anywhere and
-is what CI exercises.
+Checks that need no disc or toolkit checkout:
 
 ```powershell
-.\.venv\Scripts\python.exe tools\test_pipeline_patches.py
+python -m compileall -q tools
+python tools/test_repository_contract.py
 ```
 
-For anything that changes rendering, attach a before/after frame and the draw
-manifest (`RSX_CAP`) instead of a screenshot alone.
+Local runtime regression checks require the prepared Release tree and clang-cl:
+`tools/test_spurs_taskset_workload.py`, `tools/test_spu_user_event_ack.py` and
+`tools/test_player_boot.py`. See the [technical guide](docs/PROJECT_GUIDE.md).
+
+Validate rendering with actual game-window screenshots, audio and gameplay.
+RSX captures and draw manifests help diagnose backend behavior; they do not
+replace visual verification of HUD, cards and both card cinematics.

@@ -1,0 +1,69 @@
+diff --git a/libs/system/cellSaveData.c b/libs/system/cellSaveData.c
+index c1ff5b4..48758f5 100644
+--- a/libs/system/cellSaveData.c
++++ b/libs/system/cellSaveData.c
+@@ -458,12 +458,22 @@ static int savedata_choose(const CellSaveDataSlotInfo* slots, int count, int foc
+     return -1;
+ }
+ 
++/* The applet returns CELL_CANCEL (1) when the player backs out of the dialog.
++ * Reporting it as CELL_SAVEDATA_CBRESULT_ERR_NODATA made every list operation
++ * return CELL_SAVEDATA_ERROR_CBRESULT instead, which a title can mistake for a
++ * fatal profile failure (this is where the guest's exit(-1) at the main menu
++ * comes from). s_select_cancelled carries the host picker's cancel to the
++ * caller without changing the guest callback's result code. */
++#define CELL_SAVEDATA_RET_CANCEL 1
++static int s_select_cancelled;
++
+ static s32 dispatch_func_select(uint32_t func_opd, const CellSaveDataDirList* dirList,
+                                 const CellSaveDataSlotInfo* slots,
+                                 uint32_t dirCount, uint32_t setBuf_ea, int is_save,
+                                 uint32_t userdata_ea, const char* who, char selected[64])
+ {
+     selected[0] = '\0';
++    s_select_cancelled = 0;
+     if (!g_ps3_guest_caller) return CELL_SAVEDATA_CBRESULT_ERR_FAILURE;
+ 
+     scratch_reset();
+@@ -536,7 +546,8 @@ static s32 dispatch_func_select(uint32_t func_opd, const CellSaveDataDirList* di
+ 
+     if (choice == 0) {
+         printf("[cellSaveData] %s: selection cancelled%c", who, 10);
+-        return CELL_SAVEDATA_CBRESULT_ERR_NODATA;
++        s_select_cancelled = 1;
++        return CELL_SAVEDATA_CBRESULT_OK_NEXT;
+     }
+     if (choice > 0) {
+         snprintf(selected, 64, "%s", chosen);
+@@ -1442,6 +1453,11 @@ s32 cellSaveDataListSave2(u32 version, CellSaveDataSetList* setList,
+                                           (uint32_t)(uintptr_t)userdata, "funcList", selectedDir);
+     (void)listSet;
+ 
++    if (s_select_cancelled) {
++        free(dirList);
++        free(slots);
++        return CELL_SAVEDATA_RET_CANCEL;
++    }
+     if (cbResult.result < 0) {
+         free(dirList);
+         free(slots);
+@@ -1508,6 +1524,11 @@ s32 cellSaveDataListLoad2(u32 version, CellSaveDataSetList* setList,
+                                           (uint32_t)(uintptr_t)userdata, "funcList", selectedDir);
+     (void)listSet;
+ 
++    if (s_select_cancelled) {
++        free(dirList);
++        free(slots);
++        return CELL_SAVEDATA_RET_CANCEL;
++    }
+     if (cbResult.result < 0) {
+         free(dirList);
+         free(slots);
+@@ -1969,6 +1990,7 @@ s32 cellSaveDataListDelete(CellSaveDataSetList* setList, CellSaveDataSetBuf* set
+                                       (uint32_t)(uintptr_t)userdata, "funcList", directory);
+     free(dirList);
+     free(slots);
++    if (s_select_cancelled) return CELL_SAVEDATA_RET_CANCEL;
+     if (result < 0) return CELL_SAVEDATA_ERROR_CBRESULT;
+     if (!directory[0]) return CELL_SAVEDATA_ERROR_NODATA;
+     return savedata_delete_one(directory, (uint32_t)(uintptr_t)funcDone,

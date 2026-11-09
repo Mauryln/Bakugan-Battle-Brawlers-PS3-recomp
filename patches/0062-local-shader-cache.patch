@@ -1,0 +1,400 @@
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -248,6 +248,7 @@
+  * and ~17 shaders were recompiled EVERY frame -- about half the frame's CPU
+  * time. Entries are small (a PSO pointer plus key fields). */
+ #define VP_FP_CACHE 256
++static wchar_t s_fp_cache_identity[160];
+ 
+ /* ---------------------------------------------------------------------------
+  * Internal state
+@@ -1079,6 +1080,27 @@
+             return -1;
+         }
+         printf("[D3D12] Device created on default adapter (feature level 11.0)\n");
++    }
++
++    {
++        LUID luid;
++        s_d3d.device->lpVtbl->GetAdapterLuid(s_d3d.device, &luid);
++        IDXGIAdapter1* adapter = NULL;
++        if (SUCCEEDED(factory->lpVtbl->EnumAdapterByLuid(
++                factory, luid, &IID_IDXGIAdapter1, (void**)&adapter))) {
++            DXGI_ADAPTER_DESC1 desc;
++            LARGE_INTEGER version;
++            if (SUCCEEDED(adapter->lpVtbl->GetDesc1(adapter, &desc)) &&
++                SUCCEEDED(adapter->lpVtbl->CheckInterfaceSupport(
++                    adapter, &IID_IDXGIDevice, &version))) {
++                swprintf(s_fp_cache_identity, 160, L"%04X_%04X_%08X_%X_%016llX",
++                         desc.VendorId, desc.DeviceId, desc.SubSysId, desc.Revision,
++                         (unsigned long long)version.QuadPart);
++            }
++            adapter->lpVtbl->Release(adapter);
++        }
++        if (!s_fp_cache_identity[0])
++            fprintf(stderr, "[FP] adapter/driver identity unavailable; memory cache only\n");
+     }
+ 
+     /* Create command queue */
+@@ -2685,68 +2707,136 @@
+     return hash;
+ }
+ 
+-/* One container for every compiled fragment program.
+- *
+- * The old layout was one file per program, read back without checking that it
+- * held a bytecode blob at all: 239 of them accumulated, nothing was ever
+- * reclaimed, and a file cut short by a hard shutdown was still handed to D3D12,
+- * whose pipeline creation then failed in silence -- a draw that produces no
+- * pixels with no other symptom. Records are now bounds- and magic-checked when
+- * the container is read, and a partial tail is dropped instead of trusted.
+- *
+- * Format, all host order: [u64 source hash][u32 size][size bytes of DXBC]... */
+-#define FP_CACHE_FILE "shadercache/fp_v3.cache"
++#define FP_CACHE_FILE s_fp_cache_path
++#define FP_CACHE_VERSION 4
+ #define FP_CACHE_MAX_RECORD (1u << 20)
+-#define FP_CACHE_MAX_FILE   (1u << 26)
+-/* Written field by field: sizeof(struct) would carry alignment padding. */
+-#define FP_CACHE_HDR 12u
+-
++#define FP_CACHE_MAX_FILE (1u << 26)
++#define FP_CACHE_HDR 16u
++#include <io.h>
++
++static wchar_t s_fp_cache_path[MAX_PATH];
+ static struct { u8* data; u32 size; int ready; } s_fpcache;
++typedef struct fp_cache_write {
++    wchar_t path[MAX_PATH];
++    u32 size;
++    u8 data[];
++} fp_cache_write;
++static struct {
++    CRITICAL_SECTION lock;
++    HANDLE wake, idle;
++    fp_cache_write* pending;
++    int started;
++} s_fp_writer;
++
++static u32 fp_cache_checksum(u64 key, const void* data, u32 size)
++{
++    const u8* bytes = data;
++    u32 hash = 2166136261u;
++    for (u32 i = 0; i < 8; i++) { hash ^= (u8)(key >> (i * 8)); hash *= 16777619u; }
++    for (u32 i = 0; i < 4; i++) { hash ^= (u8)(size >> (i * 8)); hash *= 16777619u; }
++    for (u32 i = 0; i < size; i++) { hash ^= bytes[i]; hash *= 16777619u; }
++    return hash;
++}
++
++static DWORD WINAPI fp_cache_writer(void* unused)
++{
++    (void)unused;
++    for (;;) {
++        WaitForSingleObject(s_fp_writer.wake, INFINITE);
++        EnterCriticalSection(&s_fp_writer.lock);
++        fp_cache_write* job = s_fp_writer.pending;
++        s_fp_writer.pending = NULL;
++        LeaveCriticalSection(&s_fp_writer.lock);
++        if (!job) continue;
++        wchar_t temporary[MAX_PATH + 40];
++        swprintf(temporary, MAX_PATH + 40, L"%ls.tmp.%lu", job->path,
++                 (unsigned long)GetCurrentProcessId());
++        FILE* file = _wfopen(temporary, L"wb");
++        int ok = 0;
++        if (file) {
++            ok = fwrite(job->data, 1, job->size, file) == job->size;
++            ok &= fflush(file) == 0;
++            ok &= _commit(_fileno(file)) == 0;
++            ok &= fclose(file) == 0;
++        }
++        if (!ok || !MoveFileExW(temporary, job->path,
++                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
++            fprintf(stderr, "[FP] local cache write failed (err=%lu)\n",
++                    (unsigned long)GetLastError());
++            DeleteFileW(temporary);
++        }
++        free(job);
++        EnterCriticalSection(&s_fp_writer.lock);
++        if (!s_fp_writer.pending) SetEvent(s_fp_writer.idle);
++        LeaveCriticalSection(&s_fp_writer.lock);
++    }
++}
++
++static void fp_cache_flush(void)
++{
++    if (s_fp_writer.started &&
++        WaitForSingleObject(s_fp_writer.idle, 5000) != WAIT_OBJECT_0)
++        fprintf(stderr, "[FP] local cache flush timed out; previous file retained\n");
++}
++
++void rsx_d3d12_backend_flush_shader_cache(void)
++{
++    fp_cache_flush();
++}
+ 
+ static void fp_cache_save(void)
+ {
+-    CreateDirectoryA("shadercache", NULL);
+-    { char tmp[] = FP_CACHE_FILE ".tmp";
+-      FILE* f = fopen(tmp, "wb");
+-      if (!f) {
+-          fprintf(stderr, "[FP] cache save: cannot open %s\n", tmp);
+-          return;
+-      }
+-      int ok = s_fpcache.size == 0 ||
+-               fwrite(s_fpcache.data, 1, s_fpcache.size, f) == s_fpcache.size;
+-      ok &= fclose(f) == 0;
+-      /* A half-written save must never replace a good container. */
+-      if (!ok) {
+-          fprintf(stderr, "[FP] cache save: short write of %u bytes\n", s_fpcache.size);
+-          remove(tmp);
+-          return;
+-      }
+-      if (!MoveFileExA(tmp, FP_CACHE_FILE, MOVEFILE_REPLACE_EXISTING)) {
+-          fprintf(stderr, "[FP] cache save: replace failed (err=%lu)\n",
+-                  (unsigned long)GetLastError());
+-          remove(tmp);
+-      } }
+-}
+-
+-/* Append in memory only; the caller decides when to persist. */
++    if (!s_fp_cache_path[0]) return;
++    if (!s_fp_writer.started) {
++        InitializeCriticalSection(&s_fp_writer.lock);
++        s_fp_writer.wake = CreateEventW(NULL, FALSE, FALSE, NULL);
++        s_fp_writer.idle = CreateEventW(NULL, TRUE, TRUE, NULL);
++        HANDLE thread = s_fp_writer.wake && s_fp_writer.idle
++            ? CreateThread(NULL, 0, fp_cache_writer, NULL, 0, NULL) : NULL;
++        if (!thread) {
++            if (s_fp_writer.wake) CloseHandle(s_fp_writer.wake);
++            if (s_fp_writer.idle) CloseHandle(s_fp_writer.idle);
++            DeleteCriticalSection(&s_fp_writer.lock);
++            s_fp_cache_path[0] = 0;
++            return;
++        }
++        CloseHandle(thread);
++        s_fp_writer.started = 1;
++    }
++    /* The writer owns an immutable snapshot; render never waits for file I/O. */
++    fp_cache_write* job = malloc(sizeof(*job) + s_fpcache.size);
++    if (!job) return;
++    wcscpy_s(job->path, MAX_PATH, s_fp_cache_path);
++    job->size = s_fpcache.size;
++    if (job->size) memcpy(job->data, s_fpcache.data, job->size);
++    EnterCriticalSection(&s_fp_writer.lock);
++    free(s_fp_writer.pending);
++    s_fp_writer.pending = job;
++    ResetEvent(s_fp_writer.idle);
++    SetEvent(s_fp_writer.wake);
++    LeaveCriticalSection(&s_fp_writer.lock);
++}
++
+ static int fp_cache_add(u64 hash, const void* code, u32 size)
+ {
+-    if (size < 4 || size > FP_CACHE_MAX_RECORD || memcmp(code, "DXBC", 4) != 0)
+-        return 0;
++    if (size < 4 || size > FP_CACHE_MAX_RECORD || memcmp(code, "DXBC", 4) ||
++        s_fpcache.size > FP_CACHE_MAX_FILE - FP_CACHE_HDR - size) return 0;
+     u32 need = s_fpcache.size + FP_CACHE_HDR + size;
+     u8* grown = realloc(s_fpcache.data, need);
+     if (!grown) return 0;
+     s_fpcache.data = grown;
+-    memcpy(s_fpcache.data + s_fpcache.size, &hash, 8);
+-    memcpy(s_fpcache.data + s_fpcache.size + 8, &size, 4);
+-    memcpy(s_fpcache.data + s_fpcache.size + FP_CACHE_HDR, code, size);
++    u32 checksum = fp_cache_checksum(hash, code, size);
++    memcpy(grown + s_fpcache.size, &hash, 8);
++    memcpy(grown + s_fpcache.size + 8, &size, 4);
++    memcpy(grown + s_fpcache.size + 12, &checksum, 4);
++    memcpy(grown + s_fpcache.size + FP_CACHE_HDR, code, size);
+     s_fpcache.size = need;
+     return 1;
+ }
+ 
+ static const void* fp_cache_find(u64 hash, u32* size)
+ {
+-    for (u32 off = 0; off + FP_CACHE_HDR <= s_fpcache.size; ) {
++    for (u32 off = 0; off + FP_CACHE_HDR <= s_fpcache.size;) {
+         u64 rec_hash; u32 rec_size;
+         memcpy(&rec_hash, s_fpcache.data + off, 8);
+         memcpy(&rec_size, s_fpcache.data + off + 8, 4);
+@@ -2756,80 +2846,55 @@
+     return NULL;
+ }
+ 
+-/* Import what the per-program layout still holds, then delete those files: they
+- * are regenerable cache, and leaving them is what accumulated 239 of them. Runs
+- * on every start until the directory is clean, cheap because it is one listing. */
+-static int fp_cache_sweep_legacy(void)
+-{
+-    WIN32_FIND_DATAA fd;
+-    HANDLE h = FindFirstFileA("shadercache\\fp_*.dxbc", &fd);
+-    if (h == INVALID_HANDLE_VALUE) return 0;
+-    int changed = 0;
+-    do {
+-        char path[520];
+-        snprintf(path, sizeof path, "shadercache\\%s", fd.cFileName);
+-        unsigned long long named = 0;
+-        if (sscanf(fd.cFileName, "fp_hlsl_v1_%16llX", &named) == 1 && named) {
+-            u32 have = 0;
+-            if (!fp_cache_find((u64)named, &have)) {
+-                FILE* f = fopen(path, "rb");
+-                if (f) {
+-                    fseek(f, 0, SEEK_END); long sz = ftell(f); fseek(f, 0, SEEK_SET);
+-                    if (sz > 4 && sz <= (long)FP_CACHE_MAX_RECORD) {
+-                        void* buf = malloc((size_t)sz);
+-                        if (buf && fread(buf, 1, (size_t)sz, f) == (size_t)sz)
+-                            fp_cache_add((u64)named, buf, (u32)sz);
+-                        free(buf);
+-                    }
+-                    fclose(f);
+-                }
+-            }
+-        }
+-        DeleteFileA(path);
+-        changed = 1;
+-    } while (FindNextFileA(h, &fd));
+-    FindClose(h);
+-    return changed;
+-}
+-
+ static void fp_cache_load(void)
+ {
+     if (s_fpcache.ready) return;
+     s_fpcache.ready = 1;
++    s_fp_cache_path[0] = 0;
++    if (!s_fp_cache_identity[0]) return;
++    wchar_t base[MAX_PATH], directory[MAX_PATH];
++    DWORD count = GetEnvironmentVariableW(L"LOCALAPPDATA", base, MAX_PATH);
++    if (!count || count >= MAX_PATH) return;
++    if (swprintf(directory, MAX_PATH, L"%ls\\BakuganRecomp", base) < 0) return;
++    if (!CreateDirectoryW(directory, NULL) && GetLastError() != ERROR_ALREADY_EXISTS) return;
++    if (swprintf(directory, MAX_PATH, L"%ls\\BakuganRecomp\\shadercache", base) < 0) return;
++    if (!CreateDirectoryW(directory, NULL) && GetLastError() != ERROR_ALREADY_EXISTS) return;
++    if (swprintf(s_fp_cache_path, MAX_PATH, L"%ls\\fp_v%d_%ls.cache", directory,
++                 FP_CACHE_VERSION, s_fp_cache_identity) < 0) {
++        s_fp_cache_path[0] = 0;
++        return;
++    }
++    printf("[FP] local shader cache: %ls\n", s_fp_cache_path);
++    FILE* file = _wfopen(s_fp_cache_path, L"rb");
++    if (!file) return;
+     int truncated = 0;
+-    FILE* f = fopen(FP_CACHE_FILE, "rb");
+-    if (f) {
+-        fseek(f, 0, SEEK_END); long sz = ftell(f); fseek(f, 0, SEEK_SET);
+-        if (sz > 0 && sz <= (long)FP_CACHE_MAX_FILE) {
+-            u8* data = malloc((size_t)sz);
+-            if (data && fread(data, 1, (size_t)sz, f) == (size_t)sz) {
+-                u32 good = 0, records = 0;
+-                while (good + FP_CACHE_HDR <= (u32)sz) {
+-                    u64 rec_hash; u32 rec_size;
+-                    memcpy(&rec_hash, data + good, 8);
+-                    memcpy(&rec_size, data + good + 8, 4);
+-                    if (rec_size < 4 || rec_size > FP_CACHE_MAX_RECORD ||
+-                        good + FP_CACHE_HDR + rec_size > (u32)sz ||
+-                        memcmp(data + good + FP_CACHE_HDR, "DXBC", 4) != 0)
+-                        break;
+-                    good += FP_CACHE_HDR + rec_size;
+-                    records++;
+-                }
+-                s_fpcache.data = data;
+-                s_fpcache.size = good;
+-                truncated = good != (u32)sz;
+-                { static int _n = 0; if (PS3_LOG_FIRST(_n, 1))
+-                    printf("[FP] shader cache: %u record(s), %u of %ld bytes in %s\n",
+-                           records, good, sz, FP_CACHE_FILE); }
+-            } else {
+-                free(data);
++    fseek(file, 0, SEEK_END); long size = ftell(file); fseek(file, 0, SEEK_SET);
++    if (size > 0 && size <= (long)FP_CACHE_MAX_FILE) {
++        u8* data = malloc((size_t)size);
++        if (data && fread(data, 1, (size_t)size, file) == (size_t)size) {
++            u32 good = 0, records = 0;
++            while (good + FP_CACHE_HDR <= (u32)size) {
++                u32 length, checksum;
++                u64 key;
++                memcpy(&key, data + good, 8);
++                memcpy(&length, data + good + 8, 4);
++                memcpy(&checksum, data + good + 12, 4);
++                if (length < 4 || length > FP_CACHE_MAX_RECORD ||
++                    length > (u32)size - good - FP_CACHE_HDR ||
++                    memcmp(data + good + FP_CACHE_HDR, "DXBC", 4) ||
++                    checksum != fp_cache_checksum(key, data + good + FP_CACHE_HDR, length)) break;
++                good += FP_CACHE_HDR + length;
++                records++;
+             }
+-        }
+-        fclose(f);
+-    }
+-    /* Saving before the read handle closes is denied: replace, don't reopen. */
+-    if (truncated) fp_cache_save();   /* drop a partial tail so appends stay clean */
+-    if (fp_cache_sweep_legacy()) fp_cache_save();
++            s_fpcache.data = data;
++            s_fpcache.size = good;
++            truncated = good != (u32)size;
++            printf("[FP] local shader cache: %u records, %u/%ld bytes%s\n",
++                   records, good, size, truncated ? " (invalid tail rejected)" : "");
++        } else free(data);
++    }
++    fclose(file);
++    if (truncated) fp_cache_save();
+ }
+ 
+ static const void* fp_cache_get(u64 hash, u32* size)
+@@ -2841,7 +2906,8 @@
+ static void fp_cache_put(u64 hash, const void* code, u32 size)
+ {
+     fp_cache_load();
+-    if (fp_cache_add(hash, code, size)) fp_cache_save();
++    u32 previous;
++    if (!fp_cache_find(hash, &previous) && fp_cache_add(hash, code, size)) fp_cache_save();
+ }
+ 
+ static void rsx_polygon_offset(const rsx_state* st, int* bias, float* slope)
+@@ -3171,7 +3237,10 @@
+     ID3DBlob* pb = NULL; ID3DBlob* e = NULL;
+     const void* ps_code; SIZE_T ps_len; HRESULT hr;
+     if (ps_disk) {
+-        ps_code = ps_disk; ps_len = ps_disk_size; hr = S_OK;
++        hr = D3DCreateBlob(ps_disk_size, &pb);
++        if (FAILED(hr) || !pb) return NULL;
++        memcpy(pb->lpVtbl->GetBufferPointer(pb), ps_disk, ps_disk_size);
++        ps_code = pb->lpVtbl->GetBufferPointer(pb); ps_len = ps_disk_size;
+     } else {
+         hr = D3DCompile(hlsl, strlen(hlsl), "guest_fp", NULL, NULL,
+                         "main", "ps_5_0", 0, 0, &pb, &e);
+@@ -3271,7 +3340,6 @@
+     hr = s_d3d.device->lpVtbl->CreateGraphicsPipelineState(
+         s_d3d.device, &pd, &IID_ID3D12PipelineState, (void**)&pso);
+     if (pb) pb->lpVtbl->Release(pb);
+-    /* ps_disk points into the cache container, not the heap: never free it. */
+     if (FAILED(hr)) {
+         static int _e3=0; if (PS3_LOG_FIRST(_e3, 16)) printf("[FP] PSO FAIL (fp=0x%08X, 0x%08lX)\n", fp_addr, hr);
+         ID3D12InfoQueue* iq = NULL;
+@@ -9126,6 +9194,7 @@
+ 
+ void rsx_d3d12_backend_shutdown(void)
+ {
++    fp_cache_flush();
+     vp_pack_workers_shutdown();
+     if (!s_d3d.initialized) return;
+ 
+@@ -9300,6 +9369,7 @@
+     return -1;
+ }
+ void rsx_d3d12_backend_shutdown(void) {}
++void rsx_d3d12_backend_flush_shader_cache(void) {}
+ int rsx_d3d12_backend_pump_messages(void) { return 0; }
+ void rsx_d3d12_backend_present(void) {}
+ void rsx_d3d12_backend_video_frame(const u8* pixels, u32 width, u32 height)
+--- a/libs/video/rsx_d3d12_backend.h
++++ b/libs/video/rsx_d3d12_backend.h
+@@ -73,6 +73,7 @@
+ 
+ /* Shut down the D3D12 backend and release all resources. */
+ void rsx_d3d12_backend_shutdown(void);
++void rsx_d3d12_backend_flush_shader_cache(void);
+ 
+ /* Process Win32 messages. Returns 0 normally, -1 if window closed. */
+ int rsx_d3d12_backend_pump_messages(void);
