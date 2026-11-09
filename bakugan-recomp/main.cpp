@@ -45,6 +45,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <algorithm>
+#include <string>
+#include <vector>
 
 #ifndef _WIN32
 #include <sys/mman.h>   /* mmap: the guest arena, see alloc_guest_vm */
@@ -129,8 +132,11 @@ unsigned cellGcm_flip_request_count(void);
  * so the frame clock below is backend-agnostic. */
 #if defined(_WIN32)
 #include "output_upscale.h"
+#include "scene_state.h"
+#include "player_config.h"
 extern "C" int  rsx_d3d12_backend_init(uint32_t w, uint32_t h, const char* title);
 extern "C" void rsx_d3d12_backend_present(void);
+extern "C" void rsx_d3d12_backend_flush_shader_cache(void);
 extern "C" int  rsx_d3d12_backend_pump_messages(void);
 #  define rsx_backend_init    rsx_d3d12_backend_init
 #  define rsx_backend_present rsx_d3d12_backend_present
@@ -363,6 +369,7 @@ static int pump_timed(void)
         extern void bakugan_input_shutdown();
         bakugan_input_shutdown();
         cellAudioQuit();
+        rsx_d3d12_backend_flush_shader_cache();
         fflush(NULL);
         ExitProcess(0);
     }
@@ -477,6 +484,8 @@ static DWORD WINAPI frame_clock(LPVOID)
                     s_drain_s, secs, s_wait_s, s_pres_s, s_pres_n, s_pump_s, 10);
             s_outer_n = 0; s_due_sum = 0; s_pump_n = 0; s_drain_s = 0.0; s_drain_n = 0; s_wait_s = 0.0; s_wait_n = 0; s_pres_s = 0.0; s_pres_n = 0; s_pump_s = 0.0; s_drain_t0 = t;
           } }
+        /* Optional F5/F9 checkpoints. Disabled unless PS3_SCENE_DIR is set. */
+        scene_state_tick();
     }
     return 0;
 }
@@ -847,6 +856,61 @@ int main(int argc, char** argv)
     /* Pack frozen vertex staging while the owner prepares draw materials.
      * Preserve RSX_PACK_WORKERS=0 as the synchronous diagnostic path. */
     if (!getenv("RSX_PACK_WORKERS")) _putenv_s("RSX_PACK_WORKERS", "2");
+    /* A "-00" directory holding only PARAM.SFO is the aborted first-save stub.
+     * Hide that stub from the load chooser; a real -00 save stays visible. */
+    if (!getenv("PS3_SAVEDATA_HIDE_LOAD"))
+        _putenv_s("PS3_SAVEDATA_HIDE_LOAD", "BLES00758-PLAYER-DATA-00");
+    /* This title needs a quiet log even when stderr is a file or a pipe: the
+     * per-event lines share one FILE lock and starve the guest, and the title
+     * then loses its HUD and cinematics. The launcher already exports 0, but a
+     * direct shortcut or a stale environment must not be able to change that.
+     * PS3_VERBOSE=1 still opts in explicitly. */
+    {
+        player::Config cfg;
+        std::wstring cfg_error;
+        if (player::load(cfg, player::config_path(), &cfg_error)) {
+            auto set_default = [](const char* key, const std::wstring& value) {
+                if (!getenv(key)) {
+                    std::string text(value.begin(), value.end());
+                    _putenv_s(key, text.c_str());
+                }
+            };
+            // Explicit diagnostic settings take precedence over player.ini.
+            set_default("PS3_OUTPUT", cfg.output);
+            set_default("PS3_FSR", cfg.fsr);
+            set_default("PS3_FSR_SHARPNESS", std::to_wstring(cfg.sharpness));
+            set_default("PS3_ANISO", std::to_wstring(cfg.aniso));
+            set_default("PS3_WINDOW_MODE", cfg.window);
+            set_default("PS3_FPS_CAP", cfg.cap);
+            const bool default_input = !player::has_input_overrides(cfg);
+            if (!default_input && !getenv("PS3_PLAYER_CONFIG")) {
+                const std::wstring wpath = player::config_path();
+                _wputenv_s(L"PS3_PLAYER_CONFIG", wpath.c_str());
+            }
+            if (cfg.language != L"auto") set_default("PS3_LANG", cfg.language);
+        } else {
+            fprintf(stderr, "[boot] invalid player.ini; using defaults\n");
+        }
+    }
+    if (!getenv("PS3_VERBOSE")) _putenv_s("PS3_VERBOSE", "0");
+    /* The same applies to the renderer's diagnostic switches: every one of
+     * these was documented to remove HUD, cinematics or cards. Clearing them
+     * here makes the shipped executable independent of the shell or shortcut
+     * that started it. PS3_DEBUG=1 keeps them for deliberate diagnosis. */
+    if (!getenv("PS3_DEBUG")) {
+        static const char* const kBreaksImage[] = {
+            "SRV_SHADOW", "DRAW_KEEP_TEX", "DRAW_LAST_TEX", "DRAW_KEEP_BLEND",
+            "TEX_MARKEMPTY", "EMPTYTEX", "DEPTH_OFF", "TEX_RESOLVE_AUTO",
+            "PS3_NOVSYNC", "SPU_CH_BLOCK"};
+        for (size_t i = 0; i < sizeof kBreaksImage / sizeof kBreaksImage[0]; i++) {
+            const char* value = getenv(kBreaksImage[i]);
+            if (value) {
+                fprintf(stderr, "[boot] ignoring %s=%s (breaks HUD/cinematics)\n",
+                        kBreaksImage[i], value);
+                _putenv_s(kBreaksImage[i], "");
+            }
+        }
+    }
     /* 1 ms timer resolution. The default granularity is about 15.6 ms, which
      * inflates every shorter wait the title makes and throttles the whole
      * thing. POSIX timers are already fine-grained. */
@@ -855,6 +919,47 @@ int main(int argc, char** argv)
 #endif
 
     printf("=== ps3recomp game runner ===\n");
+
+    if (const char* report = getenv("BAKUGAN_BOOT_REPORT")) {
+        if (FILE* file = fopen(report, "wb")) {
+            const char* keys[] = {"PS3_DEBUG", "PS3_VERBOSE", "PS3_VFS_ROOT", "PS3_GAMEDATA_ROOT",
+                "PS3_PLAYER_CONFIG", "PS3_INTERNAL", "PS3_OUTPUT", "PS3_FSR", "PS3_FSR_SHARPNESS",
+                "PS3_FPS_CAP", "PS3_TICK_HZ", "PS3_WINDOW_MODE", "PS3_LANG", "PS3_ANISO",
+                "PS3_LOD_BIAS", "SPU_INTERP_UNLIFTED", "RSX_ACCUM_FRAME", "GCM_FULL_FRAMES",
+                "RSX_PACK_WORKERS", "PAD_REPLAY", "PAD_CLOCK", "PS3_SAVEDATA_CHOICE"};
+            for (const char* key : keys)
+                fprintf(file, "%s=%s\n", key, getenv(key) ? getenv(key) : "<unset>");
+            fprintf(file, "stdio_types=%lu,%lu,%lu priority=%lu\n",
+                GetFileType(GetStdHandle(STD_INPUT_HANDLE)),
+                GetFileType(GetStdHandle(STD_OUTPUT_HANDLE)),
+                GetFileType(GetStdHandle(STD_ERROR_HANDLE)), GetPriorityClass(GetCurrentProcess()));
+            fclose(file);
+        }
+    }
+
+    /* BAKUGAN_ENV_DUMP=<path>: dump the child's whole environment. The
+     * launcher rewrites and clears several PS3_* variables before spawning, so
+     * the inherited environment is the only place to see that difference. */
+    if (const char* dump = getenv("BAKUGAN_ENV_DUMP")) {
+        if (FILE* file = fopen(dump, "wb")) {
+            std::vector<std::string> vars;
+            if (LPWCH block = GetEnvironmentStringsW()) {
+                for (LPWCH p = block; *p; p += wcslen(p) + 1) {
+                    int n = WideCharToMultiByte(CP_UTF8, 0, p, -1, nullptr, 0, nullptr, nullptr);
+                    if (n > 1) {
+                        std::string s((size_t)n, '\0');
+                        WideCharToMultiByte(CP_UTF8, 0, p, -1, s.data(), n, nullptr, nullptr);
+                        s.pop_back();
+                        vars.push_back(std::move(s));
+                    }
+                }
+                FreeEnvironmentStringsW(block);
+            }
+            std::sort(vars.begin(), vars.end());
+            for (const std::string& v : vars) fprintf(file, "%s\n", v.c_str());
+            fclose(file);
+        }
+    }
 
     if (!alloc_guest_vm()) {
         fprintf(stderr, "ERROR: could not allocate the guest address space\n");

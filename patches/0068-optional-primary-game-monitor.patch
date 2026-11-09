@@ -1,0 +1,23 @@
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -950,10 +950,16 @@
+     wc.lpszClassName = "ps3recomp_d3d12";
+     RegisterClassExA(&wc);
+ 
++    const char* monitor_mode = getenv("PS3_WINDOW_MONITOR");
++    HMONITOR target_monitor;
++    if (monitor_mode && strcmp(monitor_mode, "primary") == 0) {
++        POINT primary_origin = {0, 0};
++        target_monitor = MonitorFromPoint(primary_origin, MONITOR_DEFAULTTOPRIMARY);
++    } else {
++        target_monitor = MonitorFromWindow(GetForegroundWindow(), MONITOR_DEFAULTTOPRIMARY);
++    }
+     MONITORINFO monitor = {0}; monitor.cbSize = sizeof(monitor);
+-    if (!GetMonitorInfoA(MonitorFromWindow(GetForegroundWindow(),
+-                                          MONITOR_DEFAULTTOPRIMARY), &monitor))
+-        return NULL;
++    if (!GetMonitorInfoA(target_monitor, &monitor)) return NULL;
+     const char* mode = getenv("PS3_WINDOW_MODE");
+     int borderless = mode && strcmp(mode, "borderless") == 0;
+     DWORD style = borderless ? WS_POPUP : WS_OVERLAPPEDWINDOW;

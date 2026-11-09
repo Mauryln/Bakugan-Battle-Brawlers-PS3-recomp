@@ -4,6 +4,10 @@
 
 ## 1. Propósito y límites
 
+HUD/cartas y cinemáticas corregidos al cierre del 8 de noviembre de 2026;
+causa y pruebas en [punto de continuación](CONTINUAR_HUD.md). Primero terminar
+la aceptación del código, después launcher e instalador. Los 60 FPS se aplazan.
+
 Port nativo para Windows del juego de PS3 mediante recompilación estática de PPU/SPU a C/C++ y emulación de alto nivel (HLE) de librerías PS3 (`cellGcm`, `cellAudio`, `cellSpurs`, `cellSail`, etc.) sobre D3D12, audio y threading del host. El proyecto consta del port y de un checkout separado del toolkit PS3Recomp. El objetivo de optimización es **mejorar rendimiento sin perder fidelidad funcional ni gráfica**. No se acepta una subida de FPS si desaparecen geometría, HUD, efectos, audio o escenas.
 
 ## 2. Estructura del proyecto
@@ -98,14 +102,14 @@ Guest escribe comandos GCM al FIFO
 - Los `upload_*` escriben a `s_d3d.vp_vb_mapped` (192 MB en la versión documentada) y avanzan `vp_vb_offset`.
 - `vp_upload_compact_frame` empaqueta atributos con stride `popcount(mask)*16` y alterna mitades mediante `vp_parity` para no sobrescribir datos en uso por GPU.
 - Los strips indexados contienen reinicios `0x7FFF` aproximadamente cada 13 índices; `upload_native_strip_vp_indexed` inserta puentes y corrige paridad. **No sustituirlo por concatenación ingenua.**
-- La caché `VP_CACHE` usa identidad de draw y generaciones de páginas guest de 4 KB; no reutilizar datos si cambian las páginas leídas.
+- La caché `VP_CACHE` usa identidad de draw y generaciones de páginas guest de 4 KB; no reutilizar datos si cambian las páginas leídas. Las escrituras masivas que no pasan por `vm_write*` (lecturas `cellFs`/`sys_fs`, carga de partidas, PNG) también deben sellar sus páginas; la caché de texturas reutiliza una textura solo si ninguna página de su origen cambió desde la subida (el checksum disperso no detecta cambios pequeños, como un retrato personalizado). `VP_CACHE=0` y `TEX_NOCACHE=1` quedan como rollback de diagnóstico.
 
 **Invariante de layout:** cambiar coordinadamente `s_vertex_fetch_plan.mask/slot_off[]`, `dr->vb_stride`, `dr->gpu_input_mask/dr->gpu_stride` y `s_d3d.vp_vb_offset`. Si un lado escribe compacto y otro lee canónico, puede aparecer pantalla negra sin error. No insertar un `return` en `upload_*` que descarte draws ni romper cadenas `if/else if/else` de primitivas: una regresión documentada redujo ~1743 draws a 51.
 
 ### Shaders, PSO y caché
 
 - Vertex program guest → HLSL mediante `vp_get_vs`, caché por hash.
-- Fragment program → HLSL mediante `rsx_fp_decompiler.c`, compilación con `D3DCompile` y caché en `shadercache/fp_v2.cache` (registros con hash, tamaño y cabecera DXBC validada).
+- Fragment program → HLSL mediante `rsx_fp_decompiler.c`, compilación con `D3DCompile` y caché local `%LOCALAPPDATA%/BakuganRecomp/shadercache/fp_v4_<GPU-driver>.cache`. Se comprueban tamaño, firma DXBC y checksum; los archivos antiguos de la instalación no se importan. La persistencia usa snapshots y reemplazo atómico en un hilo independiente; el cierre normal espera hasta 5 s al escritor. Sin identidad de GPU/driver o ruta escribible, la caché funciona en memoria. El instalador no distribuye bytecode cacheado.
 - `vp_get_fp_pso` combina VS/FP, blend, RT, máscara de color, cull, depth y alpha; el prepass prepara PSO.
 - **No hacer `free()` de bytecode que pertenece al contenedor de caché**: se observó corrupción de heap y cierre del juego tras el primer draw.
 - Borrar caché de shaders solo con propósito diagnóstico y tras respaldo: provoca recompilaciones y tirones en el primer uso.
@@ -132,7 +136,24 @@ En pruebas de integración aparecieron estructuras ausentes y, en otra variante,
 
 ### Save data
 
-`libs/system/cellSaveData.c` implementa el applet de guardado. La raíz por defecto es `%LOCALAPPDATA%\BakuganRecomp\dev_hdd0\home\00000001\savedata`; `PS3_GAMEDATA_ROOT` la sobrescribe y la primera ejecución copia una vez `gamedata/` (marcador `.gamedata-migrated`). `cellSaveDataListSave2` crea un slot `...-NN` por guardado manual, con el nombre libre que calcula el `funcList` del juego. `cellSaveDataFixedSave2` es el checkpoint y sobrescribe el directorio que pide el título (`PS3_SAVEDATA_NEW_SLOT_FIXED=1` fuerza slot nuevo). `ListAutoSave` mantiene `BLES00758-SYSTEM-DATA` fijo. `cellSaveDataListLoad2` y los borrados usan el selector dentro del juego (`bakugan-recomp/savedata_overlay.cpp`): un canvas GDI+ con `PIC1.PNG` del disco y el `ICON0.PNG` de cada slot, subido como textura D3D12 y dibujado sobre el cuadro final. Se controla con teclado, ratón o XInput; `PS3_SAVEDATA_UI=0` lo desactiva. `PS3_SAVEDATA_CHOICE=new|first|last|<n>|<dir>|cancel` automatiza la elección.
+`libs/system/cellSaveData.c` implementa el applet de guardado. La raíz por defecto es `%LOCALAPPDATA%\BakuganRecomp\dev_hdd0\home\00000001\savedata`; `PS3_GAMEDATA_ROOT` la sobrescribe y la primera ejecución copia una vez `gamedata/` (marcador `.gamedata-migrated`). `cellSaveDataListSave2` crea un slot `...-NN` por guardado manual, con el nombre libre que calcula el `funcList` del juego. Si un slot `-NN` sólo contiene `PARAM.SFO` (primer guardado abortado), el siguiente guardado lo reutiliza en lugar de crear el número siguiente; así el slot no queda huérfano. `cellSaveDataFixedSave2` es el checkpoint y sobrescribe el directorio que pide el título (`PS3_SAVEDATA_NEW_SLOT_FIXED=1` fuerza slot nuevo). `ListAutoSave` mantiene `BLES00758-SYSTEM-DATA` fijo. `cellSaveDataListLoad2` y los borrados usan el selector dentro del juego (`bakugan-recomp/savedata_overlay.cpp`): un canvas GDI+ con `PIC1.PNG` del disco y el `ICON0.PNG` de cada slot, subido como textura D3D12 y dibujado sobre el cuadro final. Se controla con teclado, ratón o XInput; `PS3_SAVEDATA_UI=0` lo desactiva. `PS3_SAVEDATA_CHOICE=new|first|last|<n>|<dir>|cancel` automatiza la elección. El selector es entrada de host: `PAD_FILE`/`PAD_REPLAY` no lo alimentan, así que un replay que llega a "Load Game" se queda en esa pantalla salvo que se fije `PS3_SAVEDATA_CHOICE`. Cancelar devuelve `CELL_CANCEL` (1), no `CELL_SAVEDATA_ERROR_CBRESULT`; un título puede tratar ese error como fallo fatal y salir con `exit(-1)` (`0xffffffff` en PowerShell).
+
+El instalador conserva las partidas sustituidas por `--save` bajo
+`savedata/.backups/`, fuera de la lista de slots. El runtime omite nombres de
+directorio de 32 bytes o más: no caben en `CellSaveDataDirList.dirName` y
+truncarlos provoca que una selección existente se cargue como `new=1`.
+`tools/test_savedata_names.py --compiler <clang-cl.exe>` verifica este filtro;
+`tools/tests/installer_savedata_test.cs` verifica que una importación conserve
+el contenido anterior sin ofrecer el respaldo como partida.
+
+### Checkpoints de escena
+
+`tools/scene.ps1` guarda y reproduce checkpoints reproducibles para testers y
+agentes: línea de tiempo de `cellPad` desde el arranque + copia del savedata +
+frame objetivo. No es un snapshot de memoria (los hilos nativos y los handles
+D3D12/WASAPI no son portables entre procesos). `start` graba en una sesión
+aislada; F5 guarda, F9 recarga el último checkpoint y `play` relanza el juego con
+una copia limpia del savedata. Detalles y límites en `docs/SCENE_CHECKPOINTS.md`.
 
 ## 6. Guardrails: cambios y opciones de alto riesgo
 
@@ -199,9 +220,11 @@ No prometer 30 FPS ni mejoras de carga sin A/B con imagen y comportamiento idén
   composición final). Subir el backbuffer del host a 1080p deja la imagen en un
   rectángulo 1280x720 en la esquina; falsear `cellVideoOutGetResolution` la
   empequeñece. La ruta validada es 720p interno + FSR1 a la salida.
-- `BakuganLauncher.exe` expone presets 720p/30, 1080p/30 (default), 1080p/60 y
-  1440p/60; `PS3_INTERNAL` por defecto 720, `PS3_OUTPUT=native|1080p|1440p|2160p`,
-  `PS3_FPS_CAP=30|60|0`.
+- El launcher se eliminó el 2026-11-08. `BakuganBrawlers.cmd` → `tools/play.ps1`
+  es la entrada actual. La pérdida de HUD/cinemáticas se corrigió en SPURS/LFQueue;
+  no era una obligación de redirigir stdio desde el padre. El puerto aplica
+  Graphics, idioma y controles de player.ini, respetando el entorno explícito.
+  Ver [estado actual](CONTINUAR_HUD.md). Las mediciones siguientes son históricas.
 - Medición con `tools/bench_arena.ps1`, arena fija, 720p->1080p FSR1, `PERF=0`:
   media **28,65 FPS / 34,9 ms**, p95 41,9 ms, 57 % de cuadros > 33,3 ms.
 - `PS3_NOVSYNC=1` no cambió el resultado (28,29 FPS): el techo no es Present,
@@ -230,7 +253,10 @@ No prometer 30 FPS ni mejoras de carga sin A/B con imagen y comportamiento idén
 | Opción | Uso documentado |
 |---|---|
 | `PS3_VERBOSE=0` | Evitar logs verbosos que interfieren con el guest; especialmente al redirigir stderr |
+| `PS3_WINDOW_MONITOR=primary` | Abrir la ventana D3D12 en el monitor principal |
+| `PS3_FPS_TITLE=1` | FPS de presentaciones correctas de D3D12 en la barra de título (modo ventana) |
 | `PERF=1` | Métricas de FPS/draws/vértices/submit/render; solo tras validar imagen |
+| `AUDIO_RATE=1` | Tasa de mezcla, bloques silenciosos y muestras descartadas; resumen cada 5 s |
 | `GCM_WORD_STATS=1` | Palabras FIFO por cuadro |
 | `PS3_FTRACE=inicio:seg:fichero` | Spans de drain/present/SPU busy-wait |
 | `VPCHK=1` | Comparación de vértices contra referencia lenta |
@@ -248,6 +274,129 @@ Secuencia de aceptación antes de medir rendimiento:
 6. Cerrar normalmente y verificar que el PID desaparece antes de la siguiente build.
 
 Usar una build Release comparable y cambiar **una sola variable o subsistema por prueba**. Mantener capturas, opciones efectivas, hashes y logs locales; no versionar binarios, assets o trazas. Los tests de bytes de un backend no sustituyen una prueba visual; los contadores de `PERF` son ventanas de cuadros, no percentiles p95/p99 de frametime. El tiempo entre lanzamiento y llegada a batalla incluye navegación manual: no etiquetarlo como tiempo puro de carga.
+
+### Prueba con boost desactivado (2026-11-09)
+
+En un i7-13620H, Windows reportó `PERFBOOSTMODE=0` en corriente y batería.
+La prueba usó Release, render interno 720p, salida 1080p FSR1 y límite de
+30 FPS. El selector se omitió con `PS3_SAVEDATA_CHOICE=BLES00758-PLAYER-DATA-00`
+y `PS3_SAVEDATA_UI=0`, sobre una copia aislada del guardado. La ejecución final
+se hizo sin replay. La primera prueba con replay entró en Historia y quedó
+fuera de la medición. `PS3_WINDOW_MONITOR=primary` ubicó la ventana en DISPLAY1.
+
+En Ventus, con cámara de apuntado, HUD y cartas visibles, se midieron 713
+intervalos en unos 25 s. La media fue **28,42 FPS**, mediana 34,77 ms,
+p95 41,72 ms y p99 48,41 ms. Hubo 1008–1019 draws por ventana de `PERF` y cero
+aserciones de edgezlib o errores GPUV en el log. El hilo `frame_clock` consumió
+17,77 s de CPU. El decode/fetch de vértices medido sumó unos 12,3 ms por cuadro
+(`vfetch`, mediana de ventanas de 20), y el prepass de SRV unos 5 ms por cuadro.
+Es una referencia de este equipo bajo esas condiciones. Para cuantificar el
+coste de quitar el boost falta una comparación con la misma escena y boost activo.
+
+El usuario oyó ruido en el audio y observó cargas más lentas. La carga quedó
+sin cronometrar. En una segunda ejecución con `AUDIO_RATE=1`, la arena Pyrus
+mostró 187,4–187,6 bloques/s frente a 187,5 esperados y cero muestras descartadas
+por falta de espacio. Hubo ventanas con bloques mezclados silenciosos. Las
+cifras prueban el ritmo medio de mezcla y dejan por localizar el ruido audible.
+El contador de descartes no mide subalimentación del dispositivo ni silencios
+en un solo puerto. `AUDIO_WAV` guarda PCM previo a WASAPI para la siguiente
+comparación con la salida. Mantener el ritmo del guest y los búferes hasta
+tener evidencia del tramo que falla.
+
+Evidencia local en `diagnostics/boost-off-20261109/run-080934797/`, con ajustes
+de energía, hash, logs, frametimes.bin y ventus-sample.json. El contador de FPS
+y la selección de monitor quedan en los parches 0067 y 0068 del toolkit.
+Registro de la segunda prueba en `diagnostics/boost-off-20261109/run-081356102/stderr.log`.
+
+### Ejecución directa de referencia con HUD 2D y logs
+
+El ejecutable actual contiene la corrección del runtime descrita en
+[HUD_START_BUG.md](HUD_START_BUG.md). Para reproducir con logs y guardado
+aislado, usar el build actual del repositorio, no el binario antiguo guardado
+en diagnostics/installed-fidelity. Abrir PowerShell nueva sin flags de otros
+experimentos. El arranque normal para jugar es `BakuganBrawlers.cmd`.
+
+Este bloque reproduce esa configuración, copia la baseline a un directorio nuevo
+y separa stdout/stderr. Ejecutarlo sin otro proceso del juego abierto:
+
+```powershell
+Set-Location 'C:\Users\Varelis\Proyects\ps3recomp'
+$repo = (Get-Location).Path
+$recording = Join-Path $repo 'diagnostics/record-cards-20261108-111621'
+$run = Join-Path $recording ('direct-hud-' + (Get-Date -Format yyyyMMdd-HHmmssfff))
+$exe = Join-Path $repo 'bakugan-recomp/build/BakuganRecomp.exe'
+$elf = Join-Path $repo 'game/PS3_GAME/USRDIR/EBOOT.elf'
+foreach ($path in @($exe, $elf, "$recording/baseline", "$recording/cards.padrec")) {
+    if (-not (Test-Path -LiteralPath $path)) { throw "Falta la referencia: $path" }
+}
+if (Get-Process BakuganRecomp -ErrorAction SilentlyContinue) {
+    throw 'Cierra normalmente el juego anterior y comprueba que termine.'
+}
+New-Item -ItemType Directory -Path $run | Out-Null
+Copy-Item -LiteralPath "$recording/baseline" -Destination "$run/gamedata" -Recurse
+
+$env:PS3_DEBUG = '1'
+$env:PS3_VERBOSE = '0' # Obligatorio al redirigir logs: evita saturar al guest.
+$env:PS3_VFS_ROOT = "$repo/game"
+$env:PS3_GAMEDATA_ROOT = "$run/gamedata"
+$env:PS3_SAVEDATA_CHOICE = 'BLES00758-PLAYER-DATA-00'
+$env:PS3_INTERNAL = '720'
+$env:PS3_OUTPUT = '720p'
+$env:PS3_FSR = 'auto'
+$env:PS3_FSR_SHARPNESS = '0.600000'
+$env:PS3_FPS_CAP = '30'
+$env:PS3_WINDOW_MODE = 'windowed'
+$env:PS3_ANISO = '16'
+$env:PS3_LOD_BIAS = '0'
+$env:SPU_INTERP_UNLIFTED = '1'
+$env:RSX_ACCUM_FRAME = '1'
+$env:GCM_FULL_FRAMES = '1'
+$env:RSX_PACK_WORKERS = '2'
+foreach ($name in @('PS3_PLAYER_CONFIG', 'PS3_TICK_HZ', 'PS3_LANG',
+    'PAD_RECORD', 'PAD_FILE', 'PAD_AUTOPRESS', 'PAD_SCRIPT', 'PAD_STICK',
+    'PAD_SWEEP', 'PS3_SAVEDATA_UI', 'RSX_CAP', 'BAKUGAN_UI_IO_AUDIT')) {
+    Remove-Item -LiteralPath "Env:$name" -ErrorAction SilentlyContinue
+}
+$env:PAD_REPLAY = "$recording/cards.padrec"
+$env:PAD_CLOCK = 'flips'
+$env:BAKUGAN_BOOT_REPORT = "$run/boot.txt"
+$env:RSX_CAP_TRIGGER = "$run/capture.trigger"
+$env:RSX_CAP_DIR = "$run/captures"
+
+$game = Start-Process -FilePath $exe -ArgumentList "`"$elf`"" `
+    -WorkingDirectory $repo -PassThru `
+    -RedirectStandardOutput "$run/stdout.log" `
+    -RedirectStandardError "$run/stderr.log"
+Write-Host "PID: $($game.Id) | Logs: $run"
+```
+
+Registrar el hash del binario: recompilar cambia la referencia. Mantener
+PS3_VERBOSE=0 al redirigir. El destino de stdio no sustituye la corrección
+del protocolo. El bloque usa un guardado de prueba y no toca el original.
+
+Observar el resultado del replay: validar por separado las escenas sosteniendo
+y lanzando cartas, las cartas sobre el campo y el HUD 2D. El replay usa flips;
+si cambia el ritmo puede navegar mal. Un log sin errores no valida la imagen.
+Para navegación manual, quitar `PAD_REPLAY` y `PAD_CLOCK` antes de lanzar.
+
+Solo después de observar la escena estable, desde la misma PowerShell:
+
+```powershell
+Set-Content -LiteralPath "$run/capture.trigger" -Value 'capture'
+# Al terminar, cierre normal y comprobación de salida:
+$game.Refresh()
+if (-not $game.HasExited) {
+    $game.CloseMainWindow() | Out-Null
+    if (-not $game.WaitForExit(10000)) { Write-Warning 'El proceso aún no terminó.' }
+}
+Get-Process BakuganRecomp -ErrorAction SilentlyContinue
+```
+
+No disparar capturas durante la carga ni terminar el proceso a la fuerza.
+`boot.txt`, `stdout.log`, `stderr.log` y la captura tardía quedan en `$run`.
+La auditoría adicional de lecturas 2D se activa con
+`$env:BAKUGAN_UI_IO_AUDIT = '1'` **antes** de lanzar; para comparar, activarla
+en ambos casos y conservar también una ejecución sin ella.
 
 ### Build de referencia documentada (Windows)
 

@@ -73,6 +73,7 @@ famous-ref/
 *.png
 !docs/img/*.png
 !docs/img/*.gif
+/bakugan-recomp/assets/bakugan.ico
 
 shadercache/
 

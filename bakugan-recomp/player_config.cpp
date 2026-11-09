@@ -12,7 +12,7 @@
 #include <cstring>
 
 namespace player {
-const wchar_t *action_name(int a) {
+const wchar_t *action_name(int a, bool english) {
     static const wchar_t *names[ACTION_COUNT] = {L"Select",
                                                  L"L3",
                                                  L"R3",
@@ -38,7 +38,32 @@ const wchar_t *action_name(int a) {
                                                  L"Stick R derecha",
                                                  L"Stick R abajo",
                                                  L"Stick R izquierda"};
-    return a >= 0 && a < ACTION_COUNT ? names[a] : L"";
+    static const wchar_t *names_en[ACTION_COUNT] = {L"Select",
+                                                    L"L3",
+                                                    L"R3",
+                                                    L"Start",
+                                                    L"D-pad up",
+                                                    L"D-pad right",
+                                                    L"D-pad down",
+                                                    L"D-pad left",
+                                                    L"L2",
+                                                    L"R2",
+                                                    L"L1",
+                                                    L"R1",
+                                                    L"Triangle",
+                                                    L"Circle",
+                                                    L"Cross",
+                                                    L"Square",
+                                                    L"Sixaxis throw",
+                                                    L"Left stick up",
+                                                    L"Left stick right",
+                                                    L"Left stick down",
+                                                    L"Left stick left",
+                                                    L"Right stick up",
+                                                    L"Right stick right",
+                                                    L"Right stick down",
+                                                    L"Right stick left"};
+    return a >= 0 && a < ACTION_COUNT ? (english ? names_en : names)[a] : L"";
 }
 Config defaults() {
     Config c;
@@ -78,6 +103,18 @@ Config defaults() {
     c.gamepad[R_DOWN] = {BindingKind::AxisPositive, SDL_GAMEPAD_AXIS_RIGHTY};
     c.gamepad[R_LEFT] = {BindingKind::AxisNegative, SDL_GAMEPAD_AXIS_RIGHTX};
     return c;
+}
+bool has_input_overrides(const Config& c) {
+    const Config base = defaults();
+    auto equal_binding = [](const Binding& a, const Binding& b) {
+        return a.kind == b.kind && a.code == b.code;
+    };
+    return c.input != base.input || c.motion != base.motion ||
+           !c.device_guid.empty() || !c.device_serial.empty() ||
+           c.mouse_look != base.mouse_look || c.mouse_left_cross != base.mouse_left_cross ||
+           c.mouse_sensitivity != base.mouse_sensitivity || c.deadzone != base.deadzone ||
+           !std::equal(c.keyboard.begin(), c.keyboard.end(), base.keyboard.begin(), equal_binding) ||
+           !std::equal(c.gamepad.begin(), c.gamepad.end(), base.gamepad.begin(), equal_binding);
 }
 std::wstring config_path() {
     wchar_t root[32768];
@@ -149,6 +186,8 @@ bool load(Config &c, const std::wstring &path, std::wstring *error) {
     c.fsr = choose(get(L"Graphics", L"FSR", c.fsr, path), {L"auto", L"fsr1", L"0"}, c.fsr);
     c.language = choose(get(L"Player", L"Language", c.language, path),
                         {L"auto", L"en", L"fr", L"es", L"de", L"it", L"nl", L"sv"}, c.language);
+    c.ui_language = choose(get(L"Player", L"LauncherLanguage", c.ui_language, path),
+                           {L"auto", L"en", L"es"}, c.ui_language);
     c.sharpness = number(get(L"Graphics", L"Sharpness", L"0.6", path), 0.6f, 0, 2);
     int a = (int)number(get(L"Graphics", L"Anisotropy", L"16", path), 16, 1, 16);
     c.aniso = (a == 1 || a == 2 || a == 4 || a == 8 || a == 16) ? a : 16;
@@ -202,6 +241,7 @@ bool save(const Config &c, const std::wstring &path, std::wstring *error) {
     };
     put(L"Player", L"Version", L"1");
     put(L"Player", L"Language", c.language);
+    put(L"Player", L"LauncherLanguage", c.ui_language);
     put(L"Graphics", L"Output", c.output);
     put(L"Graphics", L"FPS", c.cap);
     put(L"Graphics", L"Window", c.window);
@@ -225,13 +265,15 @@ bool save(const Config &c, const std::wstring &path, std::wstring *error) {
         *error = L"No se pudieron escribir todos los ajustes";
     return ok;
 }
-std::wstring binding_name(Binding b) {
+std::wstring binding_name(Binding b, bool english) {
     if (b.kind == BindingKind::None)
-        return L"Sin asignar";
+        return english ? L"Unassigned" : L"Sin asignar";
     if (b.kind == BindingKind::Mouse) {
         static const wchar_t *n[] = {L"",           L"Ratón izq.", L"Ratón centro",
                                      L"Ratón der.", L"Ratón X1",   L"Ratón X2"};
-        return n[std::clamp(b.code, 0, 5)];
+        static const wchar_t *n_en[] = {L"",            L"Mouse left", L"Mouse middle",
+                                        L"Mouse right", L"Mouse X1",   L"Mouse X2"};
+        return (english ? n_en : n)[std::clamp(b.code, 0, 5)];
     }
     if (b.kind == BindingKind::Key) {
         UINT scan = MapVirtualKeyW(b.code, MAPVK_VK_TO_VSC);
@@ -241,7 +283,7 @@ std::wstring binding_name(Binding b) {
         wchar_t name[80];
         if (GetKeyNameTextW((LONG)(scan << 16), name, 80))
             return name;
-        return L"Tecla " + std::to_wstring(b.code);
+        return english ? L"Key " + std::to_wstring(b.code) : L"Tecla " + std::to_wstring(b.code);
     }
     if (b.kind == BindingKind::Button) {
         const char *n = SDL_GetGamepadStringForButton((SDL_GamepadButton)b.code);
@@ -249,21 +291,26 @@ std::wstring binding_name(Binding b) {
             return std::wstring(n, n + strlen(n));
     }
     const char *a = SDL_GetGamepadStringForAxis((SDL_GamepadAxis)b.code);
-    std::string n = a ? a : "eje";
+    std::string n = a ? a : (english ? "axis" : "eje");
     return std::wstring(n.begin(), n.end()) + (b.kind == BindingKind::AxisNegative ? L" -" : L" +");
 }
 void apply_environment(const Config &c, const std::wstring &path) {
     auto env = [](const wchar_t *key, const std::wstring &value) {
         SetEnvironmentVariableW(key, value.empty() ? nullptr : value.c_str());
     };
-    env(L"PS3_PLAYER_CONFIG", path);
+    /* "Auto" with no device chosen is the fresh-install default. Leave it on
+     * the port's old input path, which is the one the reference runs use; the
+     * launcher bridge is opt-in by choosing a device or a manual mode. */
+    const bool default_input = !has_input_overrides(c);
+    env(L"PS3_PLAYER_CONFIG", default_input ? L"" : path);
     env(L"PS3_INTERNAL", L"720");
     env(L"PS3_OUTPUT", c.output);
     env(L"PS3_FSR", c.fsr);
     env(L"PS3_FSR_SHARPNESS", std::to_wstring(c.sharpness));
     env(L"PS3_ANISO", std::to_wstring(c.aniso));
     env(L"PS3_LOD_BIAS", L"0");
-    env(L"PS3_FPS_CAP", c.cap == L"0" ? L"" : c.cap);
+    /* Fixed shipping limit: the launcher no longer exposes an FPS selector. */
+    env(L"PS3_FPS_CAP", L"30");
     env(L"PS3_TICK_HZ", L"");
     env(L"PS3_WINDOW_MODE", c.window);
     env(L"PS3_LANG", c.language == L"auto" ? L"" : c.language);
@@ -271,7 +318,21 @@ void apply_environment(const Config &c, const std::wstring &path) {
     const wchar_t *probes[] = {L"PAD_RECORD",    L"PAD_REPLAY",      L"PAD_FILE",
                                L"PAD_AUTOPRESS", L"PAD_SCRIPT",      L"PAD_STICK",
                                L"PAD_SWEEP",     L"YDKJ_INJECT_PAD", L"PS3_SAVEDATA_CHOICE"};
-    for (auto k : probes)
-        SetEnvironmentVariableW(k, nullptr);
+    /* Do not forward a renderer diagnostic from whatever shell started the
+     * launcher: these are documented to remove the HUD, cinematics or cards.
+     * PS3_DEBUG=1 is the explicit opt-in for a diagnostic run. */
+    {
+        wchar_t debug[8];
+        if (GetEnvironmentVariableW(L"PS3_DEBUG", debug, 8) == 0) {
+            for (auto k : probes)
+                SetEnvironmentVariableW(k, nullptr);
+            static const wchar_t *const kBreaksImage[] = {
+                L"SRV_SHADOW", L"DRAW_KEEP_TEX", L"DRAW_LAST_TEX", L"DRAW_KEEP_BLEND",
+                L"TEX_MARKEMPTY", L"EMPTYTEX", L"DEPTH_OFF", L"TEX_RESOLVE_AUTO",
+                L"PS3_NOVSYNC", L"SPU_CH_BLOCK"};
+            for (auto k : kBreaksImage)
+                SetEnvironmentVariableW(k, nullptr);
+        }
+    }
 }
 } // namespace player

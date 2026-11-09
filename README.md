@@ -1,6 +1,5 @@
 <div align="center">
 
-<img src="docs/img/title.jpg" alt="Bakugan: Battle Brawlers running as a native Windows executable" width="100%">
 
 <h1>Bakugan: Battle Brawlers — native PS3 recompilation for Windows</h1>
 
@@ -15,7 +14,7 @@
 <img src="https://img.shields.io/badge/status-playable%20end%20to%20end-yellow?style=flat-square" alt="Playable end to end, performance limited by the engine">
 </p>
 
-<p><a href="README.es.md">Español</a> · <a href="docs/PROJECT_GUIDE.md">Guía técnica</a> · <a href="docs/FSR.md">FSR y salida</a> · <a href="CONTRIBUTING.md">Contributing</a></p>
+<p><a href="README.es.md">Español</a> · <a href="docs/PROJECT_GUIDE.md">Guía técnica</a> · <a href="docs/PROJECT_GUIDE.md">FSR y salida</a> · <a href="CONTRIBUTING.md">Contributing</a></p>
 
 </div>
 
@@ -23,7 +22,7 @@
 > vertex staging while the owner prepares materials. In eight balanced arena
 > windows, frame_clock fell from **80.1% to 69.0% of one core**; average output
 > changed from **28.71 to 29.30 FPS**, with better p95/p99. Total process CPU was
-> similar. **Stable 30 FPS remains a target.** [Measurements and limits](docs/SESSION_20261107_WALKER.md).
+> similar. **Stable 30 FPS remains a target.** [Measurements and limits](docs/PROJECT_GUIDE.md).
 
 > Small debug-filter lookup and strip-copy reductions are also retained; their additional combined FPS effect is not yet measured.
 
@@ -31,7 +30,7 @@
 > 720p frame to 1080p. Windowed output fits the monitor; borderless mode and
 > per-monitor DPI handling are available. The checked arena averaged **28.02 FPS**;
 > this improves output resolution, with **no demonstrated FPS increase**.
-> [Usage and limits](docs/FSR.md) · [Session results](docs/SESSION_20261106_FSR.md).
+> [Usage and limits](docs/PROJECT_GUIDE.md) · [Session results](docs/PROJECT_GUIDE.md).
 >
 > **2026-11-06 — major battle performance improvement.** Measured arena scenes
 > now run at roughly **27–28 FPS**, compared with the earlier **16–17 FPS** reference.
@@ -48,7 +47,6 @@ Lifted code is compiled ahead of time; dynamic SPU jobs without a matching recom
 
 | | |
 |---|---|
-| ![Boot menus](docs/img/newgame.jpg) | ![Narrative intro](docs/img/intro.jpg) |
 | Title flow, save-data warning, loading, new game / load game | Narrative intro — H.264/AAC decoded through Media Foundation |
 
 ## Status
@@ -75,7 +73,7 @@ Lifted code is compiled ahead of time; dynamic SPU jobs without a matching recom
 | **Controller** — persistent PS3 remapping, SDL3 gamepads, real Sixaxis sensors or right-stick fallback; DS4 tested | ✅ |
 | **Sound effects** — ATRAC3 in `SOUND/*.PAST` | ❌ |
 
-**The game is playable end to end. The launcher and controller mapping are implemented; broader hardware coverage and sustained 30 FPS remain release validation work.**
+**The game is playable end to end. Controller mapping is implemented; the launcher and installer are deferred; broader hardware coverage and sustained 30 FPS remain release validation work.**
 
 Saves live in `%LOCALAPPDATA%\BakuganRecomp\dev_hdd0\home\00000001\savedata`
 (set `PS3_GAMEDATA_ROOT` to override). The first launch copies the old
@@ -86,17 +84,18 @@ overlay over the finished frame (the game's `PIC1.PNG` backdrop and each slot's
 `ICON0.PNG`, keyboard/pad/mouse); `PS3_SAVEDATA_UI=0` restores the headless
 defaults. The list/fixed delete entry points share the same callback flow.
 
-## Launcher and controls
+## How to play, and controls
 
-Run `tools/run.ps1` without arguments, or open `bakugan-recomp/build/BakuganLauncher.exe`.
-The Bakugan-themed launcher loads its background/title art from your local disc dump; game art is not distributed.
-The user completed a full Bakugan match with this build. The launcher saves output resolution, FSR 1, sharpness, anisotropic filtering, FPS cap,
-window mode, EU language and PS3 button/stick mappings in
-`%LOCALAPPDATA%/BakuganRecomp/player.ini`. Language defaults to Windows.
-SDL3 detects gamepads and real motion sensors; missing sensors fall back to the right stick.
-DS4 mapping and sensor readings were tested; DualSense and Switch Pro need hardware validation.
-Explicit script parameters or `-Direct` retain the developer launch path.
-[Controls, build and validation](docs/LAUNCHER.md).
+Double-click `BakuganBrawlers.cmd`, or run `.\BakuganBrawlers.cmd` from the
+repository root. Logs are written to `%LOCALAPPDATA%\BakuganRecomp`.
+The old launcher and installer were removed; rebuilding them is deferred until
+runtime validation is complete. See [current defects](docs/DEFECTOS_Y_INSTALADOR.md).
+
+The runner reads graphics, language and custom input settings from
+`%LOCALAPPDATA%\BakuganRecomp\player.ini`. Explicit environment settings take
+precedence. Internal rendering stays at 1280x720; output scaling uses FSR1.
+See [the technical guide](docs/PROJECT_GUIDE.md) and
+[the SPURS investigation](docs/HUD_START_BUG.md).
 
 ## Recent performance improvements
 
@@ -113,7 +112,7 @@ The current build retains these changes together:
 The upload figures come from eight balanced 30-second windows in one process,
 before the two small follow-up changes. The final combination is built and retained;
 **its extra gains have not been measured, and stable 30 FPS is still pending**.
-[Full results, tests and rollback options](docs/SESSION_20261107_WALKER.md).
+[Full results, tests and rollback options](docs/PROJECT_GUIDE.md).
 
 The historical 16–17 FPS reference and the earlier 27–28 FPS observations come
 from different runs; they describe progress, not a controlled percentage gain.
@@ -188,14 +187,10 @@ For an existing configured Release tree:
 
 ```powershell
 .\.venv\Scripts\ninja.exe -C bakugan-recomp\build
-.\tools\run.ps1
-# or the player-facing selector:
-.\bakugan-recomp\build\BakuganLauncher.exe
+.\BakuganBrawlers.cmd
 ```
 
-Presets: 720p/30, **1080p/30 (default)**, 1080p/60 and 1440p/60. The title
-renders 1280x720 internally and FSR1 presents it at the selected output size;
-see [`docs/FSR.md`](docs/FSR.md).
+Internal rendering stays at 1280x720. Set output resolution and FSR1 in `player.ini`; no 60 FPS guarantee is made.
 
 For a prepared source tree that needs initial configuration, use an x64 Visual
 Studio developer environment with `clang-cl`, CMake and Ninja on PATH:

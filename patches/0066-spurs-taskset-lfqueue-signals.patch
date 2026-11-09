@@ -1,0 +1,496 @@
+diff --git a/libs/spurs/cellSpurs.c b/libs/spurs/cellSpurs.c
+--- a/libs/spurs/cellSpurs.c
++++ b/libs/spurs/cellSpurs.c
+@@ -56,6 +56,7 @@
+     u32         maxContention;
+     u32         readyCount;
+     int         started;       /* its SPU program has been dispatched        */
++    u32         taskset_ea;    /* HLE tasks execute on their own host workers */
+ } SpursWorkload;
+ 
+ typedef struct {
+@@ -474,6 +475,7 @@
+ static s32 spurs_scheduler_stop(struct SpursInst* si, u32 ea);
+ static void spurs_scheduler_retire(u32 ea);
+ static void spurs_scheduler_forget(u32 wid);
++static s32 spurs_remove_workload_locked(struct SpursInst* si, u32 wid);
+ 
+ static struct SpursInst* spurs_inst_find(u32 ea)
+ {
+@@ -774,35 +776,6 @@
+     AcquireSRWLockShared(&s_spurs_queue_lock);
+     u32 q = port < 64 ? s_spurs_port_queue[port] : 0;
+     ReleaseSRWLockShared(&s_spurs_queue_lock);
+-    return q;
+-}
+-
+-/* Signalled when a port gets a queue attached; see spurs_port_queue_wait. */
+-static CONDITION_VARIABLE s_spurs_port_bound = CONDITION_VARIABLE_INIT;
+-
+-/* Wait, for at most `timeout_ms`, until a queue is attached to `port`.
+- *
+- * A SPURS task can send_event before the PPU reaches the
+- * cellSpursAttachLv2EventQueue call that binds the port, exactly as a raw SPU
+- * thread can outrun sys_spu_thread_connect_event. Dropping that event loses the
+- * ack the task then blocks on in SPU_RdInMbox, and the PPU waits for a job that
+- * will never report back: the title keeps rendering but stops decoding assets,
+- * which is what removes the battle HUD, the card scenes and the cards on the
+- * field. The lv2 group path already waits for its port for this reason. */
+-uint32_t spurs_port_queue_wait(uint32_t port, unsigned timeout_ms)
+-{
+-    if (port >= 64) return 0;
+-    const ULONGLONG deadline = GetTickCount64() + timeout_ms;
+-    u32 q;
+-    AcquireSRWLockExclusive(&s_spurs_queue_lock);
+-    for (;;) {
+-        if ((q = s_spurs_port_queue[port]) != 0) break;
+-        const ULONGLONG now = GetTickCount64();
+-        if (now >= deadline) break;
+-        SleepConditionVariableSRW(&s_spurs_port_bound, &s_spurs_queue_lock,
+-                                  (DWORD)(deadline - now), 0);
+-    }
+-    ReleaseSRWLockExclusive(&s_spurs_queue_lock);
+     return q;
+ }
+ 
+@@ -848,7 +821,6 @@
+         return CELL_SPURS_CORE_ERROR_BUSY;
+     }
+     s_spurs_port_queue[p] = queue;
+-    WakeAllConditionVariable(&s_spurs_port_bound);
+     printf("[cellSpurs] AttachLv2EventQueue(queue=%u) port=%u%s\n", queue, p,
+            isDynamic ? " (dynamic)" : "");
+     ReleaseSRWLockExclusive(&s_spurs_queue_lock);
+@@ -913,8 +885,6 @@
+                                 u64 args, const u8* priority, u32 maxContention,
+                                 u32 taskset_size)
+ {
+-    (void)args; (void)priority; (void)maxContention;
+-
+     /* Capture the GUEST EAs (raw register values) BEFORE host translation -- the real
+      * BE taskset builder writes to guest memory at these EAs. */
+     uint32_t taskset_ea = (uint32_t)(uintptr_t)taskset;
+@@ -936,14 +906,51 @@
+ 
+     if (!spurs_guest_range_valid(taskset_ea, taskset_size))
+         return (s32)0x8041090Du; /* host backing safety, before writes */
++    struct SpursInst* si;
++    s32 rc = spurs_api_lock(spurs_ea, &si);
++    if (rc) return rc;
++    for (u32 i = 0; i < CELL_SPURS_MAX_WORKLOAD; ++i) {
++        if (s_workloads[i].in_use && s_workloads[i].taskset_ea == taskset_ea) {
++            spurs_api_unlock(si);
++            return CELL_SPURS_TASK_ERROR_BUSY;
++        }
++    }
++    u32 wid = 0;
++    while (wid < CELL_SPURS_MAX_WORKLOAD && s_workloads[wid].in_use) ++wid;
++    if (wid == CELL_SPURS_MAX_WORKLOAD) {
++        spurs_api_unlock(si);
++        return CELL_SPURS_TASK_ERROR_NOMEM;
++    }
+     taskset = GUEST_PTR(taskset, CellSpursTaskset*);
+     memset(taskset, 0, taskset_size);
+ 
+     /* Write the REAL big-endian CellSpursTaskset layout (fork Option-B) so the lifted
+      * SPU leaf + spurs_pm_build_context read valid data (the native writes above are
+      * little-endian = garbage to the SPU). Overwrites 0x00-0x80 with BE fields. */
+-    spurs_taskset_init(taskset_ea, spurs_ea, args, /*wid*/0,
++    spurs_taskset_init(taskset_ea, spurs_ea, args, wid,
+                        taskset_size, /*evf1*/0, /*evf2*/0);
++    SpursWorkload* workload = &s_workloads[wid];
++    memset(workload, 0, sizeof(*workload));
++    workload->in_use = 1;
++    workload->spurs_ea = spurs_ea;
++    workload->taskset_ea = taskset_ea;
++    workload->data = taskset_ea;
++    workload->maxContention = maxContention;
++    spurs_scheduler_forget(wid);
++    /* SPU LFQueue completion resolves packed workload/task IDs through this
++     * guest table. A host-only mapping leaves SendSignal with a NULL taskset. */
++    u32 info = spurs_ea + SPURS_WKL_INFO1 + wid * SPURS_WKL_INFO_SZ;
++    vm_write64(info, 0);
++    vm_write64(info + 8, taskset_ea);
++    vm_write32(info + 0x10, 0);
++    vm_write32(info + 0x14, wid << 24);
++    const u8* priority_h = GUEST_PTR(priority, const u8*);
++    for (u32 n = 0; n < CELL_SPURS_MAX_SPU; ++n)
++        vm_write8(info + 0x18 + n, priority_h ? priority_h[n] : 1);
++    vm_write8(spurs_ea + SPURS_WKL_STATE1 + wid, 2);
++    vm_write32(spurs_ea + SPURS_WKL_ENABLED,
++               vm_read32(spurs_ea + SPURS_WKL_ENABLED) | (0x80000000u >> wid));
++    spurs_api_unlock(si);
+     g_ydkj_real_taskset_ea = taskset_ea;
+ 
+     g_ydkj_real_spurs_ea = spurs_ea;   /* capture for the taskset-policy handoff (LS[0x1C0]) */
+@@ -973,14 +980,28 @@
+     return spurs_create_taskset(spurs, taskset, 0, NULL, 0, size);
+ }
+ 
++static s32 spurs_release_taskset(u32 taskset_ea)
++{
++    if (!taskset_ea) return CELL_SPURS_TASK_ERROR_NULL_POINTER;
++    if (!spurs_guest_range_valid(taskset_ea, 0x80)) return CELL_SPURS_TASK_ERROR_INVAL;
++    u32 spurs_ea = (u32)vm_read64(taskset_ea + CSTS_SPURS);
++    u32 wid = vm_read32(taskset_ea + CSTS_WID);
++    struct SpursInst* si;
++    s32 rc = spurs_api_lock(spurs_ea, &si);
++    if (rc) return rc;
++    if (wid >= CELL_SPURS_MAX_WORKLOAD || !s_workloads[wid].in_use ||
++        s_workloads[wid].spurs_ea != spurs_ea || s_workloads[wid].taskset_ea != taskset_ea) {
++        spurs_api_unlock(si);
++        return CELL_SPURS_TASK_ERROR_STAT;
++    }
++    rc = spurs_remove_workload_locked(si, wid);
++    spurs_api_unlock(si);
++    return rc;
++}
++
+ s32 cellSpursDestroyTaskset(CellSpursTaskset* taskset)
+ {
+-    taskset = GUEST_PTR(taskset, CellSpursTaskset*);
+-    if (!taskset)
+-        return CELL_SPURS_TASK_ERROR_NULL_POINTER;
+-
+-    printf("[cellSpurs] DestroyTaskset()\n");
+-    return CELL_OK;
++    return spurs_release_taskset((u32)(uintptr_t)taskset);
+ }
+ 
+ s32 cellSpursShutdownTaskset(CellSpursTaskset* taskset)
+@@ -1004,6 +1025,8 @@
+ 
+     printf("[cellSpurs] JoinTaskset(0x%08X): waiting for tasks\n", taskset_ea);
+     spurs_taskset_wait_idle(taskset_ea);
++    s32 rc = spurs_release_taskset(taskset_ea);
++    if (rc) return rc;
+     printf("[cellSpurs] JoinTaskset(0x%08X): complete\n", taskset_ea);
+     return CELL_OK;
+ }
+@@ -1447,6 +1470,7 @@
+                    (u16)(vm_read16(spurs_ea + SPURS_WKL_SIGNAL1) & ~(0x8000u >> i)));
+             ef_line_end(spurs_ea);
+             s_workloads[i].in_use = 1;
++            s_workloads[i].taskset_ea = 0;
+             s_workloads[i].pm = pm;
+             s_workloads[i].sizePm = sizePm;
+             s_workloads[i].data = data;
+@@ -1650,6 +1674,30 @@
+     return CELL_OK;
+ }
+ 
++static s32 spurs_remove_workload_locked(struct SpursInst* si, u32 wid)
++{
++    if (s_workloads[wid].taskset_ea) {
++        unsigned active = 0;
++        spu_lockline_lock();
++        for (unsigned i = 0; i < 16; ++i)
++            active |= vm_base[s_workloads[wid].taskset_ea + CSTS_ENABLED + i];
++        spu_lockline_unlock();
++        if (active) return CELL_SPURS_CORE_ERROR_BUSY;
++    }
++    if (si->active[wid] || spurs_policy_release_workload(si->ea, wid)) {
++        return CELL_SPURS_CORE_ERROR_BUSY;
++    }
++    s_workloads[wid].in_use = 0;
++    for (u32 off = 0; off < SPURS_WKL_INFO_SZ; off += 8)
++        vm_write64(si->ea + SPURS_WKL_INFO1 + wid * SPURS_WKL_INFO_SZ + off, 0);
++    vm_write8(si->ea + SPURS_WKL_STATE1 + wid, 3);
++    vm_write32(si->ea + SPURS_WKL_ENABLED,
++               vm_read32(si->ea + SPURS_WKL_ENABLED) & ~(0x80000000u >> wid));
++    spurs_scheduler_forget(wid);
++    printf("[cellSpurs] RemoveWorkload(wid=%u)\n", wid);
++    return CELL_OK;
++}
++
+ s32 cellSpursRemoveWorkload(CellSpurs* spurs, CellSpursWorkloadId wid)
+ {
+     if (!spurs) return CELL_SPURS_CORE_ERROR_NULL_POINTER;
+@@ -1657,21 +1705,12 @@
+     struct SpursInst* si;
+     s32 rc = spurs_api_lock((u32)(uintptr_t)spurs, &si);
+     if (rc) return rc;
+-    if (!s_workloads[wid].in_use || s_workloads[wid].spurs_ea != si->ea) {
+-        spurs_api_unlock(si); return CELL_SPURS_CORE_ERROR_SRCH;
+-    }
+-
+-    if (si->active[wid] || spurs_policy_release_workload(si->ea, wid)) {
+-        spurs_api_unlock(si); return CELL_SPURS_CORE_ERROR_BUSY;
+-    }
+-    s_workloads[wid].in_use = 0;
+-    vm_write8(si->ea + SPURS_WKL_STATE1 + wid, 3);
+-    vm_write32(si->ea + SPURS_WKL_ENABLED,
+-               vm_read32(si->ea + SPURS_WKL_ENABLED) & ~(0x80000000u >> wid));
+-    spurs_scheduler_forget(wid);
+-    printf("[cellSpurs] RemoveWorkload(wid=%u)\n", wid);
++    if (!s_workloads[wid].in_use || s_workloads[wid].spurs_ea != si->ea)
++        rc = CELL_SPURS_CORE_ERROR_SRCH;
++    else
++        rc = spurs_remove_workload_locked(si, wid);
+     spurs_api_unlock(si);
+-    return CELL_OK;
++    return rc;
+ }
+ 
+ s32 cellSpursWorkloadAttributeInitialize(CellSpursWorkloadAttribute* attr,
+@@ -1810,7 +1849,8 @@
+                 si->cursor = (wid + 1) & 15;
+                 if (!(enabled & (0x80000000u >> wid)) ||
+                     vm_read8(ea + SPURS_WKL_STATE1 + wid) != 2 ||
+-                    !s_workloads[wid].in_use || s_workloads[wid].spurs_ea != ea)
++                    !s_workloads[wid].in_use || s_workloads[wid].spurs_ea != ea ||
++                    s_workloads[wid].taskset_ea)
+                     continue;
+                 if (!vm_read8(ea + SPURS_WKL_INFO1 + wid * SPURS_WKL_INFO_SZ + 0x18 + sn))
+                     continue; /* priority zero makes this physical lane ineligible */
+@@ -3133,8 +3173,48 @@
+     if (taskset && !woke) spu_taskset_latch_wake(taskset);   /* parks a moment later */
+ 
+     static int _n = 0;
+-    if (PS3_LOG_FIRST(_n, 4000))
++    if (PS3_LOG_FIRST(_n, 16))
+         printf("[cellSpurs] LFQueue wake: taskset=0x%08X parked=%d\n", taskset, woke);
++}
++
++typedef struct { u32 taskset, task; } LfqTaskSignal;
++
++/* ANY2ANY moves this ledger to the ordinary push2 position in the SPU
++ * library. Producer notification and consumer acknowledgement are separate
++ * cursors; advancing the latter here strands consumers before they retry. */
++static int lfq_collect_consumer_signals(u32 q, int32_t published, int32_t depth,
++                                      LfqTaskSignal signals[15], u16* next_pack)
++{
++    u16 pack = ef_r16(q + LFQ_POP + 4);
++    unsigned registered = pack & 31;
++    unsigned acknowledged = (pack >> 5) & 31;
++    unsigned notified = (pack >> 10) & 31;
++    if (registered >= 30 || acknowledged >= 30 || notified >= 30) return -1;
++    int pending = (int)((registered + 30 - notified) % 30);
++    int outstanding = (int)((notified + 30 - acknowledged) % 30);
++    int available = lfq_occupancy(lfq_u16(ef_r16(q + LFQ_POP + 6)), published, depth);
++    int count = available - outstanding;
++    if (count < 0) count = 0;
++    if (count > pending) count = pending;
++    if (count > 15) return -1;
++    u32 owner = (u32)vm_read64(q + LFQ_SIGNAL);
++    for (int i = 0; i < count; ++i) {
++        u16 token = ef_r16(q + 0x32 + 2 * (notified % 15));
++        u32 wid = token >> 8, task = token & 255;
++        if (wid >= 16 || task >= 128) return -1;
++        u32 taskset = owner;
++        if (owner & 15u) {
++            u32 spurs = owner & ~15u;
++            if (!spurs_guest_range_valid(spurs, SPURS_INST_SIZE)) return -1;
++            taskset = (u32)vm_read64(spurs + SPURS_WKL_INFO1 + wid * SPURS_WKL_INFO_SZ + 8);
++        }
++        if (!taskset || !spurs_guest_range_valid(taskset, 0x80)) return -1;
++        signals[i].taskset = taskset;
++        signals[i].task = task;
++        notified = (notified + 1) % 30;
++    }
++    *next_pack = (u16)((pack & 0x83FFu) | (notified << 10));
++    return count;
+ }
+ 
+ static s32 lfqueue_push(u64 queue_ea, u64 data_ea, int deliver)
+@@ -3154,9 +3234,11 @@
+         return CELL_SPURS_TASK_ERROR_INVAL;
+     }
+ 
++    spu_lockline_lock();
+     int32_t pop  = lfq_u16(vm_read16(q + LFQ_POP));            /* m_h1 */
+     int32_t push = lfq_u16(vm_read16(q + LFQ_PUSH + 6));       /* m_h8, reserved */
+     if (lfq_occupancy(pop, push, depth) >= depth) {
++        spu_lockline_unlock();
+         static int _n = 0;
+         if (PS3_LOG_FIRST(_n, 8))
+             fprintf(stderr, "[cellSpurs] LFQueuePush FULL q=0x%08X pop=%d push=%d depth=%d\n",
+@@ -3164,6 +3246,20 @@
+         return CELL_SPURS_TASK_ERROR_AGAIN;
+     }
+ 
++    int32_t nxt = push + 1;
++    if (nxt >= depth * 2) nxt -= depth * 2;
++    int any_to_any = vm_read32(q + LFQ_DIR) == 3;
++    LfqTaskSignal signals[15];
++    u16 pack = 0;
++    int signal_count = 0;
++    if (deliver && any_to_any) {
++        signal_count = lfq_collect_consumer_signals(q, nxt, depth, signals, &pack);
++        if (signal_count < 0) {
++            spu_lockline_unlock();
++            return CELL_SPURS_TASK_ERROR_STAT;
++        }
++    }
++
+     uint32_t slot = (uint32_t)(push % depth);
+     memcpy(vm_base + buf + (size_t)slot * size, vm_base + (uint32_t)data_ea, size);
+ 
+@@ -3173,17 +3269,21 @@
+         g_ps3_lfq_first_n++;
+     }
+ 
+-    int32_t nxt = push + 1;
+-    if (nxt >= depth * 2) nxt -= depth * 2;
+-    vm_write16(q + LFQ_PUSH + 6, (u16)nxt);   /* reserve */
+-    vm_write16(q + LFQ_PUSH + 0, (u16)nxt);   /* publish (m_h5), data already in place */
++    ef_w16(q + LFQ_PUSH + 6, (u16)nxt);   /* reserve */
++    ef_w16(q + LFQ_PUSH + 0, (u16)nxt);   /* publish (m_h5), data already in place */
++    if (deliver && any_to_any) ef_w16(q + LFQ_POP + 4, pack);
++    ef_line_end(q);
+ 
+     static int _n = 0;
+-    if (PS3_LOG_FIRST(_n, 4000))
++    if (PS3_LOG_FIRST(_n, 16))
+         printf("[cellSpurs] LFQueuePush q=0x%08X slot=%u push %d->%d size=%u depth=%d\n",
+                q, slot, push, nxt, size, depth);
+ 
+-    lfq_wake(q, deliver);
++    /* Signal persistent task bits, even if the consumer has registered its
++     * guest wait but has not yet entered the host's parked-task hint table. */
++    for (int i = 0; i < signal_count; ++i)
++        spu_taskset_signal_task(signals[i].taskset, signals[i].task);
++    if (!any_to_any) lfq_wake(q, deliver);
+     return CELL_OK;
+ }
+ 
+@@ -3219,7 +3319,7 @@
+     vm_write16(q + LFQ_POP + 0, (u16)nxt);    /* publish (m_h1) */
+ 
+     static int _n = 0;
+-    if (PS3_LOG_FIRST(_n, 4000))
++    if (PS3_LOG_FIRST(_n, 16))
+         printf("[cellSpurs] LFQueuePop q=0x%08X slot=%u pop %d->%d\n", q, slot, pop, nxt);
+     return CELL_OK;
+ }
+diff --git a/runtime/spu/spu_workload.c b/runtime/spu/spu_workload.c
+--- a/runtime/spu/spu_workload.c
++++ b/runtime/spu/spu_workload.c
+@@ -735,7 +735,7 @@
+              * (2) LBP_REAL_POLICY: run the REAL lifted taskset policy to build its
+              *     SpursTasksetContext and diff it against the C reimpl build_context
+              *     planted in `ls` -- shows exactly which fields differ. */
+-            if (j->image_id == 3) {
++            if (j->image_id == 3 && (getenv("SPU_BINK_DESC") || getenv("LBP_REAL_POLICY"))) {
+                 extern uint8_t* vm_base;
+                 uint32_t arg = j->args_ea;
+                 /* SPU DMA maps EAs as vm_base + (uint32_t)ea with NO masking
+@@ -1083,24 +1083,52 @@
+  * sleeping. One bit, not a counter -- SPURS signals are latched, not queued, so
+  * two Sets before a park must not buy two passes through the wait. */
+ #define SPU_WAKE_LATCH_MAX 16
+-static volatile uint32_t s_wake_latch[SPU_WAKE_LATCH_MAX];   /* taskset EA, 0 = free */
++static uint32_t s_wake_latch[SPU_WAKE_LATCH_MAX];   /* protected by s_sig_lock */
+ 
+ void spu_taskset_latch_wake(uint32_t taskset_ea)
+ {
+     if (!taskset_ea) return;
++#ifdef _WIN32
++    AcquireSRWLockExclusive(&s_sig_lock);
++#else
++    pthread_mutex_lock(&s_sig_lock);
++#endif
++    int slot = -1;
+     for (int i = 0; i < SPU_WAKE_LATCH_MAX; i++)
+-        if (s_wake_latch[i] == taskset_ea) return;          /* already latched */
+-    for (int i = 0; i < SPU_WAKE_LATCH_MAX; i++)
+-        if (s_wake_latch[i] == 0) { s_wake_latch[i] = taskset_ea; return; }
+-}
+-
+-/* Consume a latched wake for this taskset. Returns 1 if one was pending. */
+-int spu_taskset_consume_wake(uint32_t taskset_ea)
++        if (s_wake_latch[i] == taskset_ea) { slot = i; break; }
++        else if (!s_wake_latch[i] && slot < 0) slot = i;
++    if (slot >= 0) s_wake_latch[slot] = taskset_ea;
++#ifdef _WIN32
++    WakeAllConditionVariable(&s_sig_cv);
++    ReleaseSRWLockExclusive(&s_sig_lock);
++#else
++    pthread_cond_broadcast(&s_sig_cv);
++    pthread_mutex_unlock(&s_sig_lock);
++#endif
++}
++
++static int spu_taskset_consume_wake_locked(uint32_t taskset_ea)
+ {
+     if (!taskset_ea) return 0;
+     for (int i = 0; i < SPU_WAKE_LATCH_MAX; i++)
+         if (s_wake_latch[i] == taskset_ea) { s_wake_latch[i] = 0; return 1; }
+     return 0;
++}
++
++int spu_taskset_consume_wake(uint32_t taskset_ea)
++{
++#ifdef _WIN32
++    AcquireSRWLockExclusive(&s_sig_lock);
++#else
++    pthread_mutex_lock(&s_sig_lock);
++#endif
++    int woke = spu_taskset_consume_wake_locked(taskset_ea);
++#ifdef _WIN32
++    ReleaseSRWLockExclusive(&s_sig_lock);
++#else
++    pthread_mutex_unlock(&s_sig_lock);
++#endif
++    return woke;
+ }
+ 
+ /* Signal every task of `taskset_ea` currently parked. Returns how many. */
+@@ -1287,6 +1315,9 @@
+     AcquireSRWLockExclusive(&s_sig_lock);
+     while (!spurs_taskset_is_shutting_down(taskset_ea) &&
+            !spurs_bitset_test(taskset_ea + CSTS_SIGNALLED, taskId)) {
++        /* The producer can latch after the syscall's pre-check, before park.
++         * Consume and sleep under its lock so that window cannot lose work. */
++        if (spu_taskset_consume_wake_locked(taskset_ea)) break;
+         if (!SleepConditionVariableSRW(&s_sig_cv, &s_sig_lock, 1000, 0)) {
+             static int _n = 0;
+             if (++secs && _n < 16) { _n++;
+@@ -1295,12 +1326,14 @@
+             if (drain && secs >= drain) { drained = 1; break; }
+         }
+     }
++    spu_taskset_consume_wake_locked(taskset_ea);
+     if (!drained) spu_signalled_update(taskset_ea, taskId, 0);
+     ReleaseSRWLockExclusive(&s_sig_lock);
+ #else
+     pthread_mutex_lock(&s_sig_lock);
+     while (!spurs_taskset_is_shutting_down(taskset_ea) &&
+            !spurs_bitset_test(taskset_ea + CSTS_SIGNALLED, taskId)) {
++        if (spu_taskset_consume_wake_locked(taskset_ea)) break;
+         struct timespec ts; clock_gettime(CLOCK_REALTIME, &ts); ts.tv_sec += 1;
+         if (pthread_cond_timedwait(&s_sig_cv, &s_sig_lock, &ts) != 0) {
+             static int _n = 0;
+@@ -1310,6 +1343,7 @@
+             if (drain && secs >= drain) { drained = 1; break; }
+         }
+     }
++    spu_taskset_consume_wake_locked(taskset_ea);
+     if (!drained) spu_signalled_update(taskset_ea, taskId, 0);
+     pthread_mutex_unlock(&s_sig_lock);
+ #endif
+diff --git a/runtime/syscalls/lv2_register.c b/runtime/syscalls/lv2_register.c
+--- a/runtime/syscalls/lv2_register.c
++++ b/runtime/syscalls/lv2_register.c
+@@ -1624,21 +1624,6 @@
+     /* No lv2 group: SPU code under SPURS. Only its user events route, through
+      * the ports cellSpursAttachLv2EventQueue bound; the rest stays as it was. */
+     extern uint32_t spurs_port_queue(uint32_t port);
+-    extern uint32_t spurs_port_queue_wait(uint32_t port, unsigned timeout_ms);
+-    if (!spu->spu_group_id && code < 128 && !spurs_port_queue(code & 63)) {
+-        /* The port may still be on its way from the PPU -- cellSpursAttachLv2EventQueue
+-         * runs on another PPU thread while this task is already finishing. Wait long
+-         * enough for it instead of dropping the event: the drop costs the task its
+-         * ack (SPU_RdInMbox) and the PPU then waits forever for a job that never
+-         * reports back, which is what stops asset decoding and the HUD/card scenes. */
+-        spurs_port_queue_wait(code & 63, 2000u);
+-    }
+-    if (!spu->spu_group_id && (code >= 128 || !spurs_port_queue(code & 63))) {
+-        if (code < 128) { static int n; if (PS3_LOG_FIRST(n, 16))
+-            fprintf(stderr, "[spu-evt] SPURS user event on unbound port %u dropped (img=%d value=0x%08X)\n",
+-                    code & 63, spu->image_id, value); }
+-        return 0;
+-    }
+     /* Task-exit handlers signal an LV2 flag, not an SPU user-event queue.
+      * 128 acknowledges the result; 192 is the impatient, no-ack form. */
+     if (code == 128 || code == 192) {

@@ -9,8 +9,9 @@ and host threads. The game is playable end to end; battle performance, save
 writing and real controller mapping are incomplete.
 
 Read `docs/PROJECT_GUIDE.md` first; the docs are in Spanish by design.
-`docs/INPUT_REPLAY.md` covers recording and replaying pad input, which is how an
-agent reaches the battle arena without a human at the keyboard.
+`docs/HUD_START_BUG.md` and `docs/DEFECTOS_Y_INSTALADOR.md` track the current
+SPURS fixes and their validation. Use the current replay referenced there;
+`docs/INPUT_REPLAY.md` was deleted and must not be treated as an available guide.
 
 ## Layout and ownership
 
@@ -25,7 +26,7 @@ agent reaches the battle arena without a human at the keyboard.
   or reapply the patch series.**
 - `patches/`: toolkit changes kept for reproducibility. `0049-asset-io-bounded-cache.patch`
   is an unapproved experiment; do not apply it to the healthy reference.
-- `tools/`: `run.ps1`, `configure.ps1`, `pad_autopilot.ps1` and `tests/`.
+- `tools/`: `play.ps1`, `run.ps1`, `pad_autopilot.ps1` and `tests/`.
   `tools/build.py` and `tools/pipeline.py` were
   deleted; stale references to them in `README.md`, `CONTRIBUTING.md`,
   `bakugan-recomp/README.md` and `tools/run.ps1` error messages are obsolete.
@@ -47,11 +48,11 @@ required. `cl` will not work (the code needs `__int128`, `__atomic_*` and
 .\tools\run.ps1
 ```
 
-If `bakugan-recomp/build/` is missing or was configured under another Windows
-install, recreate it with `.\tools\configure.ps1 -Clean`: it runs CMake inside
-`vcvars64.bat` (needed for `rc.exe` and the Windows SDK), with the Ninja
-generator, `Release` and the VS `clang-cl`. Compare performance only between
-Release `/O2` builds. `run.ps1` sets `PS3_VFS_ROOT=<repo>/game`.
+If the build needs configuration, use CMake in an x64 Visual Studio developer
+environment with the Windows SDK and clang-cl, Ninja generator and Release.
+See the current commands in README.md. `tools/configure.ps1` was deleted.
+Compare performance only between Release `/O2` builds.
+`BakuganBrawlers.cmd` is the player entry point; `run.ps1` supports diagnostics.
 
 Close the game with Alt+F4 or `CloseMainWindow`. Never use
 `Stop-Process -Force`/`taskkill /F` without explicit user approval: audio is not
@@ -62,15 +63,17 @@ released and the process can block the next link.
 - There is no aggregate runner for `tools/tests/`. Each `*_test.c[pp]` is a
   standalone `main()` that includes toolkit headers/`.inc` files and must be
   compiled manually against `ps3recomp-src/`.
-- `tools/test_asset_io.py` compiles and runs the real asset backend without game
-  data. Variants: `--benchmark`, `--streaming`.
+- Focused local checks: `tools/test_spurs_taskset_workload.py`,
+  `tools/test_spu_user_event_ack.py`, `tools/test_player_boot.py`. The native
+  fixtures require clang-cl (`--compiler <path>`); workload tests also require
+  the current built runtime library.
 - Toolkit unit tests only: from `ps3recomp-src/`,
   `cmake -B build-tests -DPS3RECOMP_BUILD_TESTS=ON`, then
   `cmake --build build-tests`, then
   `ctest --test-dir build-tests --output-on-failure`.
-- CI (`.github/workflows/tests.yml`) runs `python -m compileall -q tools` and
-  `python tools/test_pipeline_patches.py`; that second script was deleted, so
-  treat CI as stale.
+- CI runs `python -m compileall -q tools` and
+  `python tools/test_repository_contract.py`. It does not boot the proprietary
+  game or replace the local native/visual validation.
 
 For rendering changes, validate in this order: save-data warning audio, full
 menu, first cinematic with image **and** audio, then battle HUD, cards, shadows

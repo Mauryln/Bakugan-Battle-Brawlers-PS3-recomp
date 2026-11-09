@@ -45,10 +45,18 @@ param(
 
     [int]$TimeoutSec = 0,
 
-    [switch]$CloseWhenDone
+    [switch]$CloseWhenDone,
+
+    [ValidateRange(0, 10000000)]
+    [int]$StopAtFlip = 0,
+
+    [string]$LivePadFile = ''
 )
 
 $ErrorActionPreference = 'Stop'
+if ($Mode -ne 'replay' -and ($StopAtFlip -gt 0 -or $LivePadFile)) {
+    throw 'StopAtFlip y LivePadFile solo se usan en replay.'
+}
 
 $root = Split-Path -Parent $PSScriptRoot
 $exe  = Join-Path $root 'bakugan-recomp\build\BakuganRecomp.exe'
@@ -125,7 +133,36 @@ if ($Mode -eq 'record') {
         $profile | ConvertTo-Json -Depth 5 | Set-Content (Join-Path $run 'source-profile.json') -Encoding utf8
         Write-Host "Perfil: $profilePath | partidas aisladas: $runtime"
     }
-    Write-Host "Reproduciendo: $rec"
+    if ($StopAtFlip -gt 0) {
+        $controlDir = Join-Path $dir ("$Name.control-" + (Get-Date).ToUniversalTime().ToString('yyyyMMddTHHmmssfffZ'))
+        New-Item -ItemType Directory -Path $controlDir | Out-Null
+        $prefix = @()
+        $lastTime = 0
+        foreach ($line in Get-Content -LiteralPath $rec) {
+            if (-not $line -or $line.StartsWith('#')) { continue }
+            $fields = $line -split '\s+'
+            if ([int]$fields[1] -ge $StopAtFlip) { break }
+            $prefix += $line
+            $lastTime = [long]$fields[0]
+        }
+        if (-not $prefix.Count) { throw 'El corte no incluye muestras de la grabacion.' }
+        $prefixPath = Join-Path $controlDir 'prefix.padrec'
+        @('# ps3recomp pad recording v1', '# t_ms flips mask lx ly rx ry') + $prefix +
+            @("$($lastTime + 250) $StopAtFlip 0 128 128 128 128") |
+            Set-Content -LiteralPath $prefixPath -Encoding ascii
+        $env:PAD_REPLAY = $prefixPath
+        $env:PAD_CLOCK = 'flips'
+        Write-Host "Corte en flip $StopAtFlip; grabacion original conservada."
+    }
+    if ($LivePadFile) {
+        $padPath = if ([IO.Path]::IsPathRooted($LivePadFile)) { $LivePadFile } else { Join-Path $root $LivePadFile }
+        $padPath = [IO.Path]::GetFullPath($padPath)
+        New-Item -ItemType Directory -Path (Split-Path -Parent $padPath) -Force | Out-Null
+        Set-Content -LiteralPath $padPath -Value '' -Encoding ascii
+        $env:PAD_FILE = $padPath
+        Write-Host "Control despues del replay: $padPath (ejemplo: 0x4000 4)."
+    }
+    Write-Host "Reproduciendo: $env:PAD_REPLAY"
     Write-Host 'El juego avanza solo hasta el punto grabado; la ventana se queda abierta.'
 }
 
@@ -170,7 +207,7 @@ while (-not $proc.HasExited) {
 }
 
 if ($done) {
-    Write-Host 'Reproducción terminada: el juego está en la arena (o donde acabó la grabación).'
+    Write-Host 'Reproducción terminada: comprobar la pantalla antes de continuar con el control.'
     $log | Out-Host
     Write-Host "Log: $log"
     if ($CloseWhenDone) {

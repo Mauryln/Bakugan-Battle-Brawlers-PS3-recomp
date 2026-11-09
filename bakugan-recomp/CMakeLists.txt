@@ -176,6 +176,7 @@ add_executable(${PROJECT_NAME}
     main.cpp
     stubs.cpp
     savedata_overlay.cpp
+    scene_state.cpp
     ${PS3RECOMP_SCAFFOLD}
     ${HLE_NID_TABLE}
     ${RECOMP_SOURCES}
@@ -216,11 +217,16 @@ if(PORT_SPU_SSE41 AND SPU_SOURCES AND WIN32 AND CMAKE_SIZEOF_VOID_P EQUAL 8
     endif()
 endif()
 
-# app.rc carries the icon, the version block and the manifest, and needs a
-# resource compiler. Listing it as a source on a host that has none is not a
-# link error, it is a "no rule to make" for a file nothing can consume.
+# Keep version information even when there is no locally generated icon.
 if(WIN32 AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/app.rc")
     target_sources(${PROJECT_NAME} PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/app.rc")
+    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/assets/bakugan.ico")
+        set_property(SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/app.rc"
+                     APPEND PROPERTY COMPILE_DEFINITIONS BAKUGAN_LOCAL_ICON)
+    endif()
+    # GUI subsystem: no console window. main() is kept as the entry point.
+    set_target_properties(${PROJECT_NAME} PROPERTIES WIN32_EXECUTABLE TRUE)
+    target_link_options(${PROJECT_NAME} PRIVATE /ENTRY:mainCRTStartup)
 endif()
 
 target_include_directories(${PROJECT_NAME} PRIVATE
@@ -273,11 +279,6 @@ if(WIN32)
         PROPERTIES INCLUDE_DIRECTORIES "${BAKUGAN_SDL3_ROOT}/include")
     target_link_libraries(${PROJECT_NAME} PRIVATE "${BAKUGAN_SDL3_LIBRARY}")
     bakugan_copy_sdl3(${PROJECT_NAME})
-    add_executable(BakuganLauncher WIN32 launcher.cpp launcher_theme.cpp player_config.cpp gamepad_devices.cpp)
-    target_include_directories(BakuganLauncher PRIVATE "${BAKUGAN_SDL3_ROOT}/include")
-    target_link_libraries(BakuganLauncher PRIVATE user32 comdlg32 gdi32 gdiplus comctl32 "${BAKUGAN_SDL3_LIBRARY}")
-    bakugan_copy_sdl3(BakuganLauncher)
-    install(TARGETS BakuganLauncher RUNTIME DESTINATION bin)
     install(FILES "${BAKUGAN_SDL3_ROOT}/lib/x64/SDL3.dll" DESTINATION bin)
     install(FILES "${BAKUGAN_SDL3_ROOT}/LICENSE.txt" DESTINATION bin/licenses RENAME SDL3.txt)
     install(DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/shaders/fsr1" DESTINATION bin/shaders)
