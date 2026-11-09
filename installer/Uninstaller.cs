@@ -73,9 +73,10 @@ namespace BakuganUninstaller
                                       Process.GetCurrentProcess().Id + ".cmd");
             File.WriteAllText(bat,
                 "@echo off\r\n" +
-                "ping -n 3 127.0.0.1 >nul\r\n" +
+                "chcp 65001 >nul\r\n" +
+                "ping -n 4 127.0.0.1 >nul\r\n" +
                 "rmdir /s /q \"" + full + "\"\r\n" +
-                "del \"%~f0\"\r\n");
+                "del \"%~f0\"\r\n", System.Text.Encoding.UTF8);
             var psi = new ProcessStartInfo("cmd.exe", "/c \"" + bat + "\"");
             psi.UseShellExecute = false;
             psi.CreateNoWindow = true;

@@ -2,8 +2,11 @@
 #define NOMINMAX
 #define UNICODE
 #include <windows.h>
+#include <windowsx.h>
 #include <commdlg.h>
 #include <commctrl.h>
+#include <objidl.h>
+#include <gdiplus.h>
 #include <filesystem>
 #include <algorithm>
 #include <vector>
@@ -21,9 +24,9 @@ enum {
     ID_SHARP,
     ID_ANISO,
     ID_LANG,
-    ID_MODE,
     ID_DEVICE,
     ID_MOTION,
+    ID_GYRO_SENS,
     ID_DEADZONE,
     ID_SENSITIVITY,
     ID_MOUSE_LOOK,
@@ -32,9 +35,9 @@ enum {
     ID_DEFAULTS,
     ID_SAVE,
     ID_PLAY,
-    ID_UI_LANG
+    ID_UI_LANG,
+    ID_GAMEPAD_CANVAS
 };
-constexpr int ID_BIND = 200;
 constexpr UINT WM_APP_REBUILD = WM_APP + 1;
 constexpr int WIDTH = 1000, HEIGHT = 800;
 struct Control {
@@ -42,17 +45,20 @@ struct Control {
     int x, y, w, h;
 };
 std::vector<Control> controls;
-HWND window, status, sensor_status, bindings[ACTION_COUNT];
+HWND window = nullptr, status = nullptr, sensor_status = nullptr, gamepad_canvas = nullptr;
 HFONT font = nullptr;
 Config config;
 Gamepads pads;
 std::wstring path, directory;
 std::string device_signature;
 int capture = -1;
+int selected_action = player::CROSS;
+int hover_action = -1;
 bool capture_armed = false;
 ULONGLONG capture_start = 0;
 bool ui_english = false;
 const wchar_t *S(const wchar_t *es, const wchar_t *en) { return ui_english ? en : es; }
+
 std::wstring localized(const std::wstring &error) {
     if (!ui_english)
         return error;
@@ -68,6 +74,7 @@ std::wstring localized(const std::wstring &error) {
         return L"Could not write all settings";
     return error;
 }
+
 void apply_ui_language() {
     if (config.ui_language == L"en")
         ui_english = true;
@@ -77,12 +84,15 @@ void apply_ui_language() {
         ui_english = PRIMARYLANGID(GetUserDefaultUILanguage()) != LANG_SPANISH;
     launcher_theme::set_english(ui_english);
 }
+
 const wchar_t *outputs[] = {L"720p", L"1080p", L"1440p", L"2160p", L"auto", L"native"};
 const wchar_t *windows[] = {L"borderless", L"windowed"};
 const wchar_t *languages[] = {L"auto", L"es", L"en", L"fr", L"de", L"it", L"nl", L"sv"};
 const wchar_t *ui_languages[] = {L"auto", L"es", L"en"};
+
 int selected(int id) { return (int)SendMessageW(GetDlgItem(window, id), CB_GETCURSEL, 0, 0); }
 void message(const std::wstring &text) { SetWindowTextW(status, text.c_str()); }
+
 HWND add(const wchar_t *cls, const wchar_t *text, int id, int x, int y, int w, int h, DWORD style = 0) {
     if (y >= 76)
         y += 70;
@@ -102,6 +112,7 @@ HWND add(const wchar_t *cls, const wchar_t *text, int id, int x, int y, int w, i
     controls.push_back({child, x, y, w, h});
     return child;
 }
+
 HWND combo(int id, int x, int y, int w, std::initializer_list<const wchar_t *> items) {
     HWND child = add(L"COMBOBOX", L"", id, x, y, w, 230, CBS_DROPDOWNLIST | WS_TABSTOP | WS_VSCROLL);
     for (auto item : items)
@@ -109,6 +120,7 @@ HWND combo(int id, int x, int y, int w, std::initializer_list<const wchar_t *> i
     SendMessageW(child, CB_SETCURSEL, 0, 0);
     return child;
 }
+
 void label(const wchar_t *text, int x, int y, int w = 260) { add(L"STATIC", text, 0, x, y, w, 22); }
 void choose(int id, int index) { SendMessageW(GetDlgItem(window, id), CB_SETCURSEL, std::max(0, index), 0); }
 template <size_t N> void choose(int id, const wchar_t *const (&values)[N], const std::wstring &value) {
@@ -128,11 +140,12 @@ void slider(int id, int x, int y, int w, int lo, int hi, int value) {
     SendMessageW(c, TBM_SETPOS, TRUE, value);
 }
 int position(int id) { return (int)SendMessageW(GetDlgItem(window, id), TBM_GETPOS, 0, 0); }
+
 void update_bindings() {
-    const auto &map = selected(ID_MAP_MODE) == 1 ? config.gamepad : config.keyboard;
-    for (int i = 0; i < ACTION_COUNT; ++i)
-        SetWindowTextW(bindings[i], binding_name(map[i], ui_english).c_str());
+    if (gamepad_canvas)
+        InvalidateRect(gamepad_canvas, nullptr, FALSE);
 }
+
 void read_device() {
     int i = selected(ID_DEVICE);
     if (i == 0) {
@@ -144,6 +157,7 @@ void read_device() {
         config.device_serial = d.serial;
     }
 }
+
 void refresh_devices(bool force = false) {
     pads.refresh();
     std::string signature;
@@ -179,13 +193,14 @@ void refresh_devices(bool force = false) {
     if (device) {
         std::array<float, 3> a{}, g{};
         bool real = selected(ID_MOTION) != 2 && pads.motion(device, a, g);
-        info = real ? S(L"Giroscopio + acelerómetro disponibles: Sixaxis real.",
-                        L"Gyroscope + accelerometer available: real Sixaxis.")
-                    : S(L"Sensores no disponibles o desactivados: Sixaxis en palanca R.",
-                        L"Sensors unavailable or disabled: Sixaxis on right stick.");
+        info = real ? S(L"Giroscopio activo -> Stick derecho virtual + Sixaxis.",
+                        L"Gyroscope active -> Virtual right stick + Sixaxis.")
+                    : S(L"Sensores no disponibles o desactivados: Stick derecho.",
+                        L"Sensors unavailable or disabled: Right stick Sixaxis.");
     }
     SetWindowTextW(sensor_status, info.c_str());
 }
+
 void read_controls() {
     auto index = [](int id, int count) { return std::clamp(selected(id), 0, count - 1); };
     config.output = outputs[index(ID_OUTPUT, 6)];
@@ -197,20 +212,21 @@ void read_controls() {
     config.aniso = aniso[index(ID_ANISO, 5)];
     config.language = languages[index(ID_LANG, 8)];
     config.ui_language = ui_languages[index(ID_UI_LANG, 3)];
-    config.input = (InputMode)index(ID_MODE, 3);
+    config.input = InputMode::Auto;
     config.motion = (MotionMode)index(ID_MOTION, 3);
+    config.gyro_sensitivity = position(ID_GYRO_SENS) / 100.f;
     config.deadzone = position(ID_DEADZONE) / 100.f;
     config.mouse_sensitivity = position(ID_SENSITIVITY) / 100.f;
     config.mouse_look = checked(ID_MOUSE_LOOK);
     config.mouse_left_cross = checked(ID_MOUSE_CROSS);
     read_device();
 }
+
 void fill_controls() {
     choose(ID_OUTPUT, outputs, config.output);
     choose(ID_WINDOW, windows, config.window);
     choose(ID_LANG, languages, config.language);
     choose(ID_UI_LANG, ui_languages, config.ui_language);
-    choose(ID_MODE, (int)config.input);
     choose(ID_MOTION, (int)config.motion);
     int a = 0;
     for (int n = config.aniso; n > 1; n /= 2)
@@ -218,12 +234,14 @@ void fill_controls() {
     choose(ID_ANISO, a);
     SendMessageW(GetDlgItem(window, ID_SHARP), TBM_SETPOS, TRUE, (int)(config.sharpness * 100));
     SendMessageW(GetDlgItem(window, ID_DEADZONE), TBM_SETPOS, TRUE, (int)(config.deadzone * 100));
+    SendMessageW(GetDlgItem(window, ID_GYRO_SENS), TBM_SETPOS, TRUE, (int)(config.gyro_sensitivity * 100));
     SendMessageW(GetDlgItem(window, ID_SENSITIVITY), TBM_SETPOS, TRUE, (int)(config.mouse_sensitivity * 100));
     check(ID_MOUSE_LOOK, config.mouse_look);
     check(ID_MOUSE_CROSS, config.mouse_left_cross);
     update_bindings();
     refresh_devices(true);
 }
+
 void layout() {
     RECT client;
     GetClientRect(window, &client);
@@ -239,6 +257,7 @@ void layout() {
         SendMessageW(c.hwnd, WM_SETFONT, (WPARAM)font, TRUE);
     }
 }
+
 void fit_window(UINT dpi, const RECT *suggested = nullptr) {
     MONITORINFO info{sizeof(info)};
     GetMonitorInfoW(MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST), &info);
@@ -253,6 +272,7 @@ void fit_window(UINT dpi, const RECT *suggested = nullptr) {
     SetWindowPos(window, nullptr, x, y, w, h, SWP_NOZORDER | SWP_NOACTIVATE);
     layout();
 }
+
 bool save_settings() {
     read_controls();
     std::wstring error;
@@ -264,6 +284,7 @@ bool save_settings() {
               L"Settings saved. They will apply when the game starts."));
     return true;
 }
+
 void launch() {
     if (!save_settings())
         return;
@@ -305,6 +326,7 @@ void launch() {
         return;
     }
     apply_environment(config, path);
+    SetEnvironmentVariableW(L"PS3_PLAYER_CONFIG", path.c_str());
     SetEnvironmentVariableW(L"PS3_VFS_ROOT", elf.parent_path().parent_path().parent_path().c_str());
     SetEnvironmentVariableW(L"PS3_TITLE", L"Bakugan: Battle Brawlers");
     std::wstring command = L"\"" + exe.wstring() + L"\" \"" + elf.wstring() + L"\"";
@@ -335,12 +357,11 @@ void launch() {
     if (log != INVALID_HANDLE_VALUE) CloseHandle(log);
     CloseHandle(process.hThread);
     CloseHandle(process.hProcess);
-    /* The launcher's job ends when the game starts; keep no second window in
-     * the taskbar. WM_CLOSE performs the normal shutdown path. */
     PostMessageW(window, WM_CLOSE, 0, 0);
 }
+
 void finish_capture(Binding binding, bool cancel = false) {
-    if (!cancel) {
+    if (!cancel && capture >= 0 && capture < ACTION_COUNT) {
         auto &map = selected(ID_MAP_MODE) == 1 ? config.gamepad : config.keyboard;
         map[capture] = binding;
     }
@@ -348,9 +369,10 @@ void finish_capture(Binding binding, bool cancel = false) {
     capture_armed = false;
     update_bindings();
     message(cancel ? S(L"Asignación cancelada.", L"Binding cancelled.")
-                   : S(L"Asignación aplicada. Guarda los ajustes o inicia el juego.",
-                       L"Binding applied. Save the settings or start the game."));
+                   : S(L"Asignación aplicada. Guarda los ajustes para conservarla.",
+                       L"Binding applied. Save settings to preserve it."));
 }
+
 void poll_capture() {
     if (capture < 0)
         return;
@@ -420,6 +442,7 @@ void poll_capture() {
         }
     }
 }
+
 bool capture_message(const MSG &msg) {
     if (capture < 0 || !capture_armed || selected(ID_MAP_MODE) == 1)
         return false;
@@ -443,6 +466,7 @@ bool capture_message(const MSG &msg) {
     }
     return false;
 }
+
 bool activate_button(const MSG &msg) {
     if (capture >= 0 || msg.message != WM_KEYDOWN || msg.wParam != VK_RETURN)
         return false;
@@ -453,73 +477,426 @@ bool activate_button(const MSG &msg) {
     SendMessageW(msg.hwnd, BM_CLICK, 0, 0);
     return true;
 }
+
+// Visual Gamepad Controller Data & Rendering
+struct ButtonHotspot {
+    int action;
+    const wchar_t *ps_name;
+    const wchar_t *desc_es;
+    const wchar_t *desc_en;
+    float x, y, w, h;
+    bool is_circle;
+};
+
+static const ButtonHotspot kButtons[player::ACTION_COUNT] = {
+    {player::SELECT, L"SELECT", L"Seleccionar / Mapa", L"Select / Map", 232.f, 118.f, 40.f, 18.f, false},
+    {player::L3, L"L3", L"Stick izquierdo (pulsar)", L"Left stick click", 199.f, 199.f, 30.f, 30.f, true},
+    {player::R3, L"R3", L"Stick derecho (pulsar)", L"Right stick click", 399.f, 199.f, 30.f, 30.f, true},
+    {player::START, L"START", L"Pausa / Opciones", L"Pause / Start", 356.f, 118.f, 40.f, 18.f, false},
+    {player::UP, L"▲", L"Cruceta arriba", L"D-Pad up", 136.f, 106.f, 26.f, 24.f, false},
+    {player::RIGHT, L"▶", L"Cruceta derecha", L"D-Pad right", 162.f, 128.f, 24.f, 24.f, false},
+    {player::DOWN, L"▼", L"Cruceta abajo", L"D-Pad down", 136.f, 150.f, 26.f, 24.f, false},
+    {player::LEFT, L"◀", L"Cruceta izquierda", L"D-Pad left", 112.f, 128.f, 24.f, 24.f, false},
+    {player::L2, L"L2", L"Gatillo L2 analógico", L"Left trigger L2", 116.f, 18.f, 66.f, 22.f, false},
+    {player::R2, L"R2", L"Gatillo R2 analógico", L"Right trigger R2", 446.f, 18.f, 66.f, 22.f, false},
+    {player::L1, L"L1", L"Botón superior L1", L"Left shoulder L1", 116.f, 46.f, 66.f, 20.f, false},
+    {player::R1, L"R1", L"Botón superior R1", L"Right shoulder R1", 446.f, 46.f, 66.f, 20.f, false},
+    {player::TRIANGLE, L"△", L"Triángulo / Acción superior", L"Triangle / North action", 466.f, 106.f, 26.f, 26.f, true},
+    {player::CIRCLE, L"○", L"Círculo / Cancelar", L"Circle / East action", 492.f, 128.f, 26.f, 26.f, true},
+    {player::CROSS, L"✕", L"Cruz / Aceptar / Salto", L"Cross / South action", 466.f, 150.f, 26.f, 26.f, true},
+    {player::SQUARE, L"□", L"Cuadrado / Ataque", L"Square / West action", 440.f, 128.f, 26.f, 26.f, true},
+    {player::MOTION_THROW, L"SIX", L"Impulso Sixaxis / Lanzar", L"Sixaxis impulse / Throw", 300.f, 114.f, 28.f, 28.f, true},
+    {player::L_UP, L"L▲", L"Stick L arriba", L"Left stick up", 203.f, 175.f, 22.f, 20.f, false},
+    {player::L_RIGHT, L"L▶", L"Stick L derecha", L"Left stick right", 233.f, 204.f, 20.f, 20.f, false},
+    {player::L_DOWN, L"L▼", L"Stick L abajo", L"Left stick down", 203.f, 233.f, 22.f, 20.f, false},
+    {player::L_LEFT, L"L◀", L"Stick L izquierda", L"Left stick left", 175.f, 204.f, 20.f, 20.f, false},
+    {player::R_UP, L"R▲", L"Stick R arriba", L"Right stick up", 403.f, 175.f, 22.f, 20.f, false},
+    {player::R_RIGHT, L"R▶", L"Stick R derecha", L"Right stick right", 433.f, 204.f, 20.f, 20.f, false},
+    {player::R_DOWN, L"R▼", L"Stick R abajo", L"Right stick down", 403.f, 233.f, 22.f, 20.f, false},
+    {player::R_LEFT, L"R◀", L"Stick R izquierda", L"Right stick left", 375.f, 204.f, 20.f, 20.f, false}
+};
+
+struct ConflictResult {
+    bool conflict = false;
+    int other_action = -1;
+};
+
+ConflictResult check_conflict(int action, bool is_gamepad) {
+    ConflictResult res{};
+    const auto &map = is_gamepad ? config.gamepad : config.keyboard;
+    const auto &target = map[action];
+    if (target.kind == BindingKind::None)
+        return res;
+    for (int i = 0; i < ACTION_COUNT; ++i) {
+        if (i == action)
+            continue;
+        if (map[i].kind == target.kind && map[i].code == target.code) {
+            res.conflict = true;
+            res.other_action = i;
+            return res;
+        }
+    }
+    return res;
+}
+
+int hit_test_button(float mx, float my) {
+    for (int i = 0; i < ACTION_COUNT; ++i) {
+        const auto &b = kButtons[i];
+        if (b.is_circle) {
+            float cx = b.x + b.w / 2.f, cy = b.y + b.h / 2.f;
+            float r = b.w / 2.f;
+            float dx = mx - cx, dy = my - cy;
+            if (dx * dx + dy * dy <= r * r)
+                return b.action;
+        } else {
+            if (mx >= b.x && mx <= b.x + b.w && my >= b.y && my <= b.y + b.h)
+                return b.action;
+        }
+    }
+    return -1;
+}
+
+void draw_gamepad(Gdiplus::Graphics &g, int width, int height) {
+    using namespace Gdiplus;
+    g.SetSmoothingMode(SmoothingModeAntiAlias);
+    g.SetTextRenderingHint(TextRenderingHintClearTypeGridFit);
+
+    float sx = width / 628.0f;
+    float sy = height / 396.0f;
+    g.ScaleTransform(sx, sy);
+
+    // Canvas background container
+    SolidBrush bg_brush(Color(255, 12, 18, 30));
+    g.FillRectangle(&bg_brush, RectF(0.f, 0.f, 628.f, 396.f));
+    Pen border_pen(Color(255, 38, 56, 82), 1.0f);
+    g.DrawRectangle(&border_pen, RectF(0.5f, 0.5f, 627.f, 395.f));
+
+    // Gamepad controller body silhouette
+    SolidBrush body_brush(Color(255, 20, 30, 48));
+    Pen body_pen(Color(255, 55, 82, 118), 1.5f);
+
+    // Center bridge
+    g.FillRectangle(&body_brush, RectF(180.f, 82.f, 268.f, 130.f));
+    g.DrawRectangle(&body_pen, RectF(180.f, 82.f, 268.f, 130.f));
+
+    // Left grip
+    PointF left_grip[6] = {
+        PointF(110.f, 78.f), PointF(180.f, 82.f), PointF(180.f, 212.f),
+        PointF(145.f, 282.f), PointF(92.f, 270.f), PointF(90.f, 120.f)
+    };
+    g.FillPolygon(&body_brush, left_grip, 6);
+    g.DrawPolygon(&body_pen, left_grip, 6);
+
+    // Right grip
+    PointF right_grip[6] = {
+        PointF(448.f, 82.f), PointF(518.f, 78.f), PointF(538.f, 120.f),
+        PointF(536.f, 270.f), PointF(483.f, 282.f), PointF(448.f, 212.f)
+    };
+    g.FillPolygon(&body_brush, right_grip, 6);
+    g.DrawPolygon(&body_pen, right_grip, 6);
+
+    // Sticks base wells
+    SolidBrush stick_well(Color(255, 15, 22, 34));
+    Pen stick_well_pen(Color(255, 45, 68, 98), 1.2f);
+    g.FillEllipse(&stick_well, RectF(170.f, 170.f, 88.f, 88.f));
+    g.DrawEllipse(&stick_well_pen, RectF(170.f, 170.f, 88.f, 88.f));
+    g.FillEllipse(&stick_well, RectF(370.f, 170.f, 88.f, 88.f));
+    g.DrawEllipse(&stick_well_pen, RectF(370.f, 170.f, 88.f, 88.f));
+
+    // D-Pad cross plate
+    SolidBrush dpad_base(Color(255, 16, 24, 38));
+    g.FillRectangle(&dpad_base, RectF(134.f, 104.f, 30.f, 72.f));
+    g.FillRectangle(&dpad_base, RectF(110.f, 126.f, 78.f, 28.f));
+
+    bool is_gamepad = selected(ID_MAP_MODE) == 1;
+    const auto &bindings = is_gamepad ? config.gamepad : config.keyboard;
+
+    Font sym_font(L"Segoe UI", 9.5f, FontStyleBold);
+    Font badge_font(L"Segoe UI", 7.5f, FontStyleRegular);
+    StringFormat sf_center;
+    sf_center.SetAlignment(StringAlignmentCenter);
+    sf_center.SetLineAlignment(StringAlignmentCenter);
+
+    for (int i = 0; i < ACTION_COUNT; ++i) {
+        const auto &b = kButtons[i];
+        bool is_sel = (selected_action == b.action);
+        bool is_hov = (hover_action == b.action);
+        bool is_cap = (capture == b.action);
+        ConflictResult cr = check_conflict(b.action, is_gamepad);
+
+        Color fill_col = is_cap ? Color(255, 95, 75, 20)
+                       : is_sel ? Color(255, 70, 52, 16)
+                       : is_hov ? Color(255, 28, 62, 100)
+                       : cr.conflict ? Color(255, 80, 25, 30)
+                       : Color(255, 26, 38, 58);
+
+        Color border_col = is_cap ? Color(255, 238, 193, 97)
+                         : is_sel ? Color(255, 238, 193, 97)
+                         : cr.conflict ? Color(255, 240, 65, 65)
+                         : is_hov ? Color(255, 75, 170, 255)
+                         : Color(255, 65, 95, 135);
+
+        float pen_w = (is_sel || is_cap || cr.conflict) ? 2.0f : 1.0f;
+        SolidBrush btn_brush(fill_col);
+        Pen btn_pen(border_col, pen_w);
+
+        RectF r(b.x, b.y, b.w, b.h);
+        if (b.is_circle) {
+            g.FillEllipse(&btn_brush, r);
+            g.DrawEllipse(&btn_pen, r);
+        } else {
+            g.FillRectangle(&btn_brush, r);
+            g.DrawRectangle(&btn_pen, r);
+        }
+
+        // Color for PlayStation Symbols
+        Color sym_col = Color(255, 240, 245, 255);
+        if (b.action == player::TRIANGLE)
+            sym_col = Color(255, 70, 220, 120);
+        else if (b.action == player::CIRCLE)
+            sym_col = Color(255, 245, 70, 70);
+        else if (b.action == player::CROSS)
+            sym_col = Color(255, 65, 180, 255);
+        else if (b.action == player::SQUARE)
+            sym_col = Color(255, 240, 110, 190);
+        else if (b.action == player::MOTION_THROW)
+            sym_col = Color(255, 238, 193, 97);
+
+        SolidBrush sym_brush(sym_col);
+        g.DrawString(b.ps_name, -1, &sym_font, r, &sf_center, &sym_brush);
+
+        // Conflict exclamation badge
+        if (cr.conflict) {
+            SolidBrush warn_bg(Color(255, 230, 50, 50));
+            g.FillEllipse(&warn_bg, RectF(b.x + b.w - 8.f, b.y - 4.f, 10.f, 10.f));
+            SolidBrush warn_txt(Color(255, 255, 255, 255));
+            Font warn_font(L"Segoe UI", 6.5f, FontStyleBold);
+            g.DrawString(L"!", -1, &warn_font, RectF(b.x + b.w - 8.f, b.y - 4.f, 10.f, 10.f), &sf_center, &warn_txt);
+        }
+    }
+
+    // Inspector Panel Card at the bottom (y = 310 .. 386)
+    SolidBrush panel_bg(Color(255, 14, 22, 36));
+    Pen panel_border(Color(255, 42, 64, 94), 1.0f);
+    g.FillRectangle(&panel_bg, RectF(12.f, 308.f, 604.f, 78.f));
+    g.DrawRectangle(&panel_border, RectF(12.f, 308.f, 604.f, 78.f));
+
+    int cur_act = (selected_action >= 0 && selected_action < ACTION_COUNT) ? selected_action : player::CROSS;
+    const auto &cur_b = kButtons[cur_act];
+    ConflictResult cur_cr = check_conflict(cur_act, is_gamepad);
+
+    Font head_font(L"Segoe UI", 11.f, FontStyleBold);
+    Font sub_font(L"Segoe UI", 9.f, FontStyleRegular);
+    Font val_font(L"Segoe UI", 10.5f, FontStyleBold);
+
+    // Left info sub-box
+    SolidBrush gold_txt(Color(255, 238, 193, 97));
+    SolidBrush white_txt(Color(255, 240, 245, 255));
+    SolidBrush dim_txt(Color(255, 160, 180, 205));
+
+    std::wstring title = std::wstring(cur_b.ps_name) + L" — " + (ui_english ? cur_b.desc_en : cur_b.desc_es);
+    g.DrawString(title.c_str(), -1, &head_font, PointF(24.f, 316.f), &gold_txt);
+
+    std::wstring b_text = binding_name(bindings[cur_act], ui_english);
+    std::wstring bind_label = S(L"Asignación actual: [ ", L"Current binding: [ ") + b_text + L" ]";
+    g.DrawString(bind_label.c_str(), -1, &val_font, PointF(24.f, 342.f), &white_txt);
+
+    std::wstring dev_mode_str = is_gamepad ? S(L"Editando Mando (SDL3)", L"Editing Gamepad (SDL3)")
+                                           : S(L"Editando Teclado y Ratón", L"Editing Keyboard & Mouse");
+    g.DrawString(dev_mode_str.c_str(), -1, &sub_font, PointF(24.f, 363.f), &dim_txt);
+
+    // Right status / alert sub-box (x = 340 .. 604)
+    RectF status_card(336.f, 314.f, 272.f, 66.f);
+    if (capture == cur_act) {
+        SolidBrush cap_bg(Color(255, 65, 50, 15));
+        Pen cap_pen(Color(255, 238, 193, 97), 1.5f);
+        g.FillRectangle(&cap_bg, status_card);
+        g.DrawRectangle(&cap_pen, status_card);
+
+        SolidBrush cap_head(Color(255, 255, 220, 120));
+        g.DrawString(S(L"⏳ PULSA UNA ENTRADA...", L"⏳ PRESS AN INPUT..."), -1, &head_font, PointF(344.f, 320.f), &cap_head);
+        g.DrawString(S(L"Pulsa una tecla, botón o eje.\nEsc cancela · Supr desasigna.",
+                       L"Press a key, button, or axis.\nEsc cancels · Del clears."),
+                     -1, &sub_font, PointF(344.f, 340.f), &white_txt);
+    } else if (cur_cr.conflict) {
+        SolidBrush cr_bg(Color(255, 65, 20, 25));
+        Pen cr_pen(Color(255, 240, 60, 60), 1.5f);
+        g.FillRectangle(&cr_bg, status_card);
+        g.DrawRectangle(&cr_pen, status_card);
+
+        SolidBrush cr_head(Color(255, 255, 90, 90));
+        g.DrawString(S(L"⚠️ CONFLICTO DE ASIGNACIÓN", L"⚠️ BINDING CONFLICT"), -1, &head_font, PointF(344.f, 320.f), &cr_head);
+        std::wstring other_name = action_name(cur_cr.other_action, ui_english);
+        std::wstring cr_desc = S(L"Coincide con: ", L"Clashes with: ") + other_name;
+        g.DrawString(cr_desc.c_str(), -1, &sub_font, PointF(344.f, 342.f), &white_txt);
+    } else {
+        SolidBrush ok_head(Color(255, 80, 210, 130));
+        g.DrawString(S(L"✓ ASIGNACIÓN LISTA", L"✓ READY"), -1, &head_font, PointF(344.f, 320.f), &ok_head);
+        g.DrawString(S(L"Haz clic en cualquier botón del\nmando para reasignarlo.",
+                       L"Click any button on the gamepad\nto rebind it."),
+                     -1, &sub_font, PointF(344.f, 340.f), &dim_txt);
+    }
+}
+
+LRESULT CALLBACK canvas_wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    switch (msg) {
+    case WM_ERASEBKGND:
+        return 1;
+    case WM_PAINT: {
+        PAINTSTRUCT ps;
+        HDC dc = BeginPaint(hwnd, &ps);
+        RECT r;
+        GetClientRect(hwnd, &r);
+        int w = r.right - r.left, h = r.bottom - r.top;
+        if (w > 0 && h > 0) {
+            HDC mem_dc = CreateCompatibleDC(dc);
+            HBITMAP mem_bm = CreateCompatibleBitmap(dc, w, h);
+            HGDIOBJ old_bm = SelectObject(mem_dc, mem_bm);
+            {
+                Gdiplus::Graphics g(mem_dc);
+                draw_gamepad(g, w, h);
+            }
+            BitBlt(dc, 0, 0, w, h, mem_dc, 0, 0, SRCCOPY);
+            SelectObject(mem_dc, old_bm);
+            DeleteObject(mem_bm);
+            DeleteDC(mem_dc);
+        }
+        EndPaint(hwnd, &ps);
+        return 0;
+    }
+    case WM_MOUSEMOVE: {
+        RECT r;
+        GetClientRect(hwnd, &r);
+        float sx = r.right > 0 ? (628.0f / r.right) : 1.0f;
+        float sy = r.bottom > 0 ? (396.0f / r.bottom) : 1.0f;
+        float mx = GET_X_LPARAM(lp) * sx;
+        float my = GET_Y_LPARAM(lp) * sy;
+        int hit = hit_test_button(mx, my);
+        if (hit != hover_action) {
+            hover_action = hit;
+            InvalidateRect(hwnd, nullptr, FALSE);
+        }
+        SetCursor(LoadCursor(nullptr, hit >= 0 ? IDC_HAND : IDC_ARROW));
+        return 0;
+    }
+    case WM_LBUTTONDOWN: {
+        RECT r;
+        GetClientRect(hwnd, &r);
+        float sx = r.right > 0 ? (628.0f / r.right) : 1.0f;
+        float sy = r.bottom > 0 ? (396.0f / r.bottom) : 1.0f;
+        float mx = GET_X_LPARAM(lp) * sx;
+        float my = GET_Y_LPARAM(lp) * sy;
+        int hit = hit_test_button(mx, my);
+        if (hit >= 0) {
+            selected_action = hit;
+            capture = hit;
+            capture_start = GetTickCount64();
+            capture_armed = false;
+            InvalidateRect(hwnd, nullptr, FALSE);
+            SetFocus(window);
+            message(S(L"Suelta los controles y pulsa una tecla, botón o eje. Esc cancela; Supr borra.",
+                      L"Release controls and press a key, button, or axis. Esc cancels; Del clears."));
+        }
+        return 0;
+    }
+    case WM_SETCURSOR:
+        if (hover_action >= 0) {
+            SetCursor(LoadCursor(nullptr, IDC_HAND));
+            return TRUE;
+        }
+        break;
+    }
+    return DefWindowProcW(hwnd, msg, wp, lp);
+}
+
 void create_controls() {
     apply_ui_language();
     label(S(L"Idioma del launcher", L"Launcher language"), 712, 26, 272);
     combo(ID_UI_LANG, 712, 46, 272,
           {S(L"Automático (Windows)", L"Automatic (Windows)"), L"Español", L"English"});
+
+    // Panel izquierdo: Pantalla y gráficos
     add(L"BUTTON", S(L"Pantalla y gráficos", L"Display and graphics"), 0, 16, 76, 302, 558, BS_GROUPBOX);
-    label(S(L"Resolución de salida", L"Output resolution"), 32, 100);
-    combo(ID_OUTPUT, 32, 124, 268,
+    label(S(L"Resolución de salida", L"Output resolution"), 32, 92);
+    combo(ID_OUTPUT, 32, 114, 268,
           {L"1280 × 720", L"1920 × 1080", L"2560 × 1440", L"3840 × 2160",
            S(L"Automática", L"Automatic"), S(L"Resolución del monitor", L"Monitor resolution")});
-    label(S(L"Modo de ventana", L"Window mode"), 32, 168);
-    combo(ID_WINDOW, 32, 192, 268,
-          {S(L"Sin bordes", L"Borderless"), S(L"Ventana", L"Windowed")});
-    label(S(L"Nitidez FSR: 0 alta · 2 baja", L"FSR sharpness: 0 sharp · 2 soft"), 32, 236);
-    slider(ID_SHARP, 28, 260, 276, 0, 200, 60);
-    label(S(L"Filtrado anisotrópico", L"Anisotropic filtering"), 32, 298);
-    combo(ID_ANISO, 32, 322, 268, {L"1×", L"2×", L"4×", L"8×", L"16×"});
+    label(S(L"Modo de ventana", L"Window mode"), 32, 154);
+    combo(ID_WINDOW, 32, 176, 268,
+          {S(L"Sin bordes (Borderless)", L"Borderless windowed"), S(L"Ventana", L"Windowed")});
+    label(S(L"Filtrado anisotrópico", L"Anisotropic filtering"), 32, 216);
+    combo(ID_ANISO, 32, 238, 268, {L"1×", L"2×", L"4×", L"8×", L"16×"});
+    label(S(L"Nitidez: 0 alta · 2 baja", L"Image sharpness: 0 sharp · 2 soft"), 32, 278);
+    slider(ID_SHARP, 28, 300, 276, 0, 200, 60);
+
     add(L"STATIC",
-        S(L"La resolución de salida se adapta al monitor. El límite de FPS es fijo a 30.",
-          L"The output resolution adapts to the monitor. The FPS limit is fixed at 30."),
-        0, 32, 372, 268, 72);
-    add(L"BUTTON", S(L"Mantener clic derecho: apuntar", L"Hold right click: aim"), ID_MOUSE_LOOK, 32, 454,
-        276, 26, BS_AUTOCHECKBOX | WS_TABSTOP);
-    add(L"BUTTON", S(L"Clic izquierdo: Cruz (X)", L"Left click: Cross (X)"), ID_MOUSE_CROSS, 32, 488, 276,
-        26, BS_AUTOCHECKBOX | WS_TABSTOP);
-    add(L"BUTTON", S(L"Idioma y controles", L"Language and controls"), 0, 332, 76, 652, 558, BS_GROUPBOX);
-    label(S(L"Idioma", L"Language"), 348, 100, 112);
-    combo(ID_LANG, 468, 96, 496,
-          {S(L"Automático (idioma de Windows)", L"Automatic (Windows language)"), L"Español", L"English",
+        S(L"El juego se ejecuta a 30 FPS con frame pacing uniforme y FSR1 automático en resoluciones superiores a 720p.",
+          L"The game runs at 30 FPS with uniform frame pacing and automatic FSR1 above 720p."),
+        0, 32, 346, 268, 54);
+
+    add(L"BUTTON", S(L"Mantener clic derecho: apuntar", L"Hold right click: aim"), ID_MOUSE_LOOK, 32, 420,
+        276, 24, BS_AUTOCHECKBOX | WS_TABSTOP);
+    add(L"BUTTON", S(L"Clic izquierdo: Cruz (X)", L"Left click: Cross (X)"), ID_MOUSE_CROSS, 32, 448, 276,
+        24, BS_AUTOCHECKBOX | WS_TABSTOP);
+    label(S(L"Sensibilidad del ratón", L"Mouse sensitivity"), 32, 484);
+    slider(ID_SENSITIVITY, 28, 508, 276, 5, 200, 50);
+
+    // Panel derecho: Idioma y controles
+    add(L"BUTTON", S(L"Idioma y controles interactivos", L"Language and interactive controls"), 0, 332, 76, 652, 558, BS_GROUPBOX);
+    label(S(L"Idioma", L"Language"), 348, 92, 60);
+    combo(ID_LANG, 412, 88, 240,
+          {S(L"Automático (Windows)", L"Automatic (Windows)"), L"Español", L"English",
            L"Français", L"Deutsch", L"Italiano", L"Nederlands", L"Svenska"});
-    label(S(L"Dispositivo", L"Device"), 348, 134, 112);
-    combo(ID_MODE, 468, 130, 496,
-          {S(L"Automático: mando o teclado y ratón", L"Automatic: controller or keyboard and mouse"),
-           S(L"Teclado y ratón", L"Keyboard and mouse"), S(L"Mando", L"Controller")});
-    label(S(L"Mando", L"Controller"), 348, 168, 112);
-    combo(ID_DEVICE, 468, 164, 496, {S(L"Buscando mandos…", L"Searching for controllers…")});
-    label(L"Sixaxis", 348, 202, 112);
-    combo(ID_MOTION, 468, 198, 496,
-          {S(L"Automático: sensores o palanca R", L"Automatic: sensors or right stick"),
-           S(L"Preferir giroscopio (respaldo: palanca R)", L"Prefer gyroscope (fallback: right stick)"),
-           S(L"Palanca R", L"Right stick")});
-    sensor_status = add(L"STATIC", L"", 0, 348, 234, 616, 24);
-    label(S(L"Zona muerta", L"Deadzone"), 348, 270, 112);
-    slider(ID_DEADZONE, 458, 264, 190, 2, 50, 15);
-    label(S(L"Ratón", L"Mouse"), 670, 270, 64);
-    slider(ID_SENSITIVITY, 734, 264, 230, 5, 200, 50);
-    label(S(L"Mapeo PS3", L"PS3 mapping"), 348, 304, 112);
-    combo(ID_MAP_MODE, 468, 298, 280,
-          {S(L"Editar teclado y ratón", L"Edit keyboard and mouse"), S(L"Editar mando", L"Edit controller")});
-    add(L"BUTTON", S(L"Restablecer", L"Reset"), ID_DEFAULTS, 770, 298, 194, 26, WS_TABSTOP);
-    for (int i = 0; i < ACTION_COUNT; ++i) {
-        int column = i / 13, row = i % 13, x = 348 + column * 312, y = 338 + row * 22;
-        label(action_name(i, ui_english), x, y + 2, 142);
-        bindings[i] = add(L"BUTTON", L"", ID_BIND + i, x + 144, y, 152, 22, WS_TABSTOP);
-    }
+    label(S(L"Mando", L"Controller"), 668, 92, 60);
+    combo(ID_DEVICE, 732, 88, 236, {S(L"Buscando mandos…", L"Searching for controllers…")});
+
+    label(L"Sixaxis", 348, 126, 60);
+    combo(ID_MOTION, 412, 122, 240,
+          {S(L"Automático: giroscopio si está disponible", L"Automatic: gyro if available"),
+           S(L"Giroscopio preferente (respaldo: stick R)", L"Prefer gyroscope (fallback: stick R)"),
+           S(L"Stick R únicamente", L"Right stick only")});
+    label(S(L"Sensibilidad giro", L"Gyro sensitivity"), 668, 126, 120);
+    slider(ID_GYRO_SENS, 792, 120, 176, 20, 300, 100);
+
+    label(S(L"Zona muerta", L"Deadzone"), 348, 160, 84);
+    slider(ID_DEADZONE, 436, 154, 216, 2, 50, 15);
+    sensor_status = add(L"STATIC", L"", 0, 668, 158, 300, 24);
+
+    // Mapeo interactivo: selector de dispositivo y restablecer
+    label(S(L"Mapeo a editar", L"Mapping to edit"), 348, 194, 110);
+    combo(ID_MAP_MODE, 468, 190, 270,
+          {S(L"Teclado y ratón (simultáneo)", L"Keyboard & Mouse (simultaneous)"),
+           S(L"Mando (simultáneo)", L"Controller (simultaneous)")});
+    add(L"BUTTON", S(L"Restaurar predeterminados", L"Reset defaults"), ID_DEFAULTS, 754, 190, 214, 26, WS_TABSTOP);
+
+    // Canvas interactivo del mando (628 x 396)
+    WNDCLASSW cwc{};
+    cwc.lpfnWndProc = canvas_wndproc;
+    cwc.hInstance = GetModuleHandleW(nullptr);
+    cwc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+    cwc.lpszClassName = L"bakugan_gamepad_canvas";
+    RegisterClassW(&cwc);
+
+    int canvas_y = 226;
+    if (canvas_y >= 76)
+        canvas_y += 70;
+    gamepad_canvas = CreateWindowExW(0, cwc.lpszClassName, L"", WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS,
+                                     344, canvas_y, 628, 396, window,
+                                     (HMENU)ID_GAMEPAD_CANVAS, GetModuleHandleW(nullptr), nullptr);
+    controls.push_back({gamepad_canvas, 344, canvas_y, 628, 396});
+
     status = add(L"STATIC",
-                 S(L"Selecciona un botón para asignarlo. Suelta los controles y pulsa la nueva entrada. Esc "
-                   L"cancela; Supr borra.",
-                   L"Select a button to bind it. Release the controls and press the new input. Esc "
-                   L"cancels; Del clears."),
+                 S(L"Haz clic en cualquier botón del mando para asignarlo. Teclado y mando funcionan simultáneamente.",
+                   L"Click any button on the controller to bind it. Keyboard and controller work simultaneously."),
                  0, 24, 648, 950, 38);
     add(L"BUTTON", S(L"Guardar ajustes", L"Save settings"), ID_SAVE, 656, 690, 150, 30, WS_TABSTOP);
     add(L"BUTTON", S(L"Jugar", L"Play"), ID_PLAY, 822, 690, 150, 30,
         BS_DEFPUSHBUTTON | WS_TABSTOP);
+
     fill_controls();
     SetTimer(window, 1, 16, nullptr);
 }
+
 void rebuild_controls() {
     if (capture >= 0)
         finish_capture({}, true);
@@ -529,6 +906,7 @@ void rebuild_controls() {
     create_controls();
     layout();
 }
+
 LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
     case WM_ERASEBKGND:
@@ -573,26 +951,16 @@ LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     }
     case WM_COMMAND: {
         int id = LOWORD(wp);
-        if (capture >= 0) {
-            if (id == ID_BIND + capture)
-                return 0;
-            finish_capture({}, true);
-        }
-        if (id >= ID_BIND && id < ID_BIND + ACTION_COUNT) {
-            capture = id - ID_BIND;
-            capture_start = GetTickCount64();
-            capture_armed = false;
-            SetWindowTextW(bindings[capture], S(L"Pulsa una entrada…", L"Press an input…"));
-            message(S(L"Suelta los controles y pulsa una tecla, botón o eje. Esc cancela; Supr borra.",
-                      L"Release the controls and press a key, button or axis. Esc cancels; Del clears."));
-        } else if (id == ID_MAP_MODE && HIWORD(wp) == CBN_SELCHANGE)
+        if (id == ID_MAP_MODE && HIWORD(wp) == CBN_SELCHANGE)
             update_bindings();
         else if (id == ID_DEVICE && HIWORD(wp) == CBN_SELCHANGE) {
             read_device();
             refresh_devices();
-        } else if (id == ID_MOTION && HIWORD(wp) == CBN_SELCHANGE)
+            update_bindings();
+        } else if (id == ID_MOTION && HIWORD(wp) == CBN_SELCHANGE) {
             refresh_devices();
-        else if (id == ID_UI_LANG && HIWORD(wp) == CBN_SELCHANGE) {
+            update_bindings();
+        } else if (id == ID_UI_LANG && HIWORD(wp) == CBN_SELCHANGE) {
             read_controls();
             PostMessageW(window, WM_APP_REBUILD, 0, 0);
         } else if (id == ID_DEFAULTS) {
@@ -603,7 +971,7 @@ LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 config.keyboard = d.keyboard;
             update_bindings();
             message(S(L"Mapeo predeterminado restaurado. Guarda para conservarlo.",
-                      L"Default mapping restored. Save to keep it."));
+                      L"Default mapping restored. Save to preserve it."));
         } else if (id == ID_SAVE)
             save_settings();
         else if (id == ID_PLAY)
@@ -627,6 +995,7 @@ LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     return DefWindowProcW(hwnd, msg, wp, lp);
 }
 } // namespace
+
 int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR, int show) {
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     wchar_t module[32768];

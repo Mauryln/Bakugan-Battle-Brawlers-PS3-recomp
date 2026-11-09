@@ -60,6 +60,8 @@ unsigned __stdcall run(void *) {
     bool mouse_engaged = false;
     ULONGLONG refresh = 0;
     std::string prior;
+    float filtered_gyro_x = 0.0f;
+    float filtered_gyro_y = 0.0f;
     while (WaitForSingleObject(stop_event, 8) == WAIT_TIMEOUT) {
         ULONGLONG now = GetTickCount64();
         if (now >= refresh) {
@@ -68,27 +70,72 @@ unsigned __stdcall run(void *) {
         } else
             SDL_UpdateGamepads();
         player::Device *device = pads.selected(config);
-        bool keyboard = config.input == player::InputMode::KeyboardMouse ||
-                        (config.input == player::InputMode::Auto && !device);
-        SDL_Gamepad *pad = !keyboard && device ? device->handle : nullptr;
+        bool allow_keyboard = (config.input == player::InputMode::Auto ||
+                               config.input == player::InputMode::KeyboardMouse);
+        bool allow_gamepad = (config.input == player::InputMode::Auto ||
+                              config.input == player::InputMode::Gamepad);
+        SDL_Gamepad *pad = (allow_gamepad && device) ? device->handle : nullptr;
         std::array<float, player::ACTION_COUNT> values{};
         std::array<float, 3> a{}, g{};
         bool real = pad && config.motion != player::MotionMode::RightStick && pads.motion(device, a, g);
         HWND hwnd;
         bool foreground = focused(hwnd);
         if (foreground) {
-            const auto &bindings = keyboard ? config.keyboard : config.gamepad;
-            for (int i = 0; i < player::ACTION_COUNT; ++i)
-                values[i] = player::binding_strength(bindings[i], pad, keyboard, config.deadzone);
-            if (keyboard) {
+            std::array<float, player::ACTION_COUNT> kb_values{};
+            std::array<float, player::ACTION_COUNT> gp_values{};
+            if (allow_keyboard) {
+                for (int i = 0; i < player::ACTION_COUNT; ++i)
+                    kb_values[i] = player::binding_strength(config.keyboard[i], nullptr, true, config.deadzone);
                 if (config.mouse_left_cross && (GetAsyncKeyState(VK_LBUTTON) & 0x8000))
-                    values[player::CROSS] = 1;
-                mouse_look(hwnd, values, mouse_engaged);
+                    kb_values[player::CROSS] = 1.0f;
+                mouse_look(hwnd, kb_values, mouse_engaged);
             }
+            if (allow_gamepad && pad) {
+                for (int i = 0; i < player::ACTION_COUNT; ++i)
+                    gp_values[i] = player::binding_strength(config.gamepad[i], pad, false, config.deadzone);
+            }
+            if (real) {
+                float raw_yaw = g[1];
+                float raw_pitch = g[0];
+                float speed = std::sqrt(raw_yaw * raw_yaw + raw_pitch * raw_pitch);
+                float gz = config.gyro_deadzone > 0.001f ? config.gyro_deadzone : 0.05f;
+                if (speed < gz) {
+                    raw_yaw = 0.0f;
+                    raw_pitch = 0.0f;
+                } else {
+                    float factor = (speed - gz) / speed;
+                    raw_yaw *= factor;
+                    raw_pitch *= factor;
+                }
+                constexpr float kAlpha = 0.35f;
+                filtered_gyro_x = filtered_gyro_x * kAlpha + raw_yaw * (1.0f - kAlpha);
+                filtered_gyro_y = filtered_gyro_y * kAlpha + raw_pitch * (1.0f - kAlpha);
+                float sens = config.gyro_sensitivity > 0.01f ? config.gyro_sensitivity : 1.0f;
+                float sign_x = config.gyro_invert_x ? 1.0f : -1.0f;
+                float sign_y = config.gyro_invert_y ? -1.0f : 1.0f;
+                float gyro_deflection_x = std::clamp((filtered_gyro_x * sign_x * sens) / 2.0f, -1.0f, 1.0f);
+                float gyro_deflection_y = std::clamp((filtered_gyro_y * sign_y * sens) / 2.0f, -1.0f, 1.0f);
+
+                float phys_rx = gp_values[player::R_RIGHT] - gp_values[player::R_LEFT];
+                float phys_ry = gp_values[player::R_DOWN] - gp_values[player::R_UP];
+                float total_rx = std::clamp(phys_rx + gyro_deflection_x, -1.0f, 1.0f);
+                float total_ry = std::clamp(phys_ry + gyro_deflection_y, -1.0f, 1.0f);
+                gp_values[player::R_LEFT] = std::max(0.0f, -total_rx);
+                gp_values[player::R_RIGHT] = std::max(0.0f, total_rx);
+                gp_values[player::R_UP] = std::max(0.0f, -total_ry);
+                gp_values[player::R_DOWN] = std::max(0.0f, total_ry);
+            } else {
+                filtered_gyro_x = 0.0f;
+                filtered_gyro_y = 0.0f;
+            }
+            for (int i = 0; i < player::ACTION_COUNT; ++i)
+                values[i] = std::max(kb_values[i], gp_values[i]);
         } else {
             mouse_engaged = false;
             real = false;
             pulse = {};
+            filtered_gyro_x = 0.0f;
+            filtered_gyro_y = 0.0f;
         }
         auto report = player::make_report(values, config.motion, real, a, g, now, pulse);
         ps3_host_pad_report result{};
@@ -104,10 +151,16 @@ unsigned __stdcall run(void *) {
             result.sensors[i] = report.sensors[i];
         AcquireSRWLockExclusive(&lock);
         latest = result;
-        latest_gamepad = !keyboard;
+        latest_gamepad = (pad != nullptr);
         ReleaseSRWLockExclusive(&lock);
-        std::string state = keyboard ? "keyboard/mouse" : device ? device->name : "controller unavailable";
-        state += real ? " | gyro+accel" : " | right-stick Sixaxis";
+        std::string state;
+        if (allow_keyboard && pad)
+            state = "simultaneous (" + device->name + " + keyboard/mouse)";
+        else if (pad)
+            state = device->name;
+        else
+            state = "keyboard/mouse";
+        state += real ? " | gyro active -> virtual right stick + Sixaxis" : " | right-stick Sixaxis";
         if (state != prior) {
             fprintf(stderr, "[input] %s\n", state.c_str());
             prior = state;

@@ -15,11 +15,15 @@ Windows: no abre consola. La barra de título del juego muestra sólo
 «Bakugan: Battle Brawlers»; los contadores de FPS/draws quedan en los logs.
 El instalador está documentado en [INSTALLER.md](INSTALLER.md).
 
-- Izquierda: salida 720p/1080p/1440p/2160p/automática/monitor; ventana/sin bordes;
-  FSR automático; nitidez RCAS y anisotropía 1–16×. El límite de FPS es fijo a 30
-  y no se expone en la interfaz. RCAS: 0 es más nítido, 2 más suave.
-- Derecha: idioma, tipo de entrada, mando concreto, modo Sixaxis, zona muerta,
-  sensibilidad del ratón y las 25 asignaciones PS3.
+- Izquierda: salida 720p/1080p/1440p/2160p/automática/monitor (1080p sin bordes
+  predeterminado para nuevas instalaciones); anisotropía 1–16× y nitidez. El selector
+  de FSR se eliminó de la interfaz (el reescalado FSR1 funciona de forma automática al superar 720p).
+  El límite de FPS es fijo a 30 con pacing uniforme y no se expone en la interfaz.
+- Derecha: idioma, mando concreto, modo Sixaxis, sensibilidad de giroscopio,
+  zona muerta y editor interactivo gráfico de gamepad con representación visual
+  completa del mando y detección de conflictos.
+- Entrada simultánea: teclado y mando funcionan en paralelo sin necesidad de
+  un selector exclusivo. Se puede alternar entre ambos al instante durante la partida.
 - Idiomas manuales de esta edición EU: inglés, español, francés, alemán, italiano,
   neerlandés y sueco. «Automático» deja que el HLE consulte el idioma de Windows.
   La selección se comunica mediante `PS3_LANG`; el launcher no modifica assets.

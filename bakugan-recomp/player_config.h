@@ -43,6 +43,8 @@ struct Config {
     std::wstring output = L"1080p", cap = L"30", window = L"borderless";
     std::wstring fsr = L"auto", language = L"auto", ui_language = L"auto";
     float sharpness = 0.6f, mouse_sensitivity = 0.5f, deadzone = 0.15f;
+    float gyro_sensitivity = 1.0f, gyro_deadzone = 0.05f;
+    bool gyro_invert_x = false, gyro_invert_y = false;
     int aniso = 16;
     InputMode input = InputMode::Auto;
     MotionMode motion = MotionMode::Auto;

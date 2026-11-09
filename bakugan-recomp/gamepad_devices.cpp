@@ -73,17 +73,18 @@ Device *Gamepads::selected(const Config &c) {
     return nullptr; // A different controller must not silently receive this mapping.
 }
 bool Gamepads::motion(Device *d, std::array<float, 3> &a, std::array<float, 3> &g) {
-    if (!d || !d->gyro || !d->accel)
+    if (!d || (!d->gyro && !d->accel))
         return false;
     if (!d->sensors_enabled) {
-        bool accel = SDL_SetGamepadSensorEnabled(d->handle, SDL_SENSOR_ACCEL, true);
-        bool gyro = SDL_SetGamepadSensorEnabled(d->handle, SDL_SENSOR_GYRO, true);
-        d->sensors_enabled = accel && gyro;
+        bool accel = d->accel && SDL_SetGamepadSensorEnabled(d->handle, SDL_SENSOR_ACCEL, true);
+        bool gyro = d->gyro && SDL_SetGamepadSensorEnabled(d->handle, SDL_SENSOR_GYRO, true);
+        d->sensors_enabled = accel || gyro;
         if (!d->sensors_enabled)
             return false;
     }
-    return SDL_GetGamepadSensorData(d->handle, SDL_SENSOR_ACCEL, a.data(), 3) &&
-           SDL_GetGamepadSensorData(d->handle, SDL_SENSOR_GYRO, g.data(), 3);
+    bool got_a = d->accel && SDL_GetGamepadSensorData(d->handle, SDL_SENSOR_ACCEL, a.data(), 3);
+    bool got_g = d->gyro && SDL_GetGamepadSensorData(d->handle, SDL_SENSOR_GYRO, g.data(), 3);
+    return got_g || got_a;
 }
 void Gamepads::close(bool quit_subsystem) {
     for (auto &d : items)

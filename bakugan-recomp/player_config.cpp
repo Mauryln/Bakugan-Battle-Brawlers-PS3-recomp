@@ -113,6 +113,8 @@ bool has_input_overrides(const Config& c) {
            !c.device_guid.empty() || !c.device_serial.empty() ||
            c.mouse_look != base.mouse_look || c.mouse_left_cross != base.mouse_left_cross ||
            c.mouse_sensitivity != base.mouse_sensitivity || c.deadzone != base.deadzone ||
+           c.gyro_sensitivity != base.gyro_sensitivity || c.gyro_deadzone != base.gyro_deadzone ||
+           c.gyro_invert_x != base.gyro_invert_x || c.gyro_invert_y != base.gyro_invert_y ||
            !std::equal(c.keyboard.begin(), c.keyboard.end(), base.keyboard.begin(), equal_binding) ||
            !std::equal(c.gamepad.begin(), c.gamepad.end(), base.gamepad.begin(), equal_binding);
 }
@@ -179,7 +181,7 @@ bool load(Config &c, const std::wstring &path, std::wstring *error) {
         return false;
     }
     c.output = choose(get(L"Graphics", L"Output", c.output, path),
-                      {L"auto", L"native", L"720p", L"1080p", L"1440p", L"2160p"}, c.output);
+                      {L"auto", L"native", L"720p", L"1080p", L"1440p", L"2160p"}, L"720p");
     c.cap =
         choose(get(L"Graphics", L"FPS", c.cap, path), {L"0", L"30", L"60", L"90", L"120", L"monitor"}, c.cap);
     c.window = choose(get(L"Graphics", L"Window", c.window, path), {L"windowed", L"borderless"}, c.window);
@@ -197,6 +199,10 @@ bool load(Config &c, const std::wstring &path, std::wstring *error) {
     c.mouse_sensitivity = number(get(L"Input", L"MouseSensitivity", L"0.5", path), 0.5f, 0.05f, 2);
     c.mouse_look = get(L"Input", L"MouseLook", L"1", path) != L"0";
     c.mouse_left_cross = get(L"Input", L"MouseLeftCross", L"1", path) != L"0";
+    c.gyro_sensitivity = number(get(L"Input", L"GyroSensitivity", L"1.0", path), 1.0f, 0.1f, 5.0f);
+    c.gyro_deadzone = number(get(L"Input", L"GyroDeadzone", L"0.05", path), 0.05f, 0.0f, 0.5f);
+    c.gyro_invert_x = get(L"Input", L"GyroInvertX", L"0", path) != L"0";
+    c.gyro_invert_y = get(L"Input", L"GyroInvertY", L"0", path) != L"0";
     auto guid = get(L"Input", L"GUID", L"", path);
     auto serial = get(L"Input", L"Serial", L"", path);
     c.device_guid.assign(guid.begin(), guid.end());
@@ -256,6 +262,10 @@ bool save(const Config &c, const std::wstring &path, std::wstring *error) {
     put(L"Input", L"MouseSensitivity", std::to_wstring(c.mouse_sensitivity));
     put(L"Input", L"MouseLook", c.mouse_look ? L"1" : L"0");
     put(L"Input", L"MouseLeftCross", c.mouse_left_cross ? L"1" : L"0");
+    put(L"Input", L"GyroSensitivity", std::to_wstring(c.gyro_sensitivity));
+    put(L"Input", L"GyroDeadzone", std::to_wstring(c.gyro_deadzone));
+    put(L"Input", L"GyroInvertX", c.gyro_invert_x ? L"1" : L"0");
+    put(L"Input", L"GyroInvertY", c.gyro_invert_y ? L"1" : L"0");
     for (int i = 0; i < ACTION_COUNT; ++i) {
         auto k = std::to_wstring(i);
         put(L"Keyboard", k.c_str(), binding_text(c.keyboard[i]));
