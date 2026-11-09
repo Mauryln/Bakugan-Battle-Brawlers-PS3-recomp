@@ -24,9 +24,8 @@ INSTALACIÓN
 4. Marca/desmarca el icono de escritorio y el acceso del menú Inicio.
 5. Pulsa Instalar.
 
-El instalador copia los datos de PS3_GAME y extrae EBOOT.elf automáticamente
-con el RPCS3 portable incluido. Si RPCS3 no pudiera, puedes seleccionar tu
-EBOOT.elf descifrado de respaldo.
+El instalador copia los datos de PS3_GAME y extrae y descifra EBOOT.elf
+automáticamente con el RPCS3 portable incluido.
 
 También copia `shadercache/fp_v3.cache`, ya compilada por el backend. RPCS3
 sólo descifra EBOOT; no compila los shaders D3D12 del port. Los shaders que

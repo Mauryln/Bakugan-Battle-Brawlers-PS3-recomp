@@ -54,13 +54,13 @@ $source = Join-Path $PSScriptRoot 'Installer.cs'
 $extract = Join-Path $PSScriptRoot 'SelfExtract.cs'
 $rpcs3 = Join-Path $PSScriptRoot 'Rpcs3Decrypt.cs'
 $exe = Join-Path $outDir 'BakuganSetup.exe'
-& $csc /nologo /target:winexe /platform:x64 /optimize+ /langversion:5 `
+& $csc /nologo /target:winexe /platform:x64 /optimize+ /langversion:5 /codepage:65001 `
     /win32icon:$icon /out:$exe /r:System.dll /r:System.Windows.Forms.dll /r:System.Drawing.dll `
     $source $extract $rpcs3
 if ($LASTEXITCODE -ne 0) { throw "csc falló con $LASTEXITCODE" }
 
 $uninstaller = Join-Path $payload 'Uninstall.exe'
-& $csc /nologo /target:winexe /platform:x64 /optimize+ /langversion:5 `
+& $csc /nologo /target:winexe /platform:x64 /optimize+ /langversion:5 /codepage:65001 `
     /win32icon:$icon /out:$uninstaller /r:System.dll /r:System.Windows.Forms.dll /r:System.Drawing.dll `
     (Join-Path $PSScriptRoot 'Uninstaller.cs')
 if ($LASTEXITCODE -ne 0) { throw "csc (Uninstall.exe) falló con $LASTEXITCODE" }

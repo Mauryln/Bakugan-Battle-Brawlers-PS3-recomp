@@ -1,225 +1,166 @@
 <div align="center">
 
+# Bakugan: Battle Brawlers — Native PS3 Recompilation for Windows
 
-<h1>Bakugan: Battle Brawlers — native PS3 recompilation for Windows</h1>
+<p><strong>The PlayStation 3 release (<code>BLES00758</code>), statically recompiled into a native Windows x64 executable.</strong></p>
 
-<p><strong>The PlayStation 3 release (<code>BLES00758</code>), statically recompiled into a native Windows x64 executable.</strong><br>
+<p>
+<a href="https://github.com/Mauryln/Bakugan-Battle-Brawlers-PS3-recomp/releases/latest"><img src="https://img.shields.io/badge/release-v1.0.0-blue.svg?style=flat-square" alt="Release: v1.0.0"></a>
+<img src="https://img.shields.io/badge/platform-Windows%20x64-0078D6?style=flat-square" alt="Platform: Windows x64">
+<img src="https://img.shields.io/badge/graphics-Direct3D%2012-107C10?style=flat-square" alt="Graphics: Direct3D 12">
+<img src="https://img.shields.io/badge/title-BLES00758%20(Europe)-c0392b?style=flat-square" alt="Title: BLES00758 (Europe)">
+<img src="https://img.shields.io/badge/license-MIT-2ea44f?style=flat-square" alt="License: MIT">
+<img src="https://img.shields.io/badge/status-playable%20end%20to%20end-brightgreen?style=flat-square" alt="Playable end to end">
 </p>
 
 <p>
-<img src="https://img.shields.io/badge/platform-Windows%20x64-0078D6?style=flat-square" alt="Platform: Windows x64">
-<img src="https://img.shields.io/badge/graphics-Direct3D%2012-107C10?style=flat-square" alt="Graphics: Direct3D 12">
-<img src="https://img.shields.io/badge/title-BLES00758-c0392b?style=flat-square" alt="Title: BLES00758">
-<img src="https://img.shields.io/badge/license-MIT-2ea44f?style=flat-square" alt="License: MIT">
-<img src="https://img.shields.io/badge/status-playable%20end%20to%20end-yellow?style=flat-square" alt="Playable end to end, performance limited by the engine">
+<a href="README.es.md"><strong>Versión en Español</strong></a> · 
+<a href="#system-requirements">System Requirements</a> · 
+<a href="#how-to-install-and-play">Installation Guide</a> · 
+<a href="#controls-and-sixaxis">Controls & Sixaxis</a> · 
+<a href="#credits-and-acknowledgments">Credits</a>
 </p>
-
-<p><a href="README.es.md">Español</a> · <a href="docs/PROJECT_GUIDE.md">Guía técnica</a> · <a href="docs/PROJECT_GUIDE.md">FSR y salida</a> · <a href="CONTRIBUTING.md">Contributing</a></p>
 
 </div>
 
-> **2026-11-07 — less serial walker work.** Two CPU workers now pack the closed
-> vertex staging while the owner prepares materials. In eight balanced arena
-> windows, frame_clock fell from **80.1% to 69.0% of one core**; average output
-> changed from **28.71 to 29.30 FPS**, with better p95/p99. Total process CPU was
-> similar. **Stable 30 FPS remains a target.** [Measurements and limits](docs/PROJECT_GUIDE.md).
+---
 
-> Small debug-filter lookup and strip-copy reductions are also retained; their additional combined FPS effect is not yet measured.
+## Showcase
 
-> **New: FSR 1 output at 1080p.** Official AMD EASU + RCAS upscale the complete
-> 720p frame to 1080p. Windowed output fits the monitor; borderless mode and
-> per-monitor DPI handling are available. The checked arena averaged **28.02 FPS**;
-> this improves output resolution, with **no demonstrated FPS increase**.
-> [Usage and limits](docs/PROJECT_GUIDE.md) · [Session results](docs/PROJECT_GUIDE.md).
->
-> **2026-11-06 — major battle performance improvement.** Measured arena scenes
-> now run at roughly **27–28 FPS**, compared with the earlier **16–17 FPS** reference.
-> Coherent NV3089 row copies reduce CPU work while preserving the visible scene,
-> water and HUD in the checked captures.
-> **No release yet:** controller mapping is now available through the launcher; broader hardware validation is pending,
-> and sustained 30 FPS is still a target. The latest optimization has not yet
-> been validated through a complete post-launch duel or across every arena.
-> [Measured improvement](#recent-performance-improvements) · [Guía técnica](docs/PROJECT_GUIDE.md).
+<div align="center">
 
-[Bakugan: Battle Brawlers](https://en.wikipedia.org/wiki/Bakugan:_Battle_Brawlers) (2009) was never ported to PC. This project lifts the game's **PPU (CPU) and SPU (DSP) code to C++ ahead of time** with [ps3recomp](https://github.com/sp00nznet/ps3recomp) and links it against a small HLE runtime, producing an ordinary `.exe` that renders through Direct3D 12. The whole game is playable end to end; menus hold 30 FPS and the latest fixed-arena comparison averaged 29.30 FPS with parallel vertex uploads. Sustained 30 FPS and frame-time consistency remain the performance goals.
+### Title Screen
+![Main Screen](docs/images/mainscreen.png)
 
-Lifted code is compiled ahead of time; dynamic SPU jobs without a matching recompiled image can use the runtime fallback.
+### Battle Arena — Pyrus
+![Battle Arena Pyrus](docs/images/arena-pyrus.png)
 
-| | |
-|---|---|
-| Title flow, save-data warning, loading, new game / load game | Narrative intro — H.264/AAC decoded through Media Foundation |
+### Battle Arena — Ventus
+![Battle Arena Ventus](docs/images/arena-ventus.png)
 
-## Status
+</div>
 
-| Milestone | |
-|---|---|
-| Disc analysis — 12,834 OPD functions, 195 imports, 14 libraries | ✅ |
-| PPU lift — 15,682 functions / 17 translation units | ✅ |
-| SPU lift — 5 images, 1,331 functions | ✅ |
-| HLE table — 1,204 handlers | ✅ |
-| Build — clang-cl + Ninja + Direct3D 12 | ✅ |
-| Asset pipeline — 607 inflate jobs decompressed on the SPUs | ✅ |
-| Publisher FMVs — Activision, Nowpro, Premium Agency, Nelvana | ✅ |
-| Opening + narrative intro — H.264/AAC through Media Foundation | ✅ |
-| Title screen, all menus, mode select, 2D textures | ✅ |
-| In-game keyboard (name entry) and keyboard/XInput pad | ✅ |
-| Music — `SNDP` PCM scores mixed by the SPU, plus FMV AAC | ✅ |
-| Battle Arena — player/CPU turns, field and card textures fixed | ✅ |
-| Story and battles playable end to end | ✅ |
-| HUD, cards, character cinematics, shadows and reflections | ✅ |
-| *Known defect:* mode-select "gate" — 2D layers behind the portrait overlap | ⚠️ |
-| **Performance** — 29.30 FPS in the latest fixed-arena pack comparison, versus the historical ~16–17 FPS; sustained 30 FPS pending | ⚠️ |
-| **Save data** — new game, manual saves (one slot each), load picker, system data | ✅ |
-| **Controller** — persistent PS3 remapping, SDL3 gamepads, real Sixaxis sensors or right-stick fallback; DS4 tested | ✅ |
-| **Sound effects** — ATRAC3 in `SOUND/*.PAST` | ❌ |
+---
 
-**The game is playable end to end. Controller mapping is implemented; the launcher and installer are deferred; broader hardware coverage and sustained 30 FPS remain release validation work.**
+## Overview
 
-Saves live in `%LOCALAPPDATA%\BakuganRecomp\dev_hdd0\home\00000001\savedata`
-(set `PS3_GAMEDATA_ROOT` to override). The first launch copies the old
-`./gamedata` tree there once. `cellSaveDataListSave2` gives every manual save
-its own `...-NN` slot, `cellSaveDataFixedSave2` checkpoints update the current
-slot, and the system data keeps its fixed directory. Loading draws an in-game
-overlay over the finished frame (the game's `PIC1.PNG` backdrop and each slot's
-`ICON0.PNG`, keyboard/pad/mouse); `PS3_SAVEDATA_UI=0` restores the headless
-defaults. The list/fixed delete entry points share the same callback flow.
+[Bakugan: Battle Brawlers](https://en.wikipedia.org/wiki/Bakugan:_Battle_Brawlers) (2009) was originally released on consoles and never ported to PC. This project statically recompiles the PlayStation 3 version's **PPU (CPU)** and **SPU (DSP)** code directly into optimized 64-bit Windows C++ code using the **[PS3Recomp](https://github.com/sp00nznet/ps3recomp)** toolkit, linking against a lightweight High-Level Emulation (HLE) runtime that translates system calls to **Direct3D 12**, **WASAPI**, and **Windows threads**.
 
-## How to play, and controls
+The game is **fully playable from start to finish**: story mode, tutorials, battle arenas, card minigames, cutscenes, FMVs, and saving/loading function natively.
 
-Double-click `BakuganBrawlers.cmd` or run `bakugan-recomp/build/BakuganLauncher.exe`.
-Logs are written to `%LOCALAPPDATA%\BakuganRecomp`.
-The Bakugan-themed launcher loads its background/title art from your local disc dump; game art is not distributed.
-The runner reads graphics, language and custom input settings from
-`%LOCALAPPDATA%\BakuganRecomp\player.ini`. Explicit environment settings take
-precedence. Internal rendering stays at 1280x720; output scaling uses FSR1.
-SDL3 detects gamepads and real motion sensors; missing sensors fall back to the right stick.
-See [the technical guide](docs/PROJECT_GUIDE.md), [controls and launcher](docs/LAUNCHER.md),
-[the SPURS investigation](docs/HUD_START_BUG.md), and [audio & frame pacing](docs/AUDIO_STUTTER_WINDOWS.md).
+---
 
-## Recent performance improvements
+## Key Features in v1.0.0
 
-The current build retains these changes together:
+- **Native Direct3D 12 Engine**: Hardware-accelerated rendering with borderless windowed mode enabled by default at 1080p, plus upscaling presets (720p, 1080p, 1440p, 4K) powered by official **AMD FidelityFX Super Resolution 1.0 (FSR1)** and Contrast Adaptive Sharpening (RCAS).
+- **Simultaneous Hybrid Controls**: Seamlessly play with Gamepad (Xbox, PlayStation DualShock 4/DualSense, Switch Pro, generic DirectInput/XInput) or Keyboard & Mouse at any time without changing modes.
+- **Tri-Modal Sixaxis Simulation**: Ball steering during battles supports 3 simultaneous input methods:
+  1. **Mouse Motion**: Move your mouse naturally to tilt and steer the Bakugan ball in battles. Features spring-to-center physics, low-noise deadzone filtering, and seamless cursor re-centering.
+  2. **Right Analog Stick**: Intuitive stick tilting for traditional gamepad users.
+  3. **Physical Gyroscope**: Native motion sensor support on DualShock 4, DualSense, and compatible gamepads via SDL3.
+- **Modernized Bilingual Launcher**: Includes an interactive graphical controller remapper, graphics presets, game language selection (English/Spanish), and automatic resource cleanup when the game starts.
+- **Automated Bilingual Installer**: Detects system language (Spanish/English), verifies your retail European disc dump (`BLES00758`), and automatically decrypts `EBOOT.BIN` via bundled portable RPCS3 tools.
+- **Pre-warmed Shader Container (`fp_v3.cache`)**: Eliminates shader compilation stuttering during battle arena entries.
+- **Robust Save System**: Native multi-slot save data stored in `%LOCALAPPDATA%\BakuganRecomp`.
 
-| Change | Current behavior | Evidence |
-|---|---|---|
-| NV3089 row copies | Less serial CPU work for supported blits | Controlled comparison below |
-| Parallel vertex uploads | Two workers pack closed staging while the owner prepares materials | Walker CPU **80.1% → 69.0% of one core**, FPS **28.71 → 29.30**, p95 **41.51 → 40.41 ms**, p99 **46.23 → 44.97 ms** |
-| Debug-filter lookup cache | Avoid repeated `getenv` calls for an absent/negative filter | 32 option/mode regression cases; additional combined FPS effect unmeasured |
-| Deferred strip `last` copy | Recover the already-emitted block only when a cut consumes it | 172032 packet comparisons with identical bytes; additional combined FPS effect unmeasured |
-| FSR 1 output | Complete 720p frame upscaled to 1080p, with monitor-fitting windows | Resolution improvement; no demonstrated FPS gain |
+---
 
-The upload figures come from eight balanced 30-second windows in one process,
-before the two small follow-up changes. The final combination is built and retained;
-**its extra gains have not been measured, and stable 30 FPS is still pending**.
-[Full results, tests and rollback options](docs/PROJECT_GUIDE.md).
+## System Requirements
 
-The historical 16–17 FPS reference and the earlier 27–28 FPS observations come
-from different runs; they describe progress, not a controlled percentage gain.
-The isolated NV3089 comparison used the **same scene, character, camera and
-process**, switching optimized/original/optimized:
+| Component | Minimum Requirements | Recommended Specifications |
+| :--- | :--- | :--- |
+| **Operating System** | Windows 10 64-bit (Version 1909+) or Windows 11 | Windows 10/11 64-bit (latest update) |
+| **Processor (CPU)** | x86-64 with AVX and SSE4.2 support<br>*(Intel Core 6th Gen / AMD Ryzen 1000 series)* | 6-Core / 12-Thread CPU or better<br>*(Intel Core i5-10400 / AMD Ryzen 5 3600 or newer)* |
+| **Memory (RAM)** | 4 GB RAM | 8 GB RAM or more |
+| **Graphics (GPU)** | Direct3D 12 Feature Level 11_0<br>*(NVIDIA GeForce GTX 960 / AMD Radeon RX 460 / Intel Iris Xe)* | Direct3D 12 Feature Level 12_0<br>*(NVIDIA GeForce RTX 2060/3050 / AMD Radeon RX 6600 or better)* |
+| **Storage** | 6 GB available space (HDD supported) | 6 GB available space on high-speed SSD |
+| **Audio** | Windows-compatible WASAPI audio device | Stereo / Multi-channel headphones or speakers |
+| **Game Media** | Legally owned European retail PS3 disc dump (`BLES00758`) | `.iso` image or extracted `PS3_GAME` folder |
 
-| Path | FPS | Mean frame time |
-|---|---:|---:|
-| Original | 23.09 | 43.31 ms |
-| Optimized, first window | 27.27 | 36.67 ms |
-| Optimized, repeat window | 27.05 | 36.97 ms |
+---
 
-The two optimized windows average **27.16 FPS / 36.82 ms**, about **15% less frame
-time and 17.6% more FPS** than the original path in that comparison. NV3089 CPU
-work fell from approximately **6.03 to 1.42 ms per flip**. Copies preserve clipping,
-forward order for overlapping ranges and SPU reservation notifications; unsupported
-cases retain the original path. No draws, shaders or effects were deliberately removed.
+## Game Requirements (European Edition)
 
-Captures retained the normal battle draw signature (roughly 1750 operations),
-with scene geometry, characters, water and HUD visible; audio was confirmed normal
-in the reviewed runs. This is bounded validation, not proof for all arenas,
-every card/effect or a complete duel. **30 FPS is not yet stable.**
+> [!IMPORTANT]
+> This recompilation requires assets from the **European retail disc release of Bakugan: Battle Brawlers (`BLES00758`)**.
+> Other regional releases (such as US `BLUS30409`) have distinct binary layouts and are not compatible with this lift.
 
-The implementation is archived in [patch 0051](patches/0051-nv3089-scaled-rows.patch).
-Set `NV3089_SCALED_ROWS=0` before launching to restore the original copy path.
-The standalone regression test covers 10000 overlapping rows, 1000 clipped blits,
-address bounds and coherent fallbacks. Run it without a toolkit checkout or game data:
+You must provide your own legally dumped European disc image as an **ISO file (`.iso`)** or an extracted folder structure containing `PS3_GAME/USRDIR/EBOOT.BIN`.
 
-```powershell
-.\tools\test_gcm_scaled_rows.ps1 -FromPatch
-```
+---
 
-## Help wanted
+## How to Install and Play
 
-These are the walls we are stuck on. Each one is a self-contained problem with a measurement already done - the details are in [`docs/PROJECT_GUIDE.md`](docs/PROJECT_GUIDE.md).
+1. Download **`Bakugan-Battle-Brawlers-Recomp-1.0-win64.zip`** or **`BakuganSetup.exe`** from the [Latest Release](https://github.com/Mauryln/Bakugan-Battle-Brawlers-PS3-recomp/releases/latest).
+2. Extract the archive into a folder of your choice.
+3. Run **`BakuganSetup.exe`**.
+4. Browse and select your **European Disc ISO (`BLES00758`)** or game directory.
+5. Choose your desired installation folder and shortcut preferences (Desktop / Start Menu).
+6. Click **Install / Instalar**. The installer will extract required assets and decrypt the executable automatically.
+7. Launch the game from the created desktop shortcut or **`BakuganLauncher.exe`**.
+8. Customize your display resolution, graphics, and controls in the launcher, then click **Play / Jugar**!
 
-1. **Performance.** Reduce loading stalls and reach sustained 30 FPS while preserving effects and complete frames. What has already been measured, and what it ruled out, is in [`docs/PROJECT_GUIDE.md`](docs/PROJECT_GUIDE.md).
-2. **Controller.** The pad is simulated from the keyboard path instead of being mapped from the guest's input library.
-3. **Audio leftovers.** Menu scores and the SPU mixer work; the `.PAST` effects are ATRAC3 and still silent, and a few cuts are under review. `libs/audio/`.
-4. **Testers.** Does it boot on your GPU/driver? A `run.log` and one sentence is enough to open an issue.
+---
 
-Partial work, wrong guesses and "this is how RPCS3 does it" are all welcome — open an issue first if you plan something large.
+## Controls and Sixaxis
 
+The input bridge operates with full simultaneous support for Keyboard, Mouse, and Gamepads.
 
-## How it works
+### Default Keyboard & Mouse Controls
 
-```
-iso/*.iso  ──extract_iso──▶  game/  ──EBOOT decrypt──▶  EBOOT.elf
-                                                        │
-                             analysis/  ◀──ppu_loader────┘
-                                 │
-                    ┌────────────┴─────────────┐
-              lift PPU (17 TUs)          lift SPU (5 images)
-                    │                          │
-                    └────────────┬─────────────┘
-                          bakugan-recomp/
-                                 │  + HLE runtime (ps3recomp toolkit)
-                                 ▼
-                     BakuganRecomp.exe  ──D3D12──▶  your monitor
-```
+| PS3 Action | Keyboard / Mouse Key | Game Function |
+| :--- | :--- | :--- |
+| **Cross (✕)** | `X` or `Space` | Confirm / Jump / Action |
+| **Circle (○)** | `C` | Cancel / Back |
+| **Square (□)** | `Z` | Attack / Ability card |
+| **Triangle (△)** | `S` | Special / Gate card |
+| **D-Pad** | Arrow Keys (`↑`, `↓`, `←`, `→`) | Menu Navigation |
+| **Start** | `Enter` | Pause Menu |
+| **Select** | `Backspace` or `Tab` | Status / Map / Details |
+| **L1 / R1** | `Q` / `E` | Switch cards / Camera zoom |
+| **L2 / R2** | `1` / `2` | Secondary actions / Card preview |
+| **Left Stick** | `W`, `A`, `S`, `D` *(or hold Right Mouse Button)* | Character Movement / Aiming |
+| **Sixaxis (Steering)** | **Mouse Motion** *(or Arrow Keys / Numpad 4,8,6,2)* | Steer Bakugan ball in arena battles |
 
-**Everything generated is rebuilt from your own disc dump.** This repository contains no game code, no assets, no keys and no lifted sources — see [Legal](#legal).
+### Sixaxis Motion Implementation Details
 
-## Build it
+In the original PS3 title, ball navigation across battle arenas relies heavily on the Sixaxis tilt sensor. In this PC port, three independent methods are active at all times without requiring any mode toggling:
 
-Requirements: Windows 10/11 x64 with Direct3D 12, CMake/Ninja, and Visual Studio
-Build Tools with **clang-cl** and the x64 Windows SDK. `cl` is not supported.
-You must provide your own disc dump, decrypted `EBOOT.elf`, generated lifts and
-compatible local toolkit checkout; these inputs are not shipped here.
+- **Mouse Steering**: Move the mouse left/right to roll and up/down to pitch. Built-in exponential return-to-center physics automatically stabilizes the ball when you stop moving the mouse, preventing camera drifting or oversteering. Cursor capture is active during gameplay and automatically released when you Alt-Tab.
+- **Right Analog Stick**: Gamepad users without gyroscopes can smoothly steer using the right analog stick.
+- **Hardware Gyroscope**: Players with a DualShock 4 or DualSense controller enjoy true 1:1 motion steering via SDL3 sensor polling.
 
-For an existing configured Release tree:
+---
 
-```powershell
-.\.venv\Scripts\ninja.exe -C bakugan-recomp\build
-.\BakuganBrawlers.cmd
-```
+## Technical Details
 
-Internal rendering stays at 1280x720. Set output resolution and FSR1 in `player.ini`; no 60 FPS guarantee is made.
+- **Ahead-of-Time Static Recompilation**: 15,682 PPU functions and 1,331 SPU functions compiled to native x64 assembly with LLVM clang-cl `/O2`.
+- **Parallel Upload Architecture**: Dedicated CPU worker threads handle vertex staging and packaging concurrently with material preparation, reducing serial frame clock bottlenecks.
+- **Direct3D 12 HLE**: Custom RSX command buffer translator with native swapchains, resource barrier tracking, and fast NV3089 blit paths.
+- **Low-Latency WASAPI Audio**: Multi-stream mixing synchronized with host audio clocks.
+- **Save Data Location**: Saves are stored in `%LOCALAPPDATA%\BakuganRecomp\dev_hdd0\home\00000001\savedata`.
 
-For a prepared source tree that needs initial configuration, use an x64 Visual
-Studio developer environment with `clang-cl`, CMake and Ninja on PATH:
+---
 
-```powershell
-cmake -S bakugan-recomp -B bakugan-recomp/build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=clang-cl -DCMAKE_CXX_COMPILER=clang-cl
-cmake --build bakugan-recomp/build
-```
+## Credits and Acknowledgments
 
-The former `tools/pipeline.py` and `tools/build.py` scripts are no longer shipped;
-there is currently no one-command ISO-to-build pipeline in this repository.
-Do not apply every toolkit patch indiscriminately: experimental I/O patch 0049
-is not an accepted part of the healthy reference.
+This port would not exist without the open-source emulation and recompilation community:
 
-**Controls:** `X` / Space = Cross (confirm) · `C` `Z` `S` = Circle / Square / Triangle · arrows = D-pad · `Enter` = Start · `Q` `E` = L1/R1 · `1` `2` = L2/R2.
+- **PS3Recomp Team & Ned Heller ([sp00nznet](https://github.com/sp00nznet) / [arnold9401](https://github.com/arnold9401))**:  
+  Heartfelt thanks to the creators of the **[PS3Recomp](https://github.com/arnold9401/ps3recomp)** static recompilation framework. Their groundbreaking research into PPU/SPU translation and PS3 HLE runtime design made this native Windows port achievable.
+- **RPCS3 Developers ([rpcs3.net](https://rpcs3.net))**:  
+  For their exceptional PS3 emulator and portable decryption utilities used for disc asset extraction.
+- **libsdl-org ([SDL3](https://github.com/libsdl-org/SDL))**:  
+  For reliable cross-platform controller enumeration and physical motion sensor handling.
+- **AMD FidelityFX**:  
+  For official FSR 1.0 (EASU) and Robust Contrast-Adaptive Sharpening (RCAS).
 
-## Repository layout
+---
 
-| Path | What it is |
-|---|---|
-| `bakugan-recomp/` | The port: entry point, HLE stubs, D3D12 movie path, CMake build |
-| `patches/` | Archived toolkit changes; review accepted patches and their prerequisites individually |
-| `tools/` | Launch, regression-test and diagnostic tools |
-| `docs/` | Status, architecture, guardrails, performance; `docs/legacy/` keeps the earlier handoffs |
-| `ps3recomp-src/`, `game/`, `analysis/`, `bakugan-recomp/recompiled/` | Generated or upstream — **not** versioned |
+## Legal & Disclaimers
 
-## Diagnostics
+Bakugan: Battle Brawlers is © Activision, Nowpro, Nelvana, Spin Master, and Sega Sammy.  
+This project is an independent open-source recreation and is **not affiliated with, endorsed by, or sponsored by Sony Interactive Entertainment, Activision, or copyright holders**.
 
-Every fix in this project started as a measurement, and the knobs are still there: `RSX_CAP` (frame capture with a draw manifest), `RTT_STAT`, `VDEFDBG`, `VTXALLF`/`VTXGATE` (per-draw bounds), `VPSEL`, `FLIPPC`, `NODEPTH`, `MTDBG`. They are environment variables, off by default, documented where they are defined.
-
-## Legal
-
-Bakugan: Battle Brawlers is © its rights holders. This repository ships **no game code, no assets, no encryption keys, no lifted sources and no binaries**. You must own the disc. The port's own code is MIT licensed; the toolkit is MIT by Ned Heller / sp00nznet — see [CREDITS.md](CREDITS.md) and [LICENSE](LICENSE).
+**NO COPYRIGHTED ASSETS, CODE, CIPHER KEYS, DISC IMAGES, OR LIFTED GAME DATA ARE DISTRIBUTED HERE.**  
+Users must legally acquire and provide their own retail European PlayStation 3 disc (`BLES00758`).

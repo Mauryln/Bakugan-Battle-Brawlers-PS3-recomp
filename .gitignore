@@ -8,6 +8,7 @@ game/
 gamedata/
 analysis/
 diagnostics/
+dist/
 pictures/
 bakugan-recomp/recompiled/
 bakugan-recomp/spu/
@@ -72,6 +73,7 @@ famous-ref/
 # needs. Order matters: negation must come after the exclude.
 *.png
 !docs/img/*.png
+!docs/images/*.png
 !docs/img/*.gif
 !bakugan-recomp/assets/game_icon.png
 !bakugan-recomp/assets/bakugan.ico

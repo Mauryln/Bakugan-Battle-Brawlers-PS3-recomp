@@ -1,11 +1,23 @@
 using System;
 using System.Diagnostics;
+using System.Globalization;
 using System.IO;
 using System.Windows.Forms;
 using Microsoft.Win32;
 
 namespace BakuganUninstaller
 {
+    internal static class Loc
+    {
+        public static readonly bool IsSpanish =
+            CultureInfo.CurrentUICulture.TwoLetterISOLanguageName.Equals("es", StringComparison.OrdinalIgnoreCase);
+
+        public static string T(string es, string en)
+        {
+            return IsSpanish ? es : en;
+        }
+    }
+
     internal static class Program
     {
         private const string UninstallKey = @"Software\Microsoft\Windows\CurrentVersion\Uninstall\BakuganRecomp";
@@ -23,10 +35,14 @@ namespace BakuganUninstaller
             if (!silent)
             {
                 DialogResult r = MessageBox.Show(
-                    "Se eliminarán los archivos del juego y los accesos directos.\n\n" +
-                    "Tus partidas y ajustes en %LOCALAPPDATA%\\BakuganRecomp se conservarán.\n\n" +
-                    "¿Desinstalar Bakugan: Battle Brawlers?",
-                    "Desinstalar Bakugan: Battle Brawlers",
+                    Loc.T(
+                        "Se eliminarán los archivos del juego y los accesos directos.\n\n" +
+                        "Tus partidas y ajustes en %LOCALAPPDATA%\\BakuganRecomp se conservarán.\n\n" +
+                        "¿Desinstalar Bakugan: Battle Brawlers?",
+                        "Game files and shortcuts will be removed.\n\n" +
+                        "Your save data and settings in %LOCALAPPDATA%\\BakuganRecomp will be preserved.\n\n" +
+                        "Uninstall Bakugan: Battle Brawlers?"),
+                    Loc.T("Desinstalar Bakugan: Battle Brawlers", "Uninstall Bakugan: Battle Brawlers"),
                     MessageBoxButtons.YesNo, MessageBoxIcon.Question);
                 if (r != DialogResult.Yes) return;
             }
@@ -37,14 +53,18 @@ namespace BakuganUninstaller
                 try { Registry.CurrentUser.DeleteSubKeyTree(UninstallKey, false); } catch { }
                 ScheduleDelete(installDir);
                 if (!silent)
-                    MessageBox.Show("Desinstalación iniciada. La carpeta se eliminará en unos segundos.",
-                                    "Bakugan: Battle Brawlers", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    MessageBox.Show(
+                        Loc.T("Desinstalación iniciada. La carpeta se eliminará en unos segundos.",
+                              "Uninstallation started. The folder will be removed in a few seconds."),
+                        "Bakugan: Battle Brawlers", MessageBoxButtons.OK, MessageBoxIcon.Information);
             }
             catch (Exception ex)
             {
                 if (!silent)
-                    MessageBox.Show("No se pudo completar la desinstalación: " + ex.Message,
-                                    "Bakugan: Battle Brawlers", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    MessageBox.Show(
+                        Loc.T("No se pudo completar la desinstalación: ",
+                              "Could not complete uninstallation: ") + ex.Message,
+                        "Bakugan: Battle Brawlers", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         }
 
@@ -64,7 +84,7 @@ namespace BakuganUninstaller
             string windows = Environment.GetFolderPath(Environment.SpecialFolder.Windows);
             if (string.Equals(full, root.TrimEnd('\\'), StringComparison.OrdinalIgnoreCase) ||
                 string.Equals(full, windows.TrimEnd('\\'), StringComparison.OrdinalIgnoreCase))
-                throw new Exception("Ruta de instalación no segura: " + full);
+                throw new Exception(Loc.T("Ruta de instalación no segura: ", "Unsafe installation path: ") + full);
 
             /* The uninstaller is running from inside the folder, so it cannot
              * remove its own directory. A short-lived batch waits for this

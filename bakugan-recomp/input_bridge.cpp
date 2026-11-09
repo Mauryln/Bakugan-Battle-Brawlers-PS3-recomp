@@ -27,37 +27,92 @@ bool focused(HWND &hwnd) {
     DWORD pid = 0;
     return hwnd && GetWindowThreadProcessId(hwnd, &pid) && pid == GetCurrentProcessId();
 }
-void mouse_look(HWND hwnd, std::array<float, player::ACTION_COUNT> &v, bool &engaged) {
-    bool held = config.mouse_look && (GetAsyncKeyState(VK_RBUTTON) & 0x8000);
+void update_mouse(HWND hwnd, std::array<float, player::ACTION_COUNT> &v,
+                  bool &engaged, float &sixaxis_x, float &sixaxis_y) {
     POINT cursor;
     RECT client;
-    if (!held || !GetCursorPos(&cursor) || !ScreenToClient(hwnd, &cursor) || !GetClientRect(hwnd, &client) ||
+    if (!GetCursorPos(&cursor) || !ScreenToClient(hwnd, &cursor) || !GetClientRect(hwnd, &client) ||
         !PtInRect(&client, cursor)) {
         engaged = false;
+        sixaxis_x *= 0.75f;
+        sixaxis_y *= 0.75f;
+        if (std::abs(sixaxis_x) < 0.005f) sixaxis_x = 0.0f;
+        if (std::abs(sixaxis_y) < 0.005f) sixaxis_y = 0.0f;
         return;
     }
     POINT center{(client.right - client.left) / 2, (client.bottom - client.top) / 2};
-    int dx = cursor.x - center.x, dy = cursor.y - center.y;
-    if (engaged) {
-        float x = std::clamp(dx * config.mouse_sensitivity / 30.f, -1.f, 1.f),
-              y = std::clamp(dy * config.mouse_sensitivity / 30.f, -1.f, 1.f);
-        v[player::L_LEFT] = std::max(0.f, -x);
-        v[player::L_RIGHT] = std::max(0.f, x);
-        v[player::L_UP] = std::max(0.f, -y);
-        v[player::L_DOWN] = std::max(0.f, y);
-    }
-    HWND still;
-    if (!focused(still) || still != hwnd) {
+    POINT screen_center = center;
+    if (!ClientToScreen(hwnd, &screen_center)) {
         engaged = false;
         return;
     }
-    if (ClientToScreen(hwnd, &center))
-        SetCursorPos(center.x, center.y);
-    engaged = true;
+    int raw_dx = cursor.x - center.x, raw_dy = cursor.y - center.y;
+    if (!engaged) {
+        // Regained focus or just entered client area: center without jump
+        SetCursorPos(screen_center.x, screen_center.y);
+        engaged = true;
+        return;
+    }
+    SetCursorPos(screen_center.x, screen_center.y);
+
+    bool held = config.mouse_look && (GetAsyncKeyState(VK_RBUTTON) & 0x8000);
+    float sens = (config.mouse_sensitivity > 0.01f ? config.mouse_sensitivity : 0.5f);
+
+    if (held) {
+        // Right click held: mouse look / camera aim (drives Left stick)
+        float x = std::clamp(raw_dx * sens / 30.f, -1.f, 1.f);
+        float y = std::clamp(raw_dy * sens / 30.f, -1.f, 1.f);
+        v[player::L_LEFT] = std::max(v[player::L_LEFT], std::max(0.f, -x));
+        v[player::L_RIGHT] = std::max(v[player::L_RIGHT], std::max(0.f, x));
+        v[player::L_UP] = std::max(v[player::L_UP], std::max(0.f, -y));
+        v[player::L_DOWN] = std::max(v[player::L_DOWN], std::max(0.f, y));
+
+        sixaxis_x *= 0.80f;
+        sixaxis_y *= 0.80f;
+    } else {
+        // Free mouse movement: simulate Sixaxis roll and pitch
+        if (std::abs(raw_dx) <= 1) raw_dx = 0;
+        if (std::abs(raw_dy) <= 1) raw_dy = 0;
+
+        float target_x = std::clamp((raw_dx * sens) / 25.0f, -1.0f, 1.0f);
+        float target_y = std::clamp((-raw_dy * sens) / 25.0f, -1.0f, 1.0f); // Mouse up = tilt forward/up
+
+        constexpr float kAttack = 0.50f;
+        constexpr float kDecay = 0.80f;
+
+        if (std::abs(target_x) > 0.01f)
+            sixaxis_x = sixaxis_x * (1.0f - kAttack) + target_x * kAttack;
+        else
+            sixaxis_x *= kDecay;
+
+        if (std::abs(target_y) > 0.01f)
+            sixaxis_y = sixaxis_y * (1.0f - kAttack) + target_y * kAttack;
+        else
+            sixaxis_y *= kDecay;
+
+        if (std::abs(sixaxis_x) < 0.005f) sixaxis_x = 0.0f;
+        if (std::abs(sixaxis_y) < 0.005f) sixaxis_y = 0.0f;
+
+        sixaxis_x = std::clamp(sixaxis_x, -1.0f, 1.0f);
+        sixaxis_y = std::clamp(sixaxis_y, -1.0f, 1.0f);
+    }
+
+    // Apply mouse Sixaxis deflection to right-stick virtual channels
+    if (sixaxis_x > 0.0f)
+        v[player::R_RIGHT] = std::max(v[player::R_RIGHT], sixaxis_x);
+    else if (sixaxis_x < 0.0f)
+        v[player::R_LEFT] = std::max(v[player::R_LEFT], -sixaxis_x);
+
+    if (sixaxis_y > 0.0f)
+        v[player::R_UP] = std::max(v[player::R_UP], sixaxis_y);
+    else if (sixaxis_y < 0.0f)
+        v[player::R_DOWN] = std::max(v[player::R_DOWN], -sixaxis_y);
 }
 unsigned __stdcall run(void *) {
     player::MotionPulse pulse;
     bool mouse_engaged = false;
+    float mouse_sixaxis_x = 0.0f;
+    float mouse_sixaxis_y = 0.0f;
     ULONGLONG refresh = 0;
     std::string prior;
     float filtered_gyro_x = 0.0f;
@@ -88,7 +143,7 @@ unsigned __stdcall run(void *) {
                     kb_values[i] = player::binding_strength(config.keyboard[i], nullptr, true, config.deadzone);
                 if (config.mouse_left_cross && (GetAsyncKeyState(VK_LBUTTON) & 0x8000))
                     kb_values[player::CROSS] = 1.0f;
-                mouse_look(hwnd, kb_values, mouse_engaged);
+                update_mouse(hwnd, kb_values, mouse_engaged, mouse_sixaxis_x, mouse_sixaxis_y);
             }
             if (allow_gamepad && pad) {
                 for (int i = 0; i < player::ACTION_COUNT; ++i)
@@ -132,6 +187,8 @@ unsigned __stdcall run(void *) {
                 values[i] = std::max(kb_values[i], gp_values[i]);
         } else {
             mouse_engaged = false;
+            mouse_sixaxis_x = 0.0f;
+            mouse_sixaxis_y = 0.0f;
             real = false;
             pulse = {};
             filtered_gyro_x = 0.0f;
@@ -160,7 +217,7 @@ unsigned __stdcall run(void *) {
             state = device->name;
         else
             state = "keyboard/mouse";
-        state += real ? " | gyro active -> virtual right stick + Sixaxis" : " | right-stick Sixaxis";
+        state += " | Sixaxis: mouse + right stick" + std::string(real ? " + gyro" : "");
         if (state != prior) {
             fprintf(stderr, "[input] %s\n", state.c_str());
             prior = state;
