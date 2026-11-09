@@ -222,10 +222,16 @@ namespace BakuganInstaller
             report = progress;
             string exeDir = Path.GetDirectoryName(Application.ExecutablePath);
             string payload = Path.Combine(exeDir, "payload");
-            if (!File.Exists(Path.Combine(payload, "BakuganLauncher.exe")))
+            if (!Directory.Exists(payload) || !File.Exists(Path.Combine(payload, "BakuganLauncher.exe")))
+            {
                 throw new Exception(Loc.T(
-                    "Falta payload\\BakuganLauncher.exe junto al instalador.",
-                    "payload\\BakuganLauncher.exe is missing next to the installer."));
+                    "No se encontró la carpeta 'payload' junto al instalador.\n\n" +
+                    "Por favor, asegúrate de haber descomprimido completamente todo el contenido del archivo ZIP " +
+                    "(Bakugan-Battle-Brawlers-Recomp-1.0-win64.zip) en una carpeta antes de ejecutar BakuganSetup.exe.",
+                    "The 'payload' folder was not found next to the installer.\n\n" +
+                    "Please make sure you have fully extracted all contents of the ZIP archive " +
+                    "(Bakugan-Battle-Brawlers-Recomp-1.0-win64.zip) into a folder before running BakuganSetup.exe."));
+            }
 
             Directory.CreateDirectory(o.Dir);
             Status(0, Loc.T("Copiando archivos del programa...", "Copying application files..."));

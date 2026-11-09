@@ -91,12 +91,12 @@ Debes proporcionar tu propia copia legal del disco europeo en formato **archivo 
 
 ## Instalación y Cómo Jugar
 
-1. Descarga **`Bakugan-Battle-Brawlers-Recomp-1.0-win64.zip`** o **`BakuganSetup.exe`** desde la sección de [Último Lanzamiento](https://github.com/Mauryln/Bakugan-Battle-Brawlers-PS3-recomp/releases/latest).
-2. Descomprime el archivo en la carpeta que prefieras de tu equipo.
-3. Ejecuta **`BakuganSetup.exe`**.
+1. Descarga el paquete completo de la versión **`Bakugan-Battle-Brawlers-Recomp-1.0-win64.zip`** desde la sección de [Último Lanzamiento](https://github.com/Mauryln/Bakugan-Battle-Brawlers-PS3-recomp/releases/latest).
+2. Descomprime completamente el archivo ZIP en la carpeta que prefieras de tu equipo (asegúrate de que la carpeta `payload` permanezca al lado de `BakuganSetup.exe`).
+3. Ejecuta **`BakuganSetup.exe`** desde la carpeta descomprimida.
 4. Selecciona tu **archivo ISO europeo (`BLES00758`)** o directorio del juego.
 5. Elige la carpeta donde deseas instalar y si prefieres accesos directos en el Escritorio o Menú Inicio.
-6. Pulsa en **Instalar**. El instalador extraerá los recursos y descifrará el ejecutable automáticamente.
+6. Pulsa en **Instalar**. El instalador copiará los archivos de la aplicación, extraerá los recursos del disco y descifrará el ejecutable automáticamente.
 7. Abre el juego desde el acceso directo creado o ejecutando **`BakuganLauncher.exe`**.
 8. Ajusta la resolución, gráficos y controles a tu gusto en el launcher, y pulsa **Jugar**.
 

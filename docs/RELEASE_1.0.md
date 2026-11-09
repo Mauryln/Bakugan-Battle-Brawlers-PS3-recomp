@@ -86,6 +86,5 @@ All release packages have been compiled with LLVM clang-cl `/O2` and packaged us
 
 | File | SHA-256 Checksum | Size |
 | :--- | :--- | :--- |
-| `Bakugan-Battle-Brawlers-Recomp-1.0-win64.zip` | `FEF040AE663A2D3A047C3990791B2F2450CC4D8F8F473A148A58D696EFD036E8` | ~67.7 MB |
-| `BakuganSetup.exe` | `73D2787C8365F1AAE366A4274ADF61864D5375669389E3A0A16850AEFD43E515` | ~255 KB |
+| `Bakugan-Battle-Brawlers-Recomp-1.0-win64.zip` | `9938088EA6EF6C4D2FD9469CFEC33344258B3910FE967F095D0F75DA1295EF15` | ~67.7 MB |
 

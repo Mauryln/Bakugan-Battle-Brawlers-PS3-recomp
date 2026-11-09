@@ -32,7 +32,6 @@ $distZip = Join-Path $dist 'Bakugan-Battle-Brawlers-Recomp-1.0-win64.zip'
 Copy-Item $zip $distZip -Force
 Copy-Item "$zip.sha256" "$distZip.sha256" -Force
 Copy-Item (Join-Path $rel 'SHA256SUMS.txt') (Join-Path $dist 'SHA256SUMS.txt') -Force
-Copy-Item $setup (Join-Path $dist 'BakuganSetup.exe') -Force
 
 Write-Host "Release folder: $rel"
 Write-Host "Distribution:   $dist"

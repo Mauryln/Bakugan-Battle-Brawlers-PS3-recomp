@@ -91,14 +91,14 @@ You must provide your own legally dumped European disc image as an **ISO file (`
 
 ## How to Install and Play
 
-1. Download **`Bakugan-Battle-Brawlers-Recomp-1.0-win64.zip`** or **`BakuganSetup.exe`** from the [Latest Release](https://github.com/Mauryln/Bakugan-Battle-Brawlers-PS3-recomp/releases/latest).
-2. Extract the archive into a folder of your choice.
-3. Run **`BakuganSetup.exe`**.
+1. Download the complete release archive **`Bakugan-Battle-Brawlers-Recomp-1.0-win64.zip`** from the [Latest Release](https://github.com/Mauryln/Bakugan-Battle-Brawlers-PS3-recomp/releases/latest).
+2. Extract the entire ZIP archive into a folder of your choice (ensure that the `payload` folder remains adjacent to `BakuganSetup.exe`).
+3. Run **`BakuganSetup.exe`** from the extracted directory.
 4. Browse and select your **European Disc ISO (`BLES00758`)** or game directory.
 5. Choose your desired installation folder and shortcut preferences (Desktop / Start Menu).
-6. Click **Install / Instalar**. The installer will extract required assets and decrypt the executable automatically.
+6. Click **Install**. The installer will copy application files, extract disc data, and decrypt `EBOOT.BIN` automatically.
 7. Launch the game from the created desktop shortcut or **`BakuganLauncher.exe`**.
-8. Customize your display resolution, graphics, and controls in the launcher, then click **Play / Jugar**!
+8. Customize your display resolution, graphics, and controls in the launcher, then click **Play**!
 
 ---
 
