@@ -1,0 +1,404 @@
+diff --git a/libs/audio/cellAudio.c b/libs/audio/cellAudio.c
+--- a/libs/audio/cellAudio.c
++++ b/libs/audio/cellAudio.c
+@@ -157,6 +157,58 @@
+ /* Output mix buffer (stereo, one block worth) */
+ static float s_mix_buffer[CELL_AUDIO_BLOCK_SAMPLES * 2];
+ 
++#ifdef _WIN32
++typedef struct {
++    int64_t due, mix_begin, mix_end, submit_end, notify_end;
++    int32_t room, padding, submit_result;
++    float peak;
++    uint16_t submitted;
++    uint8_t running_ports, ready_ports, next_ready_ports, notified, rejected;
++    uint8_t port1_block;
++} AudioTraceBlock;
++_Static_assert(sizeof(AudioTraceBlock) == 64, "ATRACE01 record size");
++
++#define AUDIO_TRACE_CAPACITY (128u * 1024u)
++static AudioTraceBlock* s_trace_block;
++
++typedef struct {
++    int64_t qpc;
++    uint32_t kind, thread, arg0, arg1;
++} AudioTraceEvent;
++
++static AudioTraceEvent s_trace_events[AUDIO_TRACE_CAPACITY];
++static volatile LONG s_trace_event_count;
++static LONG s_trace_events_enabled;
++static SRWLOCK s_trace_event_lock = SRWLOCK_INIT;
++
++void cell_audio_trace_event(uint32_t kind, uint32_t arg0, uint32_t arg1)
++{
++    if (!__atomic_load_n(&s_trace_events_enabled, __ATOMIC_RELAXED)) return;
++    AcquireSRWLockShared(&s_trace_event_lock);
++    if (__atomic_load_n(&s_trace_events_enabled, __ATOMIC_RELAXED)) {
++        const LONG index = InterlockedIncrement(&s_trace_event_count) - 1;
++        if (index < AUDIO_TRACE_CAPACITY) {
++            LARGE_INTEGER now;
++            QueryPerformanceCounter(&now);
++            s_trace_events[index] = (AudioTraceEvent){
++                now.QuadPart, kind, GetCurrentThreadId(), arg0, arg1
++            };
++        }
++    }
++    ReleaseSRWLockShared(&s_trace_event_lock);
++}
++
++static int audio_block_has_pcm(const float* src, u32 samples)
++{
++    for (u32 i = 0; i < samples; ++i) {
++        uint32_t bits;
++        memcpy(&bits, src + i, sizeof bits);
++        if (bits) return 1;
++    }
++    return 0;
++}
++#endif
++
+ /* ---------------------------------------------------------------------------
+  * Host audio output backend
+  * -----------------------------------------------------------------------*/
+@@ -269,6 +321,13 @@
+ 
+     hr = device->lpVtbl->Activate(device, &IID_IAudioClient, CLSCTX_ALL,
+                                    NULL, (void**)&s_wasapi_client);
++    if (getenv("AUDIO_RATE") || getenv("AUDIO_TRACE")) {
++        LPWSTR id = NULL;
++        if (SUCCEEDED(device->lpVtbl->GetId(device, &id))) {
++            fprintf(stderr, "[audio-endpoint] role=console id=%ls\n", id);
++            CoTaskMemFree(id);
++        }
++    }
+     device->lpVtbl->Release(device);
+     if (FAILED(hr)) {
+         printf("[cellAudio] Failed to activate audio client: 0x%08lX\n", hr);
+@@ -338,7 +397,19 @@
+ 
+     memset(&s_wasapi_health, 0, sizeof s_wasapi_health);
+     s_wasapi_health.enabled = getenv("AUDIO_RATE") != NULL;
+-    s_wasapi_client->lpVtbl->Start(s_wasapi_client);
++    const HRESULT start = s_wasapi_client->lpVtbl->Start(s_wasapi_client);
++    if (s_wasapi_health.enabled || getenv("AUDIO_TRACE")) {
++        REFERENCE_TIME period = 0;
++        WAVEFORMATEX* mix = NULL;
++        s_wasapi_client->lpVtbl->GetDevicePeriod(s_wasapi_client, &period, NULL);
++        s_wasapi_client->lpVtbl->GetMixFormat(s_wasapi_client, &mix);
++        fprintf(stderr, "[audio-endpoint] WASAPI shared event=%d buffer=%u period_100ns=%lld "
++                "mix=%luHz/%uch stream=%uHz/2ch start=0x%08lX\n",
++                s_wasapi_event != NULL, s_wasapi_buf_frames, (long long)period,
++                mix ? mix->nSamplesPerSec : 0ul, mix ? mix->nChannels : 0u,
++                CELL_AUDIO_SAMPLE_RATE, (unsigned long)start);
++        CoTaskMemFree(mix);
++    }
+     return 0;
+ }
+ 
+@@ -368,6 +439,8 @@
+     UINT32 padding = 0;
+     HRESULT padding_result = s_wasapi_client->lpVtbl->GetCurrentPadding(s_wasapi_client, &padding);
+ 
++    if (s_trace_block)
++        s_trace_block->padding = SUCCEEDED(padding_result) ? (int32_t)padding : -1;
+     UINT32 available = s_wasapi_buf_frames - padding;
+     if (num_samples > available) {
+         g_audio_dropped += num_samples - available;
+@@ -387,6 +460,11 @@
+         memcpy(buf, stereo_samples, num_samples * 2 * sizeof(float));
+         hr = s_wasapi_render->lpVtbl->ReleaseBuffer(s_wasapi_render, num_samples,
+                                                    mute ? AUDCLNT_BUFFERFLAGS_SILENT : 0);
++    }
++    if (s_trace_block) {
++        s_trace_block->submit_result = FAILED(padding_result) ? padding_result : hr;
++        if (SUCCEEDED(hr) && buf)
++            s_trace_block->submitted = (uint16_t)num_samples;
+     }
+     if (s_wasapi_health.enabled) {
+         if (FAILED(padding_result) || FAILED(hr) || !buf) {
+@@ -486,6 +564,16 @@
+         u32 block_idx = (u32)(port->read_index % nblock);
+         u32 block_offset = block_idx * CELL_AUDIO_BLOCK_SAMPLES * nch;
+         float* src = port->buffer + block_offset;
++#ifdef _WIN32
++        if (s_trace_block) {
++            const u32 samples = CELL_AUDIO_BLOCK_SAMPLES * nch;
++            const float* next = port->buffer + ((block_idx + 1) % nblock) * samples;
++            s_trace_block->running_ports |= 1u << p;
++            if (p == 1) s_trace_block->port1_block = (uint8_t)block_idx;
++            if (audio_block_has_pcm(src, samples)) s_trace_block->ready_ports |= 1u << p;
++            if (audio_block_has_pcm(next, samples)) s_trace_block->next_ready_ports |= 1u << p;
++        }
++#endif
+ 
+         /* AUDIO_PEAK diag: which blocks of this port's WHOLE ring hold data,
+          * vs which block the read cursor is on -- distinguishes "writer never
+@@ -573,9 +661,18 @@
+     mutex_unlock(&s_audio_mutex);
+     for (unsigned i = 0; i < count; i++) {
+         uint32_t qid = sys_event_find_queue_by_key(keys[i]);
+-        if (qid)
+-            sys_event_queue_push_by_id(qid, keys[i],
+-                                       0 /*CELL_AUDIO_EVENT_MIX*/, 0, 0);
++        if (qid) {
++            const int result = sys_event_queue_push_by_id(qid, keys[i],
++                                                          0 /*CELL_AUDIO_EVENT_MIX*/, 0, 0);
++#if AUDIO_BACKEND_WASAPI
++            if (s_trace_block) {
++                if (result == 0) ++s_trace_block->notified;
++                else ++s_trace_block->rejected;
++            }
++#else
++            (void)result;
++#endif
++        }
+     }
+ }
+ 
+@@ -593,6 +690,15 @@
+      * (GH3's FMOD) that could not keep ahead of the read index played gaps.
+      * With no device, pace on the performance counter instead. */
+     LARGE_INTEGER qf, q0; QueryPerformanceFrequency(&qf); QueryPerformanceCounter(&q0);
++    const char* trace_path = getenv("AUDIO_TRACE");
++    AudioTraceBlock* trace = trace_path ? calloc(AUDIO_TRACE_CAPACITY, sizeof(*trace)) : NULL;
++    size_t trace_count = 0;
++    if (trace && getenv("AUDIO_PRODUCER_TRACE")) {
++        AcquireSRWLockExclusive(&s_trace_event_lock);
++        s_trace_event_count = 0;
++        __atomic_store_n(&s_trace_events_enabled, 1, __ATOMIC_RELAXED);
++        ReleaseSRWLockExclusive(&s_trace_event_lock);
++    }
+     unsigned long long blocks = 0;
+     while (s_mix_thread_running) {
+         const int room = audio_backend_room();
+@@ -600,9 +706,10 @@
+          * not permission to consume several guest blocks at once: that races
+          * the producer awakened by each audio event and clears unwritten slots.
+          * Keep the PS3 heartbeat steady even with a working host device. */
++        long long due;
+         {
+             LARGE_INTEGER now; QueryPerformanceCounter(&now);
+-            const long long due = q0.QuadPart +
++            due = q0.QuadPart +
+                 (long long)(blocks * CELL_AUDIO_BLOCK_SAMPLES * qf.QuadPart / CELL_AUDIO_SAMPLE_RATE);
+             if (now.QuadPart < due) { Sleep(1); continue; }
+             /* More than 50 ms behind (device just went away, a debugger
+@@ -613,8 +720,24 @@
+         }
+         if (room >= 0 && room < CELL_AUDIO_BLOCK_SAMPLES) { audio_backend_wait(); continue; }
+         blocks++;
+-        /* Mix and submit one block */
++        LARGE_INTEGER mark;
++        if (trace && trace_count < AUDIO_TRACE_CAPACITY) {
++            s_trace_block = &trace[trace_count++];
++            s_trace_block->due = due;
++            s_trace_block->room = room;
++            s_trace_block->padding = -1;
++            QueryPerformanceCounter(&mark);
++            s_trace_block->mix_begin = mark.QuadPart;
++        }
+         audio_mix_one_block();
++        if (s_trace_block) {
++            QueryPerformanceCounter(&mark);
++            s_trace_block->mix_end = mark.QuadPart;
++            for (u32 i = 0; i < CELL_AUDIO_BLOCK_SAMPLES * 2; ++i) {
++                float magnitude = fabsf(s_mix_buffer[i]);
++                if (magnitude > s_trace_block->peak) s_trace_block->peak = magnitude;
++            }
++        }
+         /* AUDIO_PEAK=1: report the mixed block's peak amplitude periodically so
+          * "is any port producing sound" is answerable (LBP Bink movie audio). */
+         { static int _ap = -1; if (_ap < 0) _ap = getenv("AUDIO_PEAK") ? 1 : 0;
+@@ -629,6 +752,10 @@
+           if (_wf == (FILE*)-1) { const char* e = getenv("AUDIO_WAV"); _wf = e ? fopen(e, "wb") : NULL; }
+           if (_wf) fwrite(s_mix_buffer, sizeof(float), CELL_AUDIO_BLOCK_SAMPLES * 2, _wf); }
+         audio_backend_submit(s_mix_buffer, CELL_AUDIO_BLOCK_SAMPLES);
++        if (s_trace_block) {
++            QueryPerformanceCounter(&mark);
++            s_trace_block->submit_end = mark.QuadPart;
++        }
+         /* AUDIO_RATE=1: blocks mixed vs real time, and frames dropped. */
+         { static int on = -1; if (on < 0) on = getenv("AUDIO_RATE") ? 1 : 0;
+           if (on) { static ULONGLONG t0; static unsigned n, z; static unsigned long long d0;
+@@ -652,6 +779,42 @@
+ 
+         /* Notify event queues */
+         audio_notify_event_queues();
++        if (s_trace_block) {
++            QueryPerformanceCounter(&mark);
++            s_trace_block->notify_end = mark.QuadPart;
++            s_trace_block = NULL;
++        }
++    }
++
++    if (trace) {
++        const LONG events_enabled = __atomic_exchange_n(&s_trace_events_enabled, 0, __ATOMIC_RELAXED);
++        FILE* output = fopen(trace_path, "wb");
++        if (output) {
++            const uint64_t header[] = {(uint64_t)qf.QuadPart, sizeof(*trace)};
++            fwrite("ATRACE01", 1, 8, output);
++            fwrite(header, sizeof(header), 1, output);
++            fwrite(trace, sizeof(*trace), trace_count, output);
++            fclose(output);
++        }
++        if (events_enabled) {
++            char event_path[MAX_PATH];
++            const int length = snprintf(event_path, sizeof(event_path), "%s.events", trace_path);
++            FILE* events = length > 0 && length < (int)sizeof(event_path) ? fopen(event_path, "wb") : NULL;
++            if (events) {
++                /* Drain writers that had already entered when tracing stopped. */
++                AcquireSRWLockExclusive(&s_trace_event_lock);
++                const LONG count = s_trace_event_count;
++                const size_t kept = count < AUDIO_TRACE_CAPACITY ? (size_t)count : AUDIO_TRACE_CAPACITY;
++                fwrite(s_trace_events, sizeof(s_trace_events[0]), kept, events);
++                ReleaseSRWLockExclusive(&s_trace_event_lock);
++                fclose(events);
++                fprintf(stderr, "[audio-trace] producer events=%ld capacity=%u\n",
++                        (long)count, AUDIO_TRACE_CAPACITY);
++            }
++        }
++        fprintf(stderr, "[audio-trace] blocks=%zu capacity=%u file=%s opened=%d\n",
++                trace_count, AUDIO_TRACE_CAPACITY, trace_path, output != NULL);
++        free(trace);
+     }
+ 
+     printf("[cellAudio] Mixing thread stopped\n");
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -1181,6 +1181,30 @@
+     {
+         LUID luid;
+         s_d3d.device->lpVtbl->GetAdapterLuid(s_d3d.device, &luid);
++        if (getenv("PS3_DEVICE_TRACE")) {
++            fprintf(stderr, "[DXGI] device LUID=0x%08lX:0x%08lX\n",
++                    (unsigned long)luid.HighPart, (unsigned long)luid.LowPart);
++            for (UINT i = 0; ; ++i) {
++                IDXGIAdapter1* candidate = NULL;
++                if (FAILED(factory->lpVtbl->EnumAdapters1(factory, i, &candidate))) break;
++                DXGI_ADAPTER_DESC1 ad;
++                if (SUCCEEDED(candidate->lpVtbl->GetDesc1(candidate, &ad)))
++                    fprintf(stderr, "[DXGI] adapter[%u]=%ls LUID=0x%08lX:0x%08lX vendor=%04X device=%04X\n",
++                            i, ad.Description, (unsigned long)ad.AdapterLuid.HighPart,
++                            (unsigned long)ad.AdapterLuid.LowPart, ad.VendorId, ad.DeviceId);
++                candidate->lpVtbl->Release(candidate);
++            }
++            MONITORINFOEXW display = {0};
++            display.cbSize = sizeof(display);
++            DEVMODEW mode = {0};
++            mode.dmSize = sizeof(mode);
++            HMONITOR monitor = MonitorFromWindow(s_d3d.hwnd, MONITOR_DEFAULTTONEAREST);
++            if (GetMonitorInfoW(monitor, (MONITORINFO*)&display) &&
++                EnumDisplaySettingsW(display.szDevice, ENUM_CURRENT_SETTINGS, &mode))
++                fprintf(stderr, "[DXGI] monitor=%ls mode=%lux%lu@%lu vsync=%d\n",
++                        display.szDevice, mode.dmPelsWidth, mode.dmPelsHeight,
++                        mode.dmDisplayFrequency, getenv("PS3_NOVSYNC") == NULL);
++        }
+         IDXGIAdapter1* adapter = NULL;
+         if (SUCCEEDED(factory->lpVtbl->EnumAdapterByLuid(
+                 factory, luid, &IID_IDXGIAdapter1, (void**)&adapter))) {
+diff --git a/runtime/ppu/ppu_loader.cpp b/runtime/ppu/ppu_loader.cpp
+--- a/runtime/ppu/ppu_loader.cpp
++++ b/runtime/ppu/ppu_loader.cpp
+@@ -1486,6 +1486,14 @@
+  * which is what made the flicker appear exactly where shadow casters are. */
+ void ps3_guest_stamp(uint32_t ea, uint32_t n)
+ {
++#ifdef _WIN32
++    /* Port 1 has the Multistream output ring. Its 8 x 8 KiB slots fit in
++     * the first 64 KiB. Observe bulk writes after the DMA copy completes. */
++    if ((ea & 0xffff0000u) == VM_AUDIO_BASE + VM_AUDIO_PORT_SIZE) {
++        extern void cell_audio_trace_event(uint32_t, uint32_t, uint32_t);
++        cell_audio_trace_event(1, ea, n);
++    }
++#endif
+     uint32_t p = ea >> 12, pe = (ea + (n ? n - 1u : 0u)) >> 12;
+     for (; p <= pe; ++p) g_guest_page_gen[p & ((1u << 20) - 1u)] = ++g_guest_gen;
+ }
+diff --git a/runtime/syscalls/sys_event.c b/runtime/syscalls/sys_event.c
+--- a/runtime/syscalls/sys_event.c
++++ b/runtime/syscalls/sys_event.c
+@@ -289,6 +289,10 @@
+ }
+ 
+ /* Diagnostic gates polled on every receive (~140k/s in GH3): read once. */
++#ifdef _WIN32
++extern void cell_audio_trace_event(uint32_t, uint32_t, uint32_t);
++#endif
++
+ static int s_ps3_waitbt = -1, s_ydkj_sputask = -1, s_ydkj_spurs_ready = -1, s_ydkj_fakecomplete = -1, s_ydkj_hle_draw = -1;
+ 
+ int64_t sys_event_queue_receive(ppu_context* ctx)
+@@ -547,6 +551,8 @@
+     sys_event_t evt = q->buffer[q->head];
+     q->head = (q->head + 1) % q->capacity;
+     q->count--;
++    if (q->key == 0x8000000000000001ull || q->key == 0x8000CAFE02460300ull)
++        cell_audio_trace_event(2, (queue_id << 16) | q->count, (uint32_t)ctx->thread_id);
+ 
+     LeaveCriticalSection(&q->lock);
+ #else
+@@ -663,6 +669,9 @@
+     pthread_mutex_lock(&q->lock);
+ #endif
+ 
++#ifdef _WIN32
++    const int trace_audio_queue = q->key == 0x8000000000000001ull || q->key == 0x8000CAFE02460300ull;
++#endif
+     while (received < max_count && q->count > 0) {
+         sys_event_t evt = q->buffer[q->head];
+         q->head = (q->head + 1) % q->capacity;
+@@ -684,6 +693,10 @@
+     pthread_mutex_unlock(&q->lock);
+ #endif
+ 
++#ifdef _WIN32
++    if (received && trace_audio_queue)
++        cell_audio_trace_event(3, (queue_id << 16) | (uint32_t)received, (uint32_t)ctx->thread_id);
++#endif
+     if (count_addr != 0) {
+         write_be32(count_addr, (uint32_t)received);
+     }
+diff --git a/runtime/syscalls/lv2_register.c b/runtime/syscalls/lv2_register.c
+--- a/runtime/syscalls/lv2_register.c
++++ b/runtime/syscalls/lv2_register.c
+@@ -1457,6 +1457,10 @@
+  * is idempotent (MultiStream's is). A worker that carries live state in
+  * registers across an idle-park would need the context saved at the park and
+  * restored here instead. */
++#ifdef _WIN32
++extern void cell_audio_trace_event(uint32_t, uint32_t, uint32_t);
++#endif
++
+ static int64_t sys_spu_thread_write_spu_mb_handler(ppu_context* ctx)
+ {
+     uint32_t tid = (uint32_t)ctx->gpr[3];
+@@ -1528,6 +1532,10 @@
+           if (PS3_LOG_FIRST(_n, 32))
+               fprintf(stderr, "[SPU] write_spu_mb tid=0x%X val=0x%08X -> live worker\n",
+                       tid, val); }
++#ifdef _WIN32
++        if (c->image_id == 1)
++            cell_audio_trace_event(4, val, (uint32_t)ctx->thread_id);
++#endif
+         spu_ch_wake(c);
+         ctx->gpr[3] = 0;
+         return 0;
+diff --git a/tests/sync_stress/main.c b/tests/sync_stress/main.c
+--- a/tests/sync_stress/main.c
++++ b/tests/sync_stress/main.c
+@@ -83,6 +83,14 @@
+  * self-limits to a handful of calls. These bodies exist purely to satisfy
+  * the linker and are never expected to execute.
+  * -----------------------------------------------------------------------*/
++#ifdef _WIN32
++void cell_audio_trace_event(uint32_t kind, uint32_t arg0, uint32_t arg1)
++{
++    (void)kind;
++    (void)arg0;
++    (void)arg1;
++}
++#endif
+ size_t spu_elf_image_size(const uint8_t* image, size_t max_avail)
+ {
+     (void)image; (void)max_avail;
