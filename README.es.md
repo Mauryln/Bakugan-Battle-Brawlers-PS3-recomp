@@ -5,7 +5,7 @@
 <p><strong>El lanzamiento original de PlayStation 3 (<code>BLES00758</code>), recompilado estáticamente a un ejecutable nativo de Windows x64.</strong></p>
 
 <p>
-<a href="https://github.com/Mauryln/Bakugan-Battle-Brawlers-PS3-recomp/releases/latest"><img src="https://img.shields.io/badge/release-v1.0.0-blue.svg?style=flat-square" alt="Lanzamiento: v1.0.0"></a>
+<a href="https://github.com/Mauryln/Bakugan-Battle-Brawlers-PS3-recomp/releases/latest"><img src="https://img.shields.io/badge/release-v1.1.0-blue.svg?style=flat-square" alt="Lanzamiento: v1.1.0"></a>
 <img src="https://img.shields.io/badge/plataforma-Windows%20x64-0078D6?style=flat-square" alt="Plataforma: Windows x64">
 <img src="https://img.shields.io/badge/gr%C3%A1ficos-Direct3D%2012-107C10?style=flat-square" alt="Gráficos: Direct3D 12">
 <img src="https://img.shields.io/badge/t%C3%ADtulo-BLES00758%20(Europa)-c0392b?style=flat-square" alt="Título: BLES00758 (Europa)">

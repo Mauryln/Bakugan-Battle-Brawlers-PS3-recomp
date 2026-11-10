@@ -213,6 +213,7 @@ namespace BakuganInstaller
 
     internal static class Installer
     {
+        private const string ReleaseVersion = "1.1.0";
         private static long totalBytes;
         private static long copiedBytes;
         private static Action<int, string> report;
@@ -227,10 +228,10 @@ namespace BakuganInstaller
                 throw new Exception(Loc.T(
                     "No se encontró la carpeta 'payload' junto al instalador.\n\n" +
                     "Por favor, asegúrate de haber descomprimido completamente todo el contenido del archivo ZIP " +
-                    "(Bakugan-Battle-Brawlers-Recomp-1.0-win64.zip) en una carpeta antes de ejecutar BakuganSetup.exe.",
+                    "(Bakugan-Battle-Brawlers-Recomp-" + ReleaseVersion + "-win64.zip) en una carpeta antes de ejecutar BakuganSetup.exe.",
                     "The 'payload' folder was not found next to the installer.\n\n" +
                     "Please make sure you have fully extracted all contents of the ZIP archive " +
-                    "(Bakugan-Battle-Brawlers-Recomp-1.0-win64.zip) into a folder before running BakuganSetup.exe."));
+                    "(Bakugan-Battle-Brawlers-Recomp-" + ReleaseVersion + "-win64.zip) into a folder before running BakuganSetup.exe."));
             }
 
             Directory.CreateDirectory(o.Dir);
@@ -357,7 +358,7 @@ namespace BakuganInstaller
                     if (k != null)
                     {
                         k.SetValue("DisplayName", "Bakugan: Battle Brawlers");
-                        k.SetValue("DisplayVersion", "1.0.0");
+                        k.SetValue("DisplayVersion", ReleaseVersion);
                         k.SetValue("Publisher", "Bakugan Recomp Team");
                         k.SetValue("InstallLocation", o.Dir);
                         k.SetValue("DisplayIcon", launcher);

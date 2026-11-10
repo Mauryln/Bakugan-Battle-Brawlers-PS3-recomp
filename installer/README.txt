@@ -1,13 +1,12 @@
 Bakugan: Battle Brawlers (BLES00758) - Port nativo para Windows x64
 ====================================================================
 
-Versión 1.0 - build de prueba
+Versión 1.1.0 - Windows x64
 
 QUÉ ES
 ------
 Recompilación estática del juego de PS3 (PPU/SPU) con un runtime HLE que usa
-D3D12, WASAPI y SDL3. No incluye código, datos, claves ni lifts del juego: el
-jugador aporta su propio dump/ISO del disco.
+D3D12, WASAPI y SDL3. El jugador aporta su propia ISO del disco.
 
 REQUISITOS
 ----------
@@ -17,8 +16,7 @@ REQUISITOS
 
 INSTALACIÓN
 -----------
-1. Ejecuta BakuganSetup.exe desde esta carpeta (no muevas sólo el .exe: necesita
-   la carpeta payload que está al lado).
+1. Extrae todo el ZIP y ejecuta BakuganSetup.exe junto a la carpeta payload.
 2. Selecciona tu ISO.
 3. Elige la carpeta de instalación.
 4. Marca/desmarca el icono de escritorio y el acceso del menú Inicio.
@@ -27,9 +25,8 @@ INSTALACIÓN
 El instalador copia los datos de PS3_GAME y extrae y descifra EBOOT.elf
 automáticamente con el RPCS3 portable incluido.
 
-También copia `shadercache/fp_v3.cache`, ya compilada por el backend. RPCS3
-sólo descifra EBOOT; no compila los shaders D3D12 del port. Los shaders que
-falten se compilan en el primer uso y se añaden a la caché.
+El juego compila y guarda su caché de shaders en el primer uso. El paquete
+incluye los shaders de FSR1 y la biblioteca SDL3.
 
 Al terminar, abre "Bakugan: Battle Brawlers" desde el escritorio, el menú Inicio
 o BakuganLauncher.exe de la carpeta instalada, y pulsa Jugar. El launcher se
@@ -52,6 +49,8 @@ partidas se conservan.
 
 ESTADO Y LÍMITES
 ----------------
+- Se corrigió el oscurecimiento de los Bakugan en la pantalla de duelo.
+- El cursor se mueve libremente al usar el mouse para Sixaxis.
 - Menús, tutorial de historia, arena de batalla, HUD, cartas, cinemáticas y audio
   funcionan en la build de referencia.
 - Límite de FPS fijo a 30.
@@ -61,13 +60,8 @@ ESTADO Y LÍMITES
   del jugador que a veces no carga y fondo gris tras cargar una partida. Esta
   build incluye correcciones de caché/vértices y de invalidación al cargar
   partidas, pero falta validación amplia en más PC y partidas.
-- Cierre al entrar en algunas arenas de Battle Arena: en investigación. Se oculta
-  el slot 00 vacío del menú de carga y se incluye una caché de shaders v3
-  compilada por el backend (la v2 obsoleta se ignora). Si vuelve a ocurrir,
-  envía el log indicado arriba. RPCS3 no compila estos shaders; sólo descifra
-  EBOOT.BIN.
-- Historia/otras arenas con HUD o texturas incorrectas: en investigación; la
-  caché v3 se regenera con el backend actual. Enviar log si persiste.
+- Si falla la entrada a una arena o aparecen problemas de HUD o texturas,
+  envía el log indicado arriba.
 - Cobertura de mandos limitada: DS4 probado; DualSense/Switch Pro pendientes.
 - El sistema de guardado funciona, pero quedan casos límite por validar.
 - No hay actualizador automático.
