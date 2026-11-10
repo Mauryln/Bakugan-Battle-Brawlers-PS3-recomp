@@ -25,35 +25,33 @@ int provider(u32 port, ps3_host_pad_report *out, void *) {
 bool focused(HWND &hwnd) {
     hwnd = GetForegroundWindow();
     DWORD pid = 0;
-    return hwnd && GetWindowThreadProcessId(hwnd, &pid) && pid == GetCurrentProcessId();
+    return hwnd && !IsIconic(hwnd) && GetWindowThreadProcessId(hwnd, &pid) &&
+           pid == GetCurrentProcessId();
 }
 void update_mouse(HWND hwnd, std::array<float, player::ACTION_COUNT> &v,
-                  bool &engaged, float &sixaxis_x, float &sixaxis_y) {
-    POINT cursor;
+                  HWND &previous_window, POINT &previous_cursor,
+                  float &sixaxis_x, float &sixaxis_y) {
+    int raw_dx = 0, raw_dy = 0;
+    POINT cursor{};
+    const bool cursor_ok = GetCursorPos(&cursor);
+    POINT client_cursor = cursor;
     RECT client;
-    if (!GetCursorPos(&cursor) || !ScreenToClient(hwnd, &cursor) || !GetClientRect(hwnd, &client) ||
-        !PtInRect(&client, cursor)) {
-        engaged = false;
+    if (!cursor_ok || !ScreenToClient(hwnd, &client_cursor) || !GetClientRect(hwnd, &client) ||
+        !PtInRect(&client, client_cursor)) {
+        previous_window = nullptr;
         sixaxis_x *= 0.75f;
         sixaxis_y *= 0.75f;
         if (std::abs(sixaxis_x) < 0.005f) sixaxis_x = 0.0f;
         if (std::abs(sixaxis_y) < 0.005f) sixaxis_y = 0.0f;
         return;
     }
-    POINT center{(client.right - client.left) / 2, (client.bottom - client.top) / 2};
-    POINT screen_center = center;
-    if (!ClientToScreen(hwnd, &screen_center)) {
-        engaged = false;
-        return;
+    // Start a new sample when the pointer enters or focus changes.
+    if (previous_window == hwnd) {
+        raw_dx = cursor.x - previous_cursor.x;
+        raw_dy = cursor.y - previous_cursor.y;
     }
-    int raw_dx = cursor.x - center.x, raw_dy = cursor.y - center.y;
-    if (!engaged) {
-        // Regained focus or just entered client area: center without jump
-        SetCursorPos(screen_center.x, screen_center.y);
-        engaged = true;
-        return;
-    }
-    SetCursorPos(screen_center.x, screen_center.y);
+    previous_window = hwnd;
+    previous_cursor = cursor;
 
     bool held = config.mouse_look && (GetAsyncKeyState(VK_RBUTTON) & 0x8000);
     float sens = (config.mouse_sensitivity > 0.01f ? config.mouse_sensitivity : 0.5f);
@@ -110,7 +108,8 @@ void update_mouse(HWND hwnd, std::array<float, player::ACTION_COUNT> &v,
 }
 unsigned __stdcall run(void *) {
     player::MotionPulse pulse;
-    bool mouse_engaged = false;
+    HWND previous_mouse_window = nullptr;
+    POINT previous_cursor{};
     float mouse_sixaxis_x = 0.0f;
     float mouse_sixaxis_y = 0.0f;
     ULONGLONG refresh = 0;
@@ -143,7 +142,8 @@ unsigned __stdcall run(void *) {
                     kb_values[i] = player::binding_strength(config.keyboard[i], nullptr, true, config.deadzone);
                 if (config.mouse_left_cross && (GetAsyncKeyState(VK_LBUTTON) & 0x8000))
                     kb_values[player::CROSS] = 1.0f;
-                update_mouse(hwnd, kb_values, mouse_engaged, mouse_sixaxis_x, mouse_sixaxis_y);
+                update_mouse(hwnd, kb_values, previous_mouse_window, previous_cursor,
+                             mouse_sixaxis_x, mouse_sixaxis_y);
             }
             if (allow_gamepad && pad) {
                 for (int i = 0; i < player::ACTION_COUNT; ++i)
@@ -186,7 +186,7 @@ unsigned __stdcall run(void *) {
             for (int i = 0; i < player::ACTION_COUNT; ++i)
                 values[i] = std::max(kb_values[i], gp_values[i]);
         } else {
-            mouse_engaged = false;
+            previous_mouse_window = nullptr;
             mouse_sixaxis_x = 0.0f;
             mouse_sixaxis_y = 0.0f;
             real = false;
