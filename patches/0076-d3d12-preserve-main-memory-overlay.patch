@@ -1,0 +1,20 @@
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -6221,12 +6221,12 @@ static void render_frame(void)
+                     continue;
+                 }
+             }
+-            /* Display-sized sampler source -> the rendered frame, but only when
+-             * the guest source is empty: this is the reflection/refraction
+-             * case. A localized background or loading texture of the same size
+-             * is real data and must not be replaced by the previous frame. */
++            /* The reflection fallback substitutes the frame for empty local
++             * render storage. Main-memory textures can be transparent even
++             * at display size, as in the duel's full-screen overlay. */
+             if (dr->tex[_u].set && s_screen_copy &&
+                 dr->tex[_u].w == s_d3d.width && dr->tex[_u].h == s_d3d.height &&
++                dr->tex[_u].off == cellGcmResolveLocated(1, dr->tex[_u].raw) &&
+                 !tex_guest_has_data(dr->tex[_u].off, dr->tex[_u].w,
+                                     dr->tex[_u].h, dr->tex[_u].fmt,
+                                     dr->tex[_u].cube, dr->tex[_u].mips,

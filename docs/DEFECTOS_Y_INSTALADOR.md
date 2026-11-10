@@ -97,6 +97,39 @@ La propuesta de separar productor/consumidor y paralelizar decode requiere su
 propia rama, medir antes y validar orden de draws y coherencia guest. Las cifras
 históricas de FPS no son un benchmark del binario final de esta sesión.
 
+## D14. Bakugan oscurecidos en el duelo
+
+El 10 de noviembre se reprodujo el defecto en «Use Ability Cards». Los
+render targets de 1120×584 `0x09120000` y `0x08C20000` ya contenían ambos
+modelos iluminados. Después de componerlos, el pase de pantalla completa
+`op313` del frame 6476 usó alfa 0,5 y una textura ARGB8 de memoria principal
+(`0x01033D00` en RSX, `0x12133D00` en memoria guest). Se leyeron sus
+3.686.400 bytes a cero en varios flips del duelo. Los píxeles de los modelos
+perdían la mitad de su RGB antes de dibujar el HUD.
+
+En `render_frame` de `libs/video/rsx_d3d12_backend.c`, el fallback
+`SCREEN_AS_TEX` trataba cualquier textura vacía del tamaño de pantalla
+como una superficie de reflejos y la sustituía por una copia del
+framebuffer. La copia aportaba alfa donde la textura guest era transparente.
+El [parche 0076](../patches/0076-d3d12-preserve-main-memory-overlay.patch)
+limita esa sustitución a memoria local RSX. Los render targets y resolves
+explícitos siguen teniendo prioridad. El pase de la capa se conserva.
+
+La prueba `rsx_texture_source_test.cpp` falló con la selección anterior y
+pasó con el cambio. También pasaron el fixture de packed depth y el contrato
+del repositorio. En Release con clang-cl, el replay local
+`battle-v2-match-125541771` completó 1.080 muestras y el usuario confirmó
+el brillo. En el frame 6476, `op313` seguía presente junto al HUD, las cartas
+y los efectos. La ventana del duelo entre flips guest 6500 y 6750 dio
+29,68 flips/s antes y 29,63 después con límite de 30 FPS. Esta medida
+describe ese tramo y no mide capacidad sin límite.
+
+Evidencia local en `diagnostics/battle-v2-match-125541771/` del checkout de
+rendimiento. `frame_100` contiene la referencia. El cuadro corregido y su
+manifiesto están en `release-candidate/validation-131521829/frame_00`.
+`ab-skip-overlay` solo sirvió para aislar el pase durante el diagnóstico.
+El defecto del cursor queda como tarea separada.
+
 ## Aceptación pendiente antes de empaquetar
 
 Regresiones enfocadas y revisión pasaron; conservar hashes y pruebas indicados
