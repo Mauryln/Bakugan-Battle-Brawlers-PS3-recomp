@@ -145,3 +145,29 @@ configuración, guardados sin sobrescribir, rutas Unicode, doble clic y cierre
 normal. Incluir sólo binarios/dependencias/licencias necesarios; nunca assets
 o claves del juego en git. No usar contadores rígidos de WAIT_SIGNAL ni exigir
 cero ch-block de SPUs de audio como sustitutos de aceptación visual/funcional.
+
+## Entrega v1.2.0 (11 de noviembre de 2026) — retrato, multijugador y sticks 360°
+
+Notas bilingües y resumen de empaquetado en [RELEASE_1.2.0.md](RELEASE_1.2.0.md):
+
+- **Retrato personalizado en Modo Historia (primera sesión)**: el RT offscreen
+  `200x200` (`off=0x079C0000`) solo muestreado se desalojaba al crear RTs de
+  escena. Se amplió `MAX_OFF_RTS` (`16 -> 64`, `DRAW_SRV_BASE 80`) y
+  `MAX_DEPTH_SURFACES` (`16 -> 32`), se fijaron en el pre-pass de frame los RTs
+  objetivo y muestreados con desalojo LRU, `off_rt_alias_find` resuelve EA guest
+  en `cellGcmResolveOffset`, `NV309E` llama `ps3_guest_stamp` y `vp_upload_tex_slot`
+  captura `upload_gen = g_guest_gen` antes de decodificar. Verificado con
+  `test_offrt_pin.py`, captura `RSX_CAP` (`frame_00` con `backbuffer.bmp` y
+  `rt_079C0000.bmp`) y confirmación del usuario tras prueba nativa.
+- **Multijugador habilitado (hasta 7 puertos)**: `cellPad` amplió
+  `PAD_MAX_HOST_PORTS` a `CELL_PAD_MAX_PORT_NUM` (7) respetando el tope `4` de
+  XInput (`PAD_XINPUT_MAX_PORTS`) y expuso reportes externos vía
+  `pad_external_report`/`pad_port_connected`. `input_bridge` asigna puertos
+  independientes por mando conectado más un puerto para teclado/ratón incluso
+  al abrir directo `BakuganBrawlers.cmd` o `BakuganRecomp.exe`. Validado en
+  hardware real con Nintendo Switch Pro Controller (`P1`), PS4 Controller (`P2`)
+  y teclado/ratón (`P3`) más `player_pad_provider_test.cpp`.
+- **Giro 360° de sticks en minijuegos**: `player::shape_stick_2d` sustituyó el
+  recorte axial independiente por zona muerta radial 2D + proyección
+  circular-a-cuadrado que conserva el ángulo, validado con
+  `player_input_test.cpp` y prueba del usuario.

@@ -213,7 +213,7 @@ namespace BakuganInstaller
 
     internal static class Installer
     {
-        private const string ReleaseVersion = "1.1.0";
+        private const string ReleaseVersion = "1.2.0";
         private static long totalBytes;
         private static long copiedBytes;
         private static Action<int, string> report;

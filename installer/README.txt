@@ -1,7 +1,7 @@
 Bakugan: Battle Brawlers (BLES00758) - Port nativo para Windows x64
 ====================================================================
 
-Versión 1.1.0 - Windows x64
+Versión 1.2.0 - Windows x64
 
 QUÉ ES
 ------
@@ -51,18 +51,21 @@ ESTADO Y LÍMITES
 ----------------
 - Se corrigió el oscurecimiento de los Bakugan en la pantalla de duelo.
 - El cursor se mueve libremente al usar el mouse para Sixaxis.
+- Se corrigió el retrato del jugador en Modo Historia en la primera sesión
+  (fijado/LRU de render targets offscreen, alias EA y estampado NV309E).
+- Multijugador local habilitado con hasta 7 puertos independientes (PS4,
+  Nintendo Switch Pro, Xbox/SDL3 y teclado/ratón dedicado), también en inicio
+  directo desde BakuganBrawlers.cmd o BakuganRecomp.exe.
+- Corregido el giro completo de 360° de los sticks analógicos en minijuegos.
 - Menús, tutorial de historia, arena de batalla, HUD, cartas, cinemáticas y audio
   funcionan en la build de referencia.
 - Límite de FPS fijo a 30.
 - 30 FPS estables en todas las escenas sigue pendiente; el cuello es trabajo
   serial de CPU, no la GPU.
-- Hay artefactos visuales aleatorios en investigación: texturas negras, retrato
-  del jugador que a veces no carga y fondo gris tras cargar una partida. Esta
-  build incluye correcciones de caché/vértices y de invalidación al cargar
-  partidas, pero falta validación amplia en más PC y partidas.
 - Si falla la entrada a una arena o aparecen problemas de HUD o texturas,
   envía el log indicado arriba.
-- Cobertura de mandos limitada: DS4 probado; DualSense/Switch Pro pendientes.
+- Probado con DualShock 4, Nintendo Switch Pro Controller y teclado/ratón;
+  otros mandos compatibles con SDL3 o XInput siguen el mismo puente multipuerto.
 - El sistema de guardado funciona, pero quedan casos límite por validar.
 - No hay actualizador automático.
 

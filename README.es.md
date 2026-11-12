@@ -5,7 +5,7 @@
 <p><strong>El lanzamiento original de PlayStation 3 (<code>BLES00758</code>), recompilado estáticamente a un ejecutable nativo de Windows x64.</strong></p>
 
 <p>
-<a href="https://github.com/Mauryln/Bakugan-Battle-Brawlers-PS3-recomp/releases/latest"><img src="https://img.shields.io/badge/release-v1.1.0-blue.svg?style=flat-square" alt="Lanzamiento: v1.1.0"></a>
+<a href="https://github.com/Mauryln/Bakugan-Battle-Brawlers-PS3-recomp/releases/latest"><img src="https://img.shields.io/badge/release-v1.2.0-blue.svg?style=flat-square" alt="Lanzamiento: v1.2.0"></a>
 <img src="https://img.shields.io/badge/plataforma-Windows%20x64-0078D6?style=flat-square" alt="Plataforma: Windows x64">
 <img src="https://img.shields.io/badge/gr%C3%A1ficos-Direct3D%2012-107C10?style=flat-square" alt="Gráficos: Direct3D 12">
 <img src="https://img.shields.io/badge/t%C3%ADtulo-BLES00758%20(Europa)-c0392b?style=flat-square" alt="Título: BLES00758 (Europa)">
@@ -50,8 +50,13 @@ El juego es **completamente jugable de principio a fin**: modo historia, tutoria
 
 ---
 
-## Características Principales en v1.0.0
+## Características Principales y Novedades (v1.2.0)
 
+> Consulta las notas completas en [docs/RELEASE_1.2.0.md](docs/RELEASE_1.2.0.md).
+
+- **Multijugador Habilitado (Hasta 7 Puertos)**: Conecta varios mandos a la vez (PS4 DualShock 4, Nintendo Switch Pro Controller, Xbox/XInput, mandos genéricos SDL3) junto con un puerto independiente para Teclado y Ratón. Funciona tanto desde `BakuganLauncher.exe` como en inicio directo (`BakuganBrawlers.cmd` / `BakuganRecomp.exe`).
+- **Retrato del Jugador y Correcciones Gráficas**: Solucionado el error en el Modo Historia donde el retrato personalizado faltaba o mostraba glitches en la primera sesión (fijado/LRU de render targets offscreen, comprobación de EA real en alias, estampado `NV309E`, carrera de generación en texturas, pool depth de 32 entradas y composición de brillo en duelos).
+- **Giro Analógico Completo de 360° en Minijuegos**: Zona muerta radial 2D con proyección circular-a-cuadrado que preserva el ángulo para registrar todas las direcciones de giro en minijuegos en lugar de limitar a 4 ejes cardinales.
 - **Motor Direct3D 12 Nativo**: Renderizado acelerado por hardware con modo ventana sin bordes (*Borderless Windowed*) activado de manera predeterminada a 1080p, y opciones de reescalado (720p, 1080p, 1440p, 4K) con **AMD FidelityFX Super Resolution 1.0 (FSR1)** oficial y filtro de nitidez adaptativo (RCAS).
 - **Controles Híbridos Simultáneos**: Juega en cualquier momento con mando (Xbox, DualShock 4/DualSense, Switch Pro, mandos genéricos XInput/DirectInput) o con Teclado y Ratón sin tener que cambiar opciones ni reiniciar el juego.
 - **Simulación Tri-Modal de Sixaxis**: El control de dirección de la esfera en batalla admite 3 métodos simultáneos:
@@ -91,7 +96,7 @@ Debes proporcionar tu propia copia legal del disco europeo en formato **archivo 
 
 ## Instalación y Cómo Jugar
 
-1. Descarga el paquete completo de la versión **`Bakugan-Battle-Brawlers-Recomp-1.0-win64.zip`** desde la sección de [Último Lanzamiento](https://github.com/Mauryln/Bakugan-Battle-Brawlers-PS3-recomp/releases/latest).
+1. Descarga el paquete completo de la versión **`Bakugan-Battle-Brawlers-Recomp-1.2.0-win64.zip`** desde la sección de [Último Lanzamiento](https://github.com/Mauryln/Bakugan-Battle-Brawlers-PS3-recomp/releases/latest).
 2. Descomprime completamente el archivo ZIP en la carpeta que prefieras de tu equipo (asegúrate de que la carpeta `payload` permanezca al lado de `BakuganSetup.exe`).
 3. Ejecuta **`BakuganSetup.exe`** desde la carpeta descomprimida.
 4. Selecciona tu **archivo ISO europeo (`BLES00758`)** o directorio del juego.
@@ -128,7 +133,7 @@ En el título original de PS3, el lanzamiento y control de la esfera se realiza 
 
 - **Conducción con Ratón**: Mueve el ratón para inclinar y guiar la esfera con precisión. Dispone de amortiguación elástica de retorno al centro para estabilizar la esfera sin deriva al soltar el ratón. El cursor se captura durante la partida y se libera automáticamente al alternar con Alt+Tab.
 - **Stick Analógico Derecho**: En mandos estándar, inclina el stick derecho para girar la esfera con suavidad.
-- **Giroscopio Físico**: Si conectas un mando DualShock 4 o DualSense, disfrutarás de movimiento 1:1 mediante los sensores integrados por SDL3.
+- **Giroscopio Físico**: Si conectas un mando DualShock 4, DualSense o Nintendo Switch Pro Controller, disfrutarás de movimiento 1:1 mediante los sensores integrados por SDL3.
 
 ---
 

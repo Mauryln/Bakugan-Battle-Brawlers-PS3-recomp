@@ -5,7 +5,7 @@
 <p><strong>The PlayStation 3 release (<code>BLES00758</code>), statically recompiled into a native Windows x64 executable.</strong></p>
 
 <p>
-<a href="https://github.com/Mauryln/Bakugan-Battle-Brawlers-PS3-recomp/releases/latest"><img src="https://img.shields.io/badge/release-v1.1.0-blue.svg?style=flat-square" alt="Release: v1.1.0"></a>
+<a href="https://github.com/Mauryln/Bakugan-Battle-Brawlers-PS3-recomp/releases/latest"><img src="https://img.shields.io/badge/release-v1.2.0-blue.svg?style=flat-square" alt="Release: v1.2.0"></a>
 <img src="https://img.shields.io/badge/platform-Windows%20x64-0078D6?style=flat-square" alt="Platform: Windows x64">
 <img src="https://img.shields.io/badge/graphics-Direct3D%2012-107C10?style=flat-square" alt="Graphics: Direct3D 12">
 <img src="https://img.shields.io/badge/title-BLES00758%20(Europe)-c0392b?style=flat-square" alt="Title: BLES00758 (Europe)">
@@ -50,8 +50,13 @@ The game is **fully playable from start to finish**: story mode, tutorials, batt
 
 ---
 
-## Key Features in v1.0.0
+## Key Features & What's New (v1.2.0)
 
+> See the full changelog in [docs/RELEASE_1.2.0.md](docs/RELEASE_1.2.0.md).
+
+- **Multiplayer Game Enabled (Up to 7 Ports)**: Connect multiple controllers simultaneously (PS4 DualShock 4, Nintendo Switch Pro Controller, Xbox/XInput, generic SDL3 controllers) alongside a dedicated Keyboard & Mouse port. Works seamlessly both from `BakuganLauncher.exe` and direct launches (`BakuganBrawlers.cmd` / `BakuganRecomp.exe`).
+- **Story Mode Player Portrait & Graphics Fixes**: Fixed custom player avatar portraits missing or glitching during the first session via offscreen render-target pinning + LRU eviction, alias EA tracking, `NV309E` page stamping, thread-safe texture generation tracking, expanded depth surface pool (`32`), and battle duel brightness compositing.
+- **Full 360° Analog Stick Minigame Control**: 2D radial deadzone with angle-preserving circular-to-square stick shaping lets left/right stick spins register every direction smoothly instead of locking to 4 cardinal axes.
 - **Native Direct3D 12 Engine**: Hardware-accelerated rendering with borderless windowed mode enabled by default at 1080p, plus upscaling presets (720p, 1080p, 1440p, 4K) powered by official **AMD FidelityFX Super Resolution 1.0 (FSR1)** and Contrast Adaptive Sharpening (RCAS).
 - **Simultaneous Hybrid Controls**: Seamlessly play with Gamepad (Xbox, PlayStation DualShock 4/DualSense, Switch Pro, generic DirectInput/XInput) or Keyboard & Mouse at any time without changing modes.
 - **Tri-Modal Sixaxis Simulation**: Ball steering during battles supports 3 simultaneous input methods:
@@ -91,7 +96,7 @@ You must provide your own legally dumped European disc image as an **ISO file (`
 
 ## How to Install and Play
 
-1. Download the complete release archive **`Bakugan-Battle-Brawlers-Recomp-1.0-win64.zip`** from the [Latest Release](https://github.com/Mauryln/Bakugan-Battle-Brawlers-PS3-recomp/releases/latest).
+1. Download the complete release archive **`Bakugan-Battle-Brawlers-Recomp-1.2.0-win64.zip`** from the [Latest Release](https://github.com/Mauryln/Bakugan-Battle-Brawlers-PS3-recomp/releases/latest).
 2. Extract the entire ZIP archive into a folder of your choice (ensure that the `payload` folder remains adjacent to `BakuganSetup.exe`).
 3. Run **`BakuganSetup.exe`** from the extracted directory.
 4. Browse and select your **European Disc ISO (`BLES00758`)** or game directory.
@@ -128,7 +133,7 @@ In the original PS3 title, ball navigation across battle arenas relies heavily o
 
 - **Mouse Steering**: Move the mouse left/right to roll and up/down to pitch. Built-in exponential return-to-center physics automatically stabilizes the ball when you stop moving the mouse, preventing camera drifting or oversteering. Cursor capture is active during gameplay and automatically released when you Alt-Tab.
 - **Right Analog Stick**: Gamepad users without gyroscopes can smoothly steer using the right analog stick.
-- **Hardware Gyroscope**: Players with a DualShock 4 or DualSense controller enjoy true 1:1 motion steering via SDL3 sensor polling.
+- **Hardware Gyroscope**: Players with a DualShock 4, DualSense, or Nintendo Switch Pro controller enjoy true 1:1 motion steering via SDL3 sensor polling.
 
 ---
 
