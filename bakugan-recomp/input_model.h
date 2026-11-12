@@ -17,6 +17,23 @@ struct MotionPulse {
 inline uint8_t stick(float negative, float positive) {
     return (uint8_t)std::clamp(std::lround(128.f - 128.f * negative + 127.f * positive), 0l, 255l);
 }
+// Apply a 2D radial deadzone (avoiding cardinal snapping near axes) and expand
+// circular gamepad travel onto [-1, 1]^2 while preserving exact stick angle.
+inline void shape_stick_2d(float raw_x, float raw_y, float deadzone, float &out_x, float &out_y) {
+    float r = std::hypot(raw_x, raw_y);
+    if (r <= deadzone || r < 1e-6f) {
+        out_x = 0.0f;
+        out_y = 0.0f;
+        return;
+    }
+    float outer = std::max(0.85f, deadzone + 0.10f);
+    float mag = std::clamp((r - deadzone) / (outer - deadzone), 0.0f, 1.0f);
+    float ux = raw_x / r;
+    float uy = raw_y / r;
+    float max_c = std::max(std::abs(ux), std::abs(uy));
+    out_x = (ux / max_c) * mag;
+    out_y = (uy / max_c) * mag;
+}
 inline uint16_t sensor(float value) { return (uint16_t)std::clamp(std::lround(value), 0l, 1023l); }
 inline bool finite_motion(const std::array<float, 3> &a, const std::array<float, 3> &g) {
     for (int i = 0; i < 3; ++i)

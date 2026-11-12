@@ -41,7 +41,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Position = 0)]
-    [ValidateSet('list', 'play', 'record', 'register', 'verify')]
+    [ValidateSet('list', 'play', 'record', 'register', 'verify', 'gameplay')]
     [string]$Action = 'list',
 
     [Parameter(Position = 1)]
@@ -52,7 +52,9 @@ param(
     [string]$Savedata = 'BLES00758-PLAYER-DATA-00',
     [int]$StopAtFlip = 0,
     [int]$TimeoutSec = 600,
+    [int]$HoldSec = 0,
     [string]$PadFile = '',
+    [string]$GameScript = '',
     [string]$Note = '',
     [string[]]$Set = @(),
     [switch]$CloseWhenDone
@@ -66,6 +68,10 @@ $elf     = Join-Path $root 'game\PS3_GAME\USRDIR\EBOOT.elf'
 $store   = Join-Path $root 'diagnostics\autopad\routes.json'
 $runRoot = Join-Path $root 'diagnostics\autopad\runs'
 $cards   = 'diagnostics\record-cards-20261108-111621'
+# The input bridge (mouse->stick) only installs when PS3_PLAYER_CONFIG points
+# at a player.ini. The isolated run profile has none, so without this the
+# autopad runs without the mouse and only the toolkit keyboard fallback exists.
+$realPlayerConfig = Join-Path $env:LOCALAPPDATA 'BakuganRecomp\player.ini'
 
 function Get-BuiltinRoutes {
     $map = [ordered]@{}
@@ -162,11 +168,15 @@ function New-Run([pscustomobject]$route) {
 function Set-RunEnvironment([pscustomobject]$route, [string]$run) {
     # Variables heredadas de otra sesión cambian lo que recibe el guest.
     Get-ChildItem Env: |
-        Where-Object Name -Match '^(PS3_|PAD_|BAKUGAN_|SPU_|SPURS_|RSX_|GCM_|YDKJ_|LBP_|FRAME_|PERF$|AUDIO_RATE$)' |
+        Where-Object Name -Match '^(PS3_|PAD_|BAKUGAN_|SPU_|SPURS_|RSX_|GCM_|YDKJ_|LBP_|FRAME_|PERF$|AUDIO_RATE$|MOUSE_)' |
         ForEach-Object { Remove-Item -LiteralPath "Env:$($_.Name)" -ErrorAction SilentlyContinue }
 
     $env:LOCALAPPDATA = Join-Path $run 'profile'
     New-Item -ItemType Directory -Force -Path $env:LOCALAPPDATA | Out-Null
+
+    if (Test-Path -LiteralPath $realPlayerConfig) {
+        $env:PS3_PLAYER_CONFIG = $realPlayerConfig
+    }
 
     $env:PS3_VFS_ROOT = Join-Path $root 'game'
     $env:PS3_TITLE = 'Bakugan: Battle Brawlers'
@@ -332,6 +342,86 @@ switch ($Action) {
         }
         Write-Warning "El juego sigue abierto sin completar la ruta. Log: $stdout"
         exit 2
+    }
+
+    'gameplay' {
+        if (-not $Name) { throw 'Uso: .\tools\autopad.ps1 gameplay -Route <nombre> -Script <archivo>' }
+        if (-not $GameScript) { throw 'Falta -Script <archivo> con el guion de gameplay.' }
+        $route = Resolve-Route $Name
+        Assert-Build
+        Assert-Idle
+
+        $padrec = Get-RepoPath $route.padrec
+        if (-not (Test-Path -LiteralPath $padrec)) {
+            throw "Falta la grabación de la ruta: $padrec"
+        }
+        $scriptPath = Get-RepoPath $GameScript
+        if (-not (Test-Path -LiteralPath $scriptPath)) {
+            throw "Falta el guion de gameplay: $scriptPath"
+        }
+
+        $run = New-Run $route
+        Set-RunEnvironment $route $run
+        $env:PAD_REPLAY = $padrec
+        $env:PAD_CLOCK = if ($route.clock) { $route.clock } else { 'flips' }
+        $env:MOUSE_SCRIPT = Join-Path $run 'gameplay.script'
+
+        $stdout = Join-Path $run 'stdout.log'
+        $stderr = Join-Path $run 'stderr.log'
+        Write-Host "Ruta: $($route.name) -> $($route.target)"
+        Write-Host "Guion: $scriptPath"
+        Write-Host "Reproduciendo: $($env:PAD_REPLAY)"
+
+        $proc = Start-Process -FilePath $exe -ArgumentList "`"$elf`"" -PassThru `
+                              -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+
+        # La ruta deja el juego en la batalla; entonces se suelta el guion y el
+        # input_bridge lo reproduce en el reloj de flips.
+        $deadline = if ($TimeoutSec -gt 0) { (Get-Date).AddSeconds($TimeoutSec) } else { $null }
+        $started = $false
+        while (-not $proc.HasExited) {
+            Start-Sleep -Milliseconds 250
+            if (-not $started -and (Test-Path -LiteralPath $stdout)) {
+                $tail = Get-Content -LiteralPath $stdout -Raw -ErrorAction SilentlyContinue
+                if ($tail -and $tail.Contains('PAD_REPLAY done')) {
+                    $started = $true
+                    $tmp = "$($env:MOUSE_SCRIPT).tmp"
+                    Copy-Item -LiteralPath $scriptPath -Destination $tmp -Force
+                    Move-Item -LiteralPath $tmp -Destination $env:MOUSE_SCRIPT -Force
+                    Write-Host "Guion de gameplay activado: $($env:MOUSE_SCRIPT)"
+                }
+            }
+            if ($deadline -and (Get-Date) -gt $deadline) {
+                Write-Warning "Timeout de $TimeoutSec s esperando el fin del replay."
+                break
+            }
+        }
+
+        if ($proc.HasExited) {
+            Write-Warning "El juego termino antes de completar la ruta. Log: $stdout"
+            exit 3
+        }
+        if (-not $started) {
+            Write-Warning "No se activo el guion de gameplay. Log: $stdout"
+            exit 2
+        }
+
+        # HoldSec 0 deja el juego abierto hasta que el usuario lo cierre.
+        if ($HoldSec -gt 0) {
+            $holdDeadline = (Get-Date).AddSeconds($HoldSec)
+            while (-not $proc.HasExited -and (Get-Date) -lt $holdDeadline) {
+                Start-Sleep -Milliseconds 500
+            }
+        } else {
+            $proc.WaitForExit()
+        }
+
+        Write-Host "AUTOPAD route=$($route.name) action=gameplay result=played run=$run log=$stdout"
+        if ($CloseWhenDone) {
+            $proc.Refresh()
+            if (-not $proc.HasExited) { $null = $proc.CloseMainWindow() }
+        }
+        exit 0
     }
 
     'record' {

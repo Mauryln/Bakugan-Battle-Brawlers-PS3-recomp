@@ -99,6 +99,20 @@ int main() {
     make_report(v, MotionMode::RightStick, false, a, g, 1500, pulse);
     v[MOTION_THROW] = 1;
     CHECK(make_report(v, MotionMode::RightStick, false, a, g, 1600, pulse).sensors[2] == 1023);
+    float sx = 0.f, sy = 0.f;
+    shape_stick_2d(0.10f, -0.10f, 0.15f, sx, sy);
+    CHECK(sx == 0.f && sy == 0.f);
+    shape_stick_2d(0.85f, 0.08f, 0.15f, sx, sy);
+    CHECK(sx > 0.99f && sy > 0.08f); // radial deadzone must not snap slight tilt onto cardinal axis
+    shape_stick_2d(0.60f, -0.60f, 0.15f, sx, sy);
+    CHECK(sx > 0.99f && sy < -0.99f); // diagonal rim (PS4/Switch circular gate) expands to full corner
+    for (int k = 0; k < 16; ++k) {
+        float ang = (float)k * (2.f * 3.14159265f / 16.f);
+        float rx = 0.85f * std::cos(ang), ry = 0.85f * std::sin(ang);
+        shape_stick_2d(rx, ry, 0.15f, sx, sy);
+        CHECK(std::max(std::abs(sx), std::abs(sy)) > 0.99f);
+        CHECK(std::abs(sx * ry - sy * rx) < 1e-4f);
+    }
     Gamepads devices;
     std::string input_error;
     CHECK(devices.init(input_error));

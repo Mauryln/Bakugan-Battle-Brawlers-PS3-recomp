@@ -1,0 +1,116 @@
+diff --git a/libs/input/cellPad.c b/libs/input/cellPad.c
+--- a/libs/input/cellPad.c
++++ b/libs/input/cellPad.c
+@@ -115,7 +115,8 @@
+  * Internal state
+  * -----------------------------------------------------------------------*/
+ 
+-#define PAD_MAX_HOST_PORTS  4  /* XInput supports max 4; SDL may support more */
++#define PAD_MAX_HOST_PORTS    CELL_PAD_MAX_PORT_NUM
++#define PAD_XINPUT_MAX_PORTS  4  /* XInputGetState / XInputSetState cap at 4 slots */
+ 
+ typedef struct {
+     int  connected;
+@@ -151,6 +152,26 @@
+     s_host_provider_userdata = userdata;
+ }
+ 
++static int pad_external_report(u32 port_no, ps3_host_pad_report* out)
++{
++    if (port_no >= PAD_MAX_HOST_PORTS || !s_host_provider)
++        return 0;
++    ps3_host_pad_report tmp;
++    memset(&tmp, 0, sizeof(tmp));
++    if (!s_host_provider(port_no, &tmp, s_host_provider_userdata))
++        return 0;
++    if (out)
++        *out = tmp;
++    return 1;
++}
++
++static int pad_port_connected(u32 port_no)
++{
++    if (port_no >= PAD_MAX_HOST_PORTS)
++        return 0;
++    return pad_external_report(port_no, NULL) || s_host_state[port_no].connected || port_no == 0;
++}
++
+ /* Per-port "a report has arrived since your last read" flag; see cellPadGetData. */
+ static int s_data_fresh[PAD_MAX_HOST_PORTS];
+ 
+@@ -299,7 +320,7 @@
+ 
+ static void pad_poll_xinput(void)
+ {
+-    for (int i = 0; i < PAD_MAX_HOST_PORTS; i++) {
++    for (int i = 0; i < PAD_XINPUT_MAX_PORTS; i++) {
+         XINPUT_STATE state;
+         memset(&state, 0, sizeof(state));
+ 
+@@ -949,8 +913,11 @@
+ 
+ s32 cellPadGetData(u32 port_no, CellPadData* data_guest)
+ {
+-    { static int _once = 0;
+-      if (!_once++) printf("[cellPad] GetData polling begins (port %u)\n", port_no); }
++    { static u32 _logged_ports = 0;
++      if (port_no < 32 && !(_logged_ports & (1u << port_no))) {
++          _logged_ports |= (1u << port_no);
++          printf("[cellPad] GetData polling begins (port %u)\n", port_no);
++      } }
+     if (!s_pad_initialized)
+         return CELL_PAD_ERROR_NOT_OPENED;
+ 
+@@ -1017,7 +977,10 @@
+     }
+ skip_inject: ;
+ 
+-    if (port_no >= PAD_MAX_HOST_PORTS || (!s_host_state[port_no].connected && port_no != 0)) {
++    ps3_host_pad_report external = {0};
++    int external_valid = pad_external_report(port_no, &external);
++    if (port_no >= PAD_MAX_HOST_PORTS ||
++        (!external_valid && !s_host_state[port_no].connected && port_no != 0)) {
+         goto emit;   /* data stays zeroed -> len=0 */
+     }
+     /* port 0 is always a valid (virtual) pad; s_host_state[0] is neutral if no
+@@ -1375,8 +1335,11 @@
+      * it ever finished booting. Both entry points describe the same hardware
+      * and have to answer the same way. */
+     u32 connected = 0;
+-    for (u32 i = 0; i < s_max_connect && i < PAD_MAX_HOST_PORTS; i++)
+-        if (s_host_state[i].connected || i == 0) connected++;
++    int conn[CELL_PAD_MAX_PORT_NUM] = {0};
++    for (u32 i = 0; i < s_max_connect && i < PAD_MAX_HOST_PORTS; i++) {
++        conn[i] = pad_port_connected(i);
++        if (conn[i]) connected++;
++    }
+ 
+     vm_write32(gaddr + 0x00, s_max_connect);
+     vm_write32(gaddr + 0x04, connected);
+@@ -1416,7 +1378,7 @@
+         /* Always present a virtual pad on port 0 (standard emulator behavior) so
+          * boot flows that block until a controller is connected can proceed even
+          * with no physical device attached. */
+-        if (s_host_state[i].connected || i == 0) {
++        if (pad_port_connected(i)) {
+             info->port_status[i]       = CELL_PAD_STATUS_CONNECTED;
+             info->port_setting[i]      = s_port_setting[i];
+             info->device_capability[i] = CELL_PAD_CAPABILITY_PS3_CONFORMITY
+@@ -1471,7 +1433,7 @@
+     for (u32 i = 0; i < s_max_connect && i < CELL_PAD_MAX_PORT_NUM; i++) {
+         /* Same virtual-pad-on-port-0 rule as cellPadGetInfo2, so both views of
+          * the ports agree (a game that cross-checks them must see one truth). */
+-        if ((i < PAD_MAX_HOST_PORTS && s_host_state[i].connected) || i == 0) {
++        if (pad_port_connected(i)) {
+             info->port_status[i]       = CELL_PAD_STATUS_CONNECTED;
+             info->port_setting[i]      = s_port_setting[i];
+             info->device_capability[i] = CELL_PAD_CAPABILITY_PS3_CONFORMITY
+@@ -1591,7 +1553,7 @@
+ 
+ #if PAD_BACKEND_XINPUT
+     /* XInput keeps the motors at what they were last set to: no renewal. */
+-    if (s_host_state[port_no].connected) {
++    if (port_no < PAD_XINPUT_MAX_PORTS && s_host_state[port_no].connected) {
+         XINPUT_VIBRATION vib;
+         vib.wLeftMotorSpeed  = (WORD)lo;
+         vib.wRightMotorSpeed = (WORD)hi;

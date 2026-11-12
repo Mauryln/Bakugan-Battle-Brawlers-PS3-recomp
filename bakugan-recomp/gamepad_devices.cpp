@@ -4,6 +4,7 @@
 #include <windows.h>
 #include <SDL3/SDL_main.h>
 #include "gamepad_devices.h"
+#include "input_model.h"
 #include <algorithm>
 #include <cmath>
 namespace player {
@@ -110,5 +111,41 @@ float binding_strength(Binding b, SDL_Gamepad *pad, bool keyboard, float deadzon
     int raw = SDL_GetGamepadAxis(pad, (SDL_GamepadAxis)b.code);
     float value = b.kind == BindingKind::AxisNegative ? -(float)raw / 32768.f : (float)raw / 32767.f;
     return std::clamp((value - deadzone) / (1.f - deadzone), 0.f, 1.f);
+}
+static float raw_axis_component(Binding b, SDL_Gamepad *pad) {
+    int raw = SDL_GetGamepadAxis(pad, (SDL_GamepadAxis)b.code);
+    float value = b.kind == BindingKind::AxisNegative ? -(float)raw / 32768.f : (float)raw / 32767.f;
+    return std::clamp(value, 0.f, 1.f);
+}
+static void sample_stick_2d(const Config &config, SDL_Gamepad *pad,
+                            int neg_x, int pos_x, int neg_y, int pos_y,
+                            std::array<float, ACTION_COUNT> &out) {
+    auto is_axis = [](Binding b) {
+        return b.kind == BindingKind::AxisPositive || b.kind == BindingKind::AxisNegative;
+    };
+    const Binding bx0 = config.gamepad[neg_x], bx1 = config.gamepad[pos_x];
+    const Binding by0 = config.gamepad[neg_y], by1 = config.gamepad[pos_y];
+    if (is_axis(bx0) && is_axis(bx1) && is_axis(by0) && is_axis(by1)) {
+        float sx = 0.f, sy = 0.f;
+        shape_stick_2d(raw_axis_component(bx1, pad) - raw_axis_component(bx0, pad),
+                       raw_axis_component(by1, pad) - raw_axis_component(by0, pad),
+                       config.deadzone, sx, sy);
+        out[neg_x] = std::max(0.f, -sx);
+        out[pos_x] = std::max(0.f, sx);
+        out[neg_y] = std::max(0.f, -sy);
+        out[pos_y] = std::max(0.f, sy);
+        return;
+    }
+    for (int a : {neg_x, pos_x, neg_y, pos_y})
+        out[a] = binding_strength(config.gamepad[a], pad, false, config.deadzone);
+}
+void read_gamepad_actions(const Config &config, SDL_Gamepad *pad, std::array<float, ACTION_COUNT> &out) {
+    out.fill(0.f);
+    if (!pad)
+        return;
+    for (int i = 0; i < L_UP; ++i)
+        out[i] = binding_strength(config.gamepad[i], pad, false, config.deadzone);
+    sample_stick_2d(config, pad, L_LEFT, L_RIGHT, L_UP, L_DOWN, out);
+    sample_stick_2d(config, pad, R_LEFT, R_RIGHT, R_UP, R_DOWN, out);
 }
 } // namespace player
