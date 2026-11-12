@@ -1,0 +1,198 @@
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -168,14 +168,15 @@
+     u32                   off, w, h;   /* raw RSX offset + dims */
+     u32                   dxgi;        /* DXGI_FORMAT of the resource */
+     D3D12_RESOURCE_STATES st;          /* tracked resource state */
++    u64                   last_used;   /* monotonic tick for LRU eviction */
+     int                   used;        /* referenced this frame */
+ } OffRT;
+-#define MAX_OFF_RTS  16  /* demosaic double-buffers its 6-surface pass chain */
+-#define RT_SRV_BASE  5   /* SRV heap slots 5..20 hold offscreen-RT SRVs */
++#define MAX_OFF_RTS  64  /* story mode keeps per-scene + portrait RTs across menus/battles */
++#define RT_SRV_BASE  5   /* SRV heap slots 5..68 hold offscreen-RT SRVs */
+ /* Per-draw SRV windows: each VP draw gets 4 consecutive descriptors (t0-t3)
+  * so multi-unit fragment programs see all their textures (demosaic's
+  * interpolation passes sample 3 units). */
+-#define DRAW_SRV_BASE 32
++#define DRAW_SRV_BASE 80
+ #define SRV_HEAP_SIZE (DRAW_SRV_BASE + MAX_DRAWS * RSX_MAX_TEXTURES)
+ 
+ /* Per-frame VP texture slot: a guest texture uploaded for this frame's VP
+@@ -1682,7 +1683,7 @@
+ 
+         /* SRV descriptor heap (shader-visible). Layout: slot 0 = legacy atlas
+          * (dbgfont / textured 2D path), slots 1-4 = per-draw VP textures,
+-         * 5-20 = offscreen render targets (render-to-texture), rest spare.
++         * 5..68 = offscreen render targets (render-to-texture), 80+ = per-draw.
+          * All slots start as null SRVs so any 4-wide table window (the
+          * root signature binds t0-t3) is valid on tier-1 hardware. */
+         {
+@@ -4215,6 +4216,7 @@
+     const u32 _face_bytes = face_stride;
+     const u32 _nfaces     = cube ? 6u : 1u;
+     const u32 _off0 = off; u8* const _map0 = (u8*)mapped;
++    const u32 upload_gen = g_guest_gen;
+     vp_decode_texture_subresources(mapped, vm_base + off, levels, level_count,
+         _nfaces, face_stride, footprints, rsx_texture_argb_is_rgba());
+     for (u32 _f = 0; _f < _nfaces; _f++) {
+@@ -4522,7 +4524,7 @@
+     t->off = off; t->key = key_off; t->w = w; t->h = h; t->fmt = fmt;
+     t->cube = cube; t->mips = level_count; t->pitch = source_pitch; t->used = 1;
+     t->csum = TEX_CSUM(vm_base + off, source_bytes);
+-    t->gen = g_guest_gen;
++    t->gen = upload_gen;
+     t->p0 = off >> 12;
+     t->pn = (off + source_bytes - 1u) >> 12;
+     #undef TEX_CSUM
+@@ -4875,6 +4877,8 @@
+     }
+ }
+ 
++static u64 s_off_rt_tick = 0;
++
+ static int off_rt_find(u32 off)
+ {
+     if (!off) return -1;
+@@ -4912,6 +4916,7 @@
+ 
+ static int off_rt_alias_find(u32 off)
+ {
++    extern u32 cellGcmResolveOffset(u32);
+     const u32 dst = off & ~0xFFFFu;
+     for (int i = 0; i < s_rt_alias_n; i++) {
+         if (s_rt_alias[i].dst != dst) continue;
+@@ -4919,8 +4924,13 @@
+          * memory. If the guest has written this page since, its bytes are the
+          * newer truth: a loaded save recycles VRAM, and the page that used to
+          * be a resolve destination can now hold a real texture (localized
+-         * background, portrait). Reusing the old target showed stale/gray art. */
+-        if (g_guest_page_gen[(dst >> 12) & ((1u << 20) - 1u)] > s_rt_alias[i].gen)
++         * background, portrait). Reusing the old target showed stale/gray art.
++         * Check the resolved guest EA (not the raw RSX offset) because
++         * g_guest_page_gen is indexed by guest EA. */
++        const u32 dst_ea = cellGcmResolveOffset(dst);
++        const u32 off_ea = cellGcmResolveOffset(off);
++        if (g_guest_page_gen[(dst_ea >> 12) & ((1u << 20) - 1u)] > s_rt_alias[i].gen ||
++            g_guest_page_gen[(off_ea >> 12) & ((1u << 20) - 1u)] > s_rt_alias[i].gen)
+             return -1;
+         return off_rt_find(s_rt_alias[i].src);
+     }
+@@ -5035,7 +5045,11 @@
+     int slot = off_rt_find(off);
+     if (slot >= 0) {
+         OffRT* r = &s_d3d.off_rt[slot];
+-        if (r->w == w && r->h == h && r->dxgi == (u32)want_fmt) { r->used = 1; return slot; }
++        if (r->w == w && r->h == h && r->dxgi == (u32)want_fmt) {
++            r->used = 1;
++            r->last_used = s_off_rt_tick;
++            return slot;
++        }
+         /* The frame in flight still references this resource -- releasing it here
+          * is "was deleted prior to closing the command list" (D3D12 message 921),
+          * and every draw recorded against it silently lands nowhere while the
+@@ -5047,10 +5061,17 @@
+     } else {
+         for (int i = 0; i < MAX_OFF_RTS; i++)
+             if (!s_d3d.off_rt[i].res) { slot = i; break; }
+-        if (slot < 0) {   /* evict an entry not used this frame */
+-            for (int i = 0; i < MAX_OFF_RTS; i++)
+-                if (!s_d3d.off_rt[i].used) { slot = i; break; }
+-            if (slot < 0) return -1;
++        if (slot < 0) {   /* evict the least-recently-used entry not active this frame */
++            for (int i = 0; i < MAX_OFF_RTS; i++) {
++                if (s_d3d.off_rt[i].used) continue;
++                if (slot < 0 || s_d3d.off_rt[i].last_used < s_d3d.off_rt[slot].last_used)
++                    slot = i;
++            }
++            if (slot < 0) {
++                static int full_warn = 0;
++                if (!full_warn++) fprintf(stderr, "[D3D12] offscreen RT pool full (%d active)\n", MAX_OFF_RTS);
++                return -1;
++            }
+             wait_for_gpu();   /* same hazard as above: the frame may still use it */
+             s_d3d.off_rt[slot].res->lpVtbl->Release(s_d3d.off_rt[slot].res);
+             s_d3d.off_rt[slot].res = NULL;
+@@ -5077,6 +5098,7 @@
+         return -1;
+     r->off = off; r->w = w; r->h = h; r->dxgi = (u32)want_fmt;
+     r->st = D3D12_RESOURCE_STATE_COPY_DEST;
++    r->last_used = s_off_rt_tick;
+     r->used = 1;
+ 
+     /* Populate the new RT from guest memory: titles CPU-initialise their
+@@ -6036,17 +6058,41 @@
+             ? depth_pool_get(dr->zeta_off, dr->zeta_w, dr->zeta_h) : -1;
+     }
+ 
+-    /* Render-to-texture pre-pass: make sure an offscreen RT resource exists for
+-     * every non-display surface targeted this frame (so draws binding it as a
+-     * texture can resolve to it below, whatever the op order). */
++    /* Render-to-texture pre-pass: pin existing offscreen RTs targeted or sampled
++     * this frame before allocating new ones, so sampled-only RTs (like custom
++     * portraits rendered once and reused) are not evicted mid-pass. */
++    ++s_off_rt_tick;
+     for (int _i = 0; _i < MAX_OFF_RTS; _i++) s_d3d.off_rt[_i].used = 0;
+     for (u32 _d = 0; _d < s_d3d.draw_count && _d < MAX_DRAWS; _d++) {
+         D3D12DrawRecord* dr = &s_d3d.draws[_d];
+-        if (dr->is_vp && dr->rt_off)
+-            off_rt_get(dr->rt_off, dr->rt_w, dr->rt_h, dr->rt_fmt);
+-        for (int _m = 0; _m < 3; _m++)
+-            if (dr->is_vp && dr->rt_mrt[_m])
+-                off_rt_get(dr->rt_mrt[_m], dr->rt_w, dr->rt_h, dr->rt_fmt);
++        if (!dr->is_vp) continue;
++        const u32 targets[4] = { dr->rt_off, dr->rt_mrt[0], dr->rt_mrt[1], dr->rt_mrt[2] };
++        for (int _t = 0; _t < 4; _t++) {
++            if (!targets[_t]) continue;
++            const int rt = off_rt_find(targets[_t]);
++            if (rt >= 0) {
++                s_d3d.off_rt[rt].used = 1;
++                s_d3d.off_rt[rt].last_used = s_off_rt_tick;
++            }
++        }
++        if (dr->is_clear) continue;
++        for (int _u = 0; _u < RSX_MAX_TEXTURES; _u++) {
++            if (!dr->tex[_u].set || !(dr->sampled_units & (1u << _u))) continue;
++            int rt = off_rt_find(dr->tex[_u].raw);
++            if (rt < 0) rt = off_rt_alias_find(dr->tex[_u].raw);
++            if (rt >= 0) {
++                s_d3d.off_rt[rt].used = 1;
++                s_d3d.off_rt[rt].last_used = s_off_rt_tick;
++            }
++        }
++    }
++    for (u32 _d = 0; _d < s_d3d.draw_count && _d < MAX_DRAWS; _d++) {
++        D3D12DrawRecord* dr = &s_d3d.draws[_d];
++        if (!dr->is_vp) continue;
++        const u32 targets[4] = { dr->rt_off, dr->rt_mrt[0], dr->rt_mrt[1], dr->rt_mrt[2] };
++        for (int _t = 0; _t < 4; _t++)
++            if (targets[_t])
++                off_rt_get(targets[_t], dr->rt_w, dr->rt_h, dr->rt_fmt);
+     }
+ 
+     int pack_parallel = vp_pack_workers_active();
+diff --git a/libs/video/rsx_d3d12_depth.h b/libs/video/rsx_d3d12_depth.h
+--- a/libs/video/rsx_d3d12_depth.h
++++ b/libs/video/rsx_d3d12_depth.h
+@@ -2,7 +2,7 @@
+ #ifndef RSX_D3D12_DEPTH_H
+ #define RSX_D3D12_DEPTH_H
+ 
+-#define MAX_DEPTH_SURFACES 16
++#define MAX_DEPTH_SURFACES 32
+ typedef struct {
+     ID3D12Resource* resource;
+     u32 offset, width, height;
+diff --git a/libs/video/cellGcmSys.c b/libs/video/cellGcmSys.c
+--- a/libs/video/cellGcmSys.c
++++ b/libs/video/cellGcmSys.c
+@@ -1259,6 +1259,8 @@
+                          srow + (u32)(su >> 20) * 4, 4);
+               }
+           } }
++        { extern void ps3_guest_stamp(uint32_t ea, uint32_t n);
++          ps3_guest_stamp(dst2, out_w * out_h * 4u); }
+         { static int _n = 0; static int cap = -1;
+           if (cap < 0) { const char* e = getenv("NV3089_DBG"); cap = e ? atoi(e) : 0; }
+           if (cap && _n < cap) { _n++;
