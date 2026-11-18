@@ -1,0 +1,38 @@
+{
+    "$schema": "https://recomp.fyi/schema/v1.json",
+    "game": "Bakugan: Battle Brawlers",
+    "system": "PS3",
+    "type": "recomp",
+    "original": {
+        "region": "Europe",
+        "serial": "BLES00758"
+    },
+    "project": "Bakugan: Battle Brawlers Recompiled",
+    "status": "released",
+    "targets": ["Windows"],
+    "toolchain": "Ps3recomp",
+    "approach": "Static PPU/SPU recompilation to native Windows x64 C++, with a PS3 HLE runtime using Direct3D 12 and WASAPI.",
+    "maintainers": [
+        {
+            "name": "Mauryln",
+            "link": "https://github.com/Mauryln"
+        }
+    ],
+    "links": [
+        {
+            "label": "Releases",
+            "url": "https://github.com/Mauryln/Bakugan-Battle-Brawlers-PS3-recomp/releases"
+        },
+        {
+            "label": "Report an issue",
+            "url": "https://github.com/Mauryln/Bakugan-Battle-Brawlers-PS3-recomp/issues"
+        }
+    ],
+    "help": [
+        "Battle performance optimization",
+        "Audio stability and timing",
+        "Controller compatibility testing"
+    ],
+    "tags": ["bakugan", "ps3", "static-recompilation", "d3d12"],
+    "notes": "Playable from start to finish on Windows x64. Features native Direct3D 12 rendering, FSR1 upscaling, keyboard/mouse and gamepad controls, Sixaxis steering, and a bilingual launcher and installer. Based on the European PS3 release BLES00758. Development continues on battle performance, audio stability and compatibility."
+}
