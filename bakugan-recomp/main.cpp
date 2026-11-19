@@ -406,6 +406,7 @@ static DWORD WINAPI frame_clock(LPVOID)
     LARGE_INTEGER _qpc_init;
     QueryPerformanceCounter(&_qpc_init);
     double next_tick = (double)_qpc_init.QuadPart * 1000.0 / s_qpc_freq;
+    double last_boot_present_ms = next_tick - 100.0;
     tick_rate_init();
 
     for (;;) {
@@ -464,8 +465,9 @@ static DWORD WINAPI frame_clock(LPVOID)
                     cellGcm_take_flip_pending();
                     present_timed();
                     last_flip = fc;
-                } else if (fc == 0) {
+                } else if (fc == 0 && now - last_boot_present_ms >= 100.0) {
                     rsx_backend_present();
+                    last_boot_present_ms = now;
                 }
             }
         }
@@ -498,8 +500,9 @@ static DWORD WINAPI frame_clock(LPVOID)
                 cellGcm_take_flip_pending();
                 present_timed();
                 last_flip = fc;
-            } else if (fc == 0) {
+            } else if (fc == 0 && now - last_boot_present_ms >= 100.0) {
                 rsx_backend_present();
+                last_boot_present_ms = now;
             }
         }
         { ULONGLONG t = GetTickCount64();

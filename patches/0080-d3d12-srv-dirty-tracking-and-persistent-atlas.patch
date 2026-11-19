@@ -1,0 +1,397 @@
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -185,6 +185,7 @@
+ typedef struct {
+     ID3D12Resource* res;
+     ID3D12Resource* up;
++    u64 res_id;         /* unique generation id for SRV dirty check */
+     u32 off, w, h, fmt, mips, pitch; /* current resource shape and guest format */
+     u32 csum;           /* sparse checksum of the source bytes last uploaded */
+     u32 gen, p0, pn;    /* guest generation and page range of those bytes */
+@@ -315,7 +316,9 @@
+     ID3D12DescriptorHeap* srv_heap;             /* shader-visible, 1 SRV slot  */
+     ID3D12Resource*       tex_resource;         /* current atlas texture       */
+     ID3D12Resource*       tex_upload;           /* staging buffer for uploads  */
+-    u32                   tex_w, tex_h;         /* dims of tex_resource         */
++    u32                   tex_w, tex_h;         /* requested atlas dims        */
++    u32                   tex_res_w, tex_res_h; /* allocated tex_resource dims */
++    u64                   tex_upload_cap;       /* allocated tex_upload bytes  */
+     int                   tex_ready;            /* 1 once an atlas is uploaded  */
+     u32                   tex_src_offset;       /* guest RSX offset of atlas    */
+     int                   tex_bound;            /* a texture is bound for draws */
+@@ -725,6 +728,7 @@
+  * Feeding it the previous frame costs one frame of latency, which for a water
+  * reflection is not visible. */
+ static ID3D12Resource* s_screen_copy = NULL;
++static u64 s_screen_copy_id = 0;
+ /* Sub-viewport render-to-texture. This title renders its reflection/refraction
+  * pre-pass into a REGION of the same surface (vp 0,208 512x512 and 0,208
+  * 1024x512, cmask=F) and then samples a texture of exactly that size. On
+@@ -739,7 +743,8 @@
+  * binding themselves are confirmed working -- SUBVP_DBG shows the 512x512 and
+  * 256x256 regions captured and handed to fp 0x5DB81/0x5EA81/0x5EF81/0x5E381. */
+ #define SUBVP_SLOTS 4
+-static struct { ID3D12Resource* res; u32 x, y, w, h; } s_subvp[SUBVP_SLOTS];
++static struct { ID3D12Resource* res; u64 res_id; u32 x, y, w, h; } s_subvp[SUBVP_SLOTS];
++static u64 s_next_srv_res_id = 1;
+ 
+ /* Every d3d12_draw_arrays call, recorded or not. A frame whose callback count
+  * far exceeds its recorded op count is losing geometry to an early-out (no
+@@ -770,6 +775,7 @@
+     s_subvp[s_subvp_n].x = x; s_subvp[s_subvp_n].y = y;
+     s_subvp[s_subvp_n].w = w; s_subvp[s_subvp_n].h = h;
+     s_subvp[s_subvp_n].res = NULL;
++    s_subvp[s_subvp_n].res_id = 0;
+     s_subvp_n++;
+ }
+ 
+@@ -794,7 +800,8 @@
+                     s_d3d.device, &hp, D3D12_HEAP_FLAG_NONE, &td,
+                     D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, NULL,
+                     &IID_ID3D12Resource, (void**)&s_subvp[i].res)))
+-                { s_subvp[i].res = NULL; continue; }
++                { s_subvp[i].res = NULL; s_subvp[i].res_id = 0; continue; }
++            s_subvp[i].res_id = ++s_next_srv_res_id;
+         }
+         D3D12_RESOURCE_BARRIER bb[2] = {0};
+         bb[0].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+@@ -4208,8 +4215,9 @@
+                 s_d3d.device, &hu, D3D12_HEAP_FLAG_NONE, &bd,
+                 D3D12_RESOURCE_STATE_GENERIC_READ, NULL,
+                 &IID_ID3D12Resource, (void**)&t->up))) {
+-            t->res->lpVtbl->Release(t->res); t->res = NULL; return -1;
+-        }
++            t->res->lpVtbl->Release(t->res); t->res = NULL; t->res_id = 0; return -1;
++        }
++        t->res_id = ++s_next_srv_res_id;
+         fresh = 1;
+     }
+ 
+@@ -5228,48 +5236,44 @@
+     return rh;
+ }
+ 
+-/* Write a texture SRV (or a null SRV when res == NULL) at an absolute SRV
+- * heap slot. Used to fill per-draw t0-t3 descriptor windows. */
+-/* Last view written to each draw-window SRV slot. The prepass rewrites the same
+- * window every frame and most slots still hold last frame's view, so an
+- * identical CreateShaderResourceView is skipped. The entry holds a reference to
+- * its resource: a pointer match is then the same object, never a recycled
+- * address. */
+-typedef struct { ID3D12Resource* res; DXGI_FORMAT fmt; UINT mapping; int cube; int valid; } SrvShadow;
+-static SrvShadow s_srv_shadow[MAX_DRAWS * RSX_MAX_TEXTURES];
+-
+-/* shortcut: off by default. With it on, cinematics and the 2D HUD stopped
+- * loading in battle; enable with SRV_SHADOW=1 only to test the cause. */
+-static int srv_shadow_on(void)
+-{
+-    static int v = -1;
+-    if (v < 0) v = getenv("SRV_SHADOW") ? 1 : 0;
+-    return v;
+-}
+-
+-/* Fast tracking of draw-window SRV slots that hold non-null resources.
+- * The SRV heap is initialized to valid null descriptors at boot; slots that
+- * already hold a null descriptor skip CreateShaderResourceView entirely. */
+-static uint8_t s_srv_slot_occupied[MAX_DRAWS * RSX_MAX_TEXTURES];
+-
+-static void srv_write_ex(u32 heap_slot, ID3D12Resource* res, DXGI_FORMAT fmt,
+-                         UINT mapping, int cube)
++/* Track the current SRV state for every draw-window slot (DRAW_SRV_BASE..end).
++ * Boot initializes every slot to a valid null SRV; skipping identical writes
++ * (by unique monotonic resource ID, with no AddRef) avoids thousands of
++ * redundant CreateShaderResourceView COM calls per frame without retaining
++ * freed resources or risking pointer aliasing. */
++typedef struct {
++    ID3D12Resource* res;
++    u64             res_id;
++    DXGI_FORMAT     fmt;
++    UINT            mapping;
++    int             cube;
++} SrvSlotState;
++static SrvSlotState s_srv_slot_state[MAX_DRAWS * RSX_MAX_TEXTURES];
++static struct {
++    ID3D12Resource* res;
++    u32 off, w, h, dxgi;
++    u64 res_id;
++} s_off_rt_srv_state[MAX_OFF_RTS];
++
++static void srv_write_tracked(u32 heap_slot, ID3D12Resource* res, u64 res_id,
++                              DXGI_FORMAT fmt, UINT mapping, int cube)
+ {
+     if (heap_slot >= DRAW_SRV_BASE && heap_slot < SRV_HEAP_SIZE) {
+-        u32 idx = heap_slot - DRAW_SRV_BASE;
++        SrvSlotState* st = &s_srv_slot_state[heap_slot - DRAW_SRV_BASE];
+         if (!res) {
+-            if (!s_srv_slot_occupied[idx]) return;
+-            s_srv_slot_occupied[idx] = 0;
++            if (!st->res) return;
++            st->res = NULL;
++            st->res_id = 0;
+         } else {
+-            s_srv_slot_occupied[idx] = 1;
+-        }
+-    }
+-    SrvShadow* shadow = NULL;
+-    if (heap_slot >= DRAW_SRV_BASE && heap_slot < SRV_HEAP_SIZE && srv_shadow_on()) {
+-        shadow = &s_srv_shadow[heap_slot - DRAW_SRV_BASE];
+-        if (shadow->valid && shadow->res == res && shadow->fmt == fmt &&
+-            shadow->mapping == mapping && shadow->cube == cube)
+-            return;
++            if (res_id && st->res == res && st->res_id == res_id &&
++                st->fmt == fmt && st->mapping == mapping && st->cube == cube)
++                return;
++            st->res = res;
++            st->res_id = res_id;
++            st->fmt = fmt;
++            st->mapping = mapping;
++            st->cube = cube;
++        }
+     }
+     D3D12_SHADER_RESOURCE_VIEW_DESC sv = {0};
+     sv.Format = fmt;
+@@ -5285,17 +5289,17 @@
+     D3D12_CPU_DESCRIPTOR_HANDLE h = s_d3d.srv_heap_cpu_base;
+     h.ptr += (u64)heap_slot * s_d3d.srv_inc;
+     s_d3d.device->lpVtbl->CreateShaderResourceView(s_d3d.device, res, &sv, h);
+-    if (shadow) {
+-        if (res) res->lpVtbl->AddRef(res);
+-        if (shadow->valid && shadow->res) shadow->res->lpVtbl->Release(shadow->res);
+-        shadow->res = res; shadow->fmt = fmt; shadow->mapping = mapping;
+-        shadow->cube = cube; shadow->valid = 1;
+-    }
++}
++
++static void srv_write_ex(u32 heap_slot, ID3D12Resource* res, DXGI_FORMAT fmt,
++                         UINT mapping, int cube)
++{
++    srv_write_tracked(heap_slot, res, 0, fmt, mapping, cube);
+ }
+ 
+ static void srv_write(u32 heap_slot, ID3D12Resource* res, DXGI_FORMAT fmt, UINT mapping)
+ {
+-    srv_write_ex(heap_slot, res, fmt, mapping, 0);
++    srv_write_tracked(heap_slot, res, 0, fmt, mapping, 0);
+ }
+ 
+ static void off_rt_transition(int slot, D3D12_RESOURCE_STATES to)
+@@ -5350,7 +5354,9 @@
+                         s_d3d.device, &hp, D3D12_HEAP_FLAG_NONE, &td,
+                         D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, NULL,
+                         &IID_ID3D12Resource, (void**)&s_screen_copy)))
+-                    s_screen_copy = NULL;
++                    { s_screen_copy = NULL; s_screen_copy_id = 0; }
++                else
++                    s_screen_copy_id = ++s_next_srv_res_id;
+             }
+             if (s_screen_copy) {
+                 D3D12_RESOURCE_BARRIER bb[2] = {0};
+@@ -5843,33 +5849,46 @@
+         extern uint8_t* vm_base;
+         u32 w = s_d3d.tex_w, h = s_d3d.tex_h;
+         u32 pitch = (w + 255) & ~255u;   /* D3D12 requires 256-byte row pitch */
+-
+-        if (s_d3d.tex_resource) { s_d3d.tex_resource->lpVtbl->Release(s_d3d.tex_resource); s_d3d.tex_resource = NULL; }
+-        if (s_d3d.tex_upload)   { s_d3d.tex_upload->lpVtbl->Release(s_d3d.tex_upload);     s_d3d.tex_upload = NULL; }
+-
+-        D3D12_HEAP_PROPERTIES hp_def = {0}; hp_def.Type = D3D12_HEAP_TYPE_DEFAULT;
+-        D3D12_RESOURCE_DESC td = {0};
+-        td.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+-        td.Width = w; td.Height = h; td.DepthOrArraySize = 1; td.MipLevels = 1;
+-        td.Format = DXGI_FORMAT_R8_UNORM; td.SampleDesc.Count = 1;
+-        td.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+-        HRESULT thr = s_d3d.device->lpVtbl->CreateCommittedResource(
+-            s_d3d.device, &hp_def, D3D12_HEAP_FLAG_NONE, &td,
+-            D3D12_RESOURCE_STATE_COPY_DEST, NULL,
+-            &IID_ID3D12Resource, (void**)&s_d3d.tex_resource);
+-
+-        D3D12_HEAP_PROPERTIES hp_up = {0}; hp_up.Type = D3D12_HEAP_TYPE_UPLOAD;
+-        D3D12_RESOURCE_DESC ud = {0};
+-        ud.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+-        ud.Width = (u64)pitch * h; ud.Height = 1; ud.DepthOrArraySize = 1; ud.MipLevels = 1;
+-        ud.SampleDesc.Count = 1; ud.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+-        if (SUCCEEDED(thr))
++        u64 need_upload = (u64)pitch * h;
++        HRESULT thr = S_OK;
++        int fresh_tex = 0;
++
++        if (!s_d3d.tex_resource || s_d3d.tex_res_w != w || s_d3d.tex_res_h != h) {
++            if (s_d3d.tex_resource) { s_d3d.tex_resource->lpVtbl->Release(s_d3d.tex_resource); s_d3d.tex_resource = NULL; }
++            s_d3d.tex_res_w = 0; s_d3d.tex_res_h = 0;
++            D3D12_HEAP_PROPERTIES hp_def = {0}; hp_def.Type = D3D12_HEAP_TYPE_DEFAULT;
++            D3D12_RESOURCE_DESC td = {0};
++            td.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
++            td.Width = w; td.Height = h; td.DepthOrArraySize = 1; td.MipLevels = 1;
++            td.Format = DXGI_FORMAT_R8_UNORM; td.SampleDesc.Count = 1;
++            td.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
++            thr = s_d3d.device->lpVtbl->CreateCommittedResource(
++                s_d3d.device, &hp_def, D3D12_HEAP_FLAG_NONE, &td,
++                D3D12_RESOURCE_STATE_COPY_DEST, NULL,
++                &IID_ID3D12Resource, (void**)&s_d3d.tex_resource);
++            if (SUCCEEDED(thr)) {
++                s_d3d.tex_res_w = w;
++                s_d3d.tex_res_h = h;
++                fresh_tex = 1;
++            }
++        }
++
++        if (SUCCEEDED(thr) && (!s_d3d.tex_upload || s_d3d.tex_upload_cap < need_upload)) {
++            if (s_d3d.tex_upload) { s_d3d.tex_upload->lpVtbl->Release(s_d3d.tex_upload); s_d3d.tex_upload = NULL; }
++            s_d3d.tex_upload_cap = 0;
++            D3D12_HEAP_PROPERTIES hp_up = {0}; hp_up.Type = D3D12_HEAP_TYPE_UPLOAD;
++            D3D12_RESOURCE_DESC ud = {0};
++            ud.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
++            ud.Width = need_upload; ud.Height = 1; ud.DepthOrArraySize = 1; ud.MipLevels = 1;
++            ud.SampleDesc.Count = 1; ud.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+             thr = s_d3d.device->lpVtbl->CreateCommittedResource(
+                 s_d3d.device, &hp_up, D3D12_HEAP_FLAG_NONE, &ud,
+                 D3D12_RESOURCE_STATE_GENERIC_READ, NULL,
+                 &IID_ID3D12Resource, (void**)&s_d3d.tex_upload);
+-
+-        if (SUCCEEDED(thr) && vm_base) {
++            if (SUCCEEDED(thr)) s_d3d.tex_upload_cap = need_upload;
++        }
++
++        if (SUCCEEDED(thr) && s_d3d.tex_resource && s_d3d.tex_upload && vm_base) {
+             void* mapped = NULL;
+             D3D12_RANGE nr = {0, 0};
+             if (SUCCEEDED(s_d3d.tex_upload->lpVtbl->Map(s_d3d.tex_upload, 0, &nr, &mapped)) && mapped) {
+@@ -5877,6 +5896,16 @@
+                 for (u32 y = 0; y < h; y++)
+                     memcpy((u8*)mapped + (u64)y * pitch, srcbase + (u64)y * w, w);
+                 s_d3d.tex_upload->lpVtbl->Unmap(s_d3d.tex_upload, 0, NULL);
++
++                if (!fresh_tex) {
++                    D3D12_RESOURCE_BARRIER tb0 = {0};
++                    tb0.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
++                    tb0.Transition.pResource   = s_d3d.tex_resource;
++                    tb0.Transition.StateBefore = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
++                    tb0.Transition.StateAfter  = D3D12_RESOURCE_STATE_COPY_DEST;
++                    tb0.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
++                    s_d3d.cmd_list->lpVtbl->ResourceBarrier(s_d3d.cmd_list, 1, &tb0);
++                }
+ 
+                 D3D12_TEXTURE_COPY_LOCATION dst = {0}, src = {0};
+                 dst.pResource = s_d3d.tex_resource;
+@@ -5900,13 +5929,15 @@
+                 tb.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+                 s_d3d.cmd_list->lpVtbl->ResourceBarrier(s_d3d.cmd_list, 1, &tb);
+ 
+-                D3D12_SHADER_RESOURCE_VIEW_DESC sv = {0};
+-                sv.Format = DXGI_FORMAT_R8_UNORM;
+-                sv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+-                sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+-                sv.Texture2D.MipLevels = 1;
+-                D3D12_CPU_DESCRIPTOR_HANDLE sh = s_d3d.srv_heap_cpu_base;
+-                s_d3d.device->lpVtbl->CreateShaderResourceView(s_d3d.device, s_d3d.tex_resource, &sv, sh);
++                if (fresh_tex) {
++                    D3D12_SHADER_RESOURCE_VIEW_DESC sv = {0};
++                    sv.Format = DXGI_FORMAT_R8_UNORM;
++                    sv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
++                    sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
++                    sv.Texture2D.MipLevels = 1;
++                    D3D12_CPU_DESCRIPTOR_HANDLE sh = s_d3d.srv_heap_cpu_base;
++                    s_d3d.device->lpVtbl->CreateShaderResourceView(s_d3d.device, s_d3d.tex_resource, &sv, sh);
++                }
+ 
+                 s_d3d.tex_ready = 1;
+                 s_d3d.tex_dirty = 0;   /* content now in sync with guest atlas */
+@@ -6128,6 +6159,25 @@
+ 
+     int pack_parallel = vp_pack_workers_active();
+     if (pack_parallel && !vp_upload_compact_frame(1)) { render_frame_abort(1); return; }
++
++    for (int _i = 0; _i < MAX_OFF_RTS; _i++) {
++        const OffRT* r = &s_d3d.off_rt[_i];
++        if (!r->res) {
++            s_off_rt_srv_state[_i].res = NULL;
++            s_off_rt_srv_state[_i].res_id = 0;
++        } else if (s_off_rt_srv_state[_i].res != r->res ||
++                   s_off_rt_srv_state[_i].off != r->off ||
++                   s_off_rt_srv_state[_i].w != r->w ||
++                   s_off_rt_srv_state[_i].h != r->h ||
++                   s_off_rt_srv_state[_i].dxgi != r->dxgi) {
++            s_off_rt_srv_state[_i].res = r->res;
++            s_off_rt_srv_state[_i].off = r->off;
++            s_off_rt_srv_state[_i].w = r->w;
++            s_off_rt_srv_state[_i].h = r->h;
++            s_off_rt_srv_state[_i].dxgi = r->dxgi;
++            s_off_rt_srv_state[_i].res_id = ++s_next_srv_res_id;
++        }
++    }
+ 
+     /* Per-frame VP textures + guest-FP pipelines: for each VP draw, upload the
+      * texture it had bound at submit time into a resource-cache slot (plasma
+@@ -6293,8 +6343,9 @@
+                 }
+                 if (rt >= 0) {
+                     dr->tex_rt[_u] = rt;
+-                    srv_write(wslot, s_d3d.off_rt[rt].res, (DXGI_FORMAT)s_d3d.off_rt[rt].dxgi,
+-                              D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING);
++                    srv_write_tracked(wslot, s_d3d.off_rt[rt].res, s_off_rt_srv_state[rt].res_id,
++                                      (DXGI_FORMAT)s_d3d.off_rt[rt].dxgi,
++                                      D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING, 0);
+                     continue;
+                 }
+             }
+@@ -6315,8 +6366,9 @@
+                         fprintf(stderr, "[SCREENTEX] bound frame copy at unit %d for"
+                                         " fp=0x%X (%ux%u)%c", _u, dr->fp_addr,
+                                 dr->tex[_u].w, dr->tex[_u].h, 10); }
+-                    srv_write(wslot, s_screen_copy, DXGI_FORMAT_R8G8B8A8_UNORM,
+-                              D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING);
++                    srv_write_tracked(wslot, s_screen_copy, s_screen_copy_id,
++                                      DXGI_FORMAT_R8G8B8A8_UNORM,
++                                      D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING, 0);
+                     continue;
+                 }
+             }
+@@ -6336,8 +6388,9 @@
+                         { static int _n = 0; if (getenv("SUBVP_DBG") && PS3_LOG_FIRST(_n, 8))
+                             fprintf(stderr, "[SUBVP] unit %d fp=0x%X <- captured %ux%u%c",
+                                     _u, dr->fp_addr, dr->tex[_u].w, dr->tex[_u].h, 10); }
+-                        srv_write(wslot, s_subvp[hit].res, DXGI_FORMAT_R8G8B8A8_UNORM,
+-                                  D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING);
++                        srv_write_tracked(wslot, s_subvp[hit].res, s_subvp[hit].res_id,
++                                          DXGI_FORMAT_R8G8B8A8_UNORM,
++                                          D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING, 0);
+                         continue;
+                     }
+                 }
+@@ -6366,10 +6419,10 @@
+                             (_bf == 0x87) ? DXGI_FORMAT_BC2_UNORM :
+                             (_bf == 0x88) ? DXGI_FORMAT_BC3_UNORM :
+                                             DXGI_FORMAT_R8_UNORM;
+-                        srv_write_ex(wslot, s_d3d.vp_tex[ts].res, sf,
+-                                  (_bf == 0x81) ? 0x1000
+-                                                : rsx_remap_to_d3d(dr->tex[_u].ctrl1, _bf),
+-                                  _cube);
++                        srv_write_tracked(wslot, s_d3d.vp_tex[ts].res, s_d3d.vp_tex[ts].res_id, sf,
++                                          (_bf == 0x81) ? 0x1000
++                                                        : rsx_remap_to_d3d(dr->tex[_u].ctrl1, _bf),
++                                          _cube);
+                         continue;
+                     }
+                 }
+@@ -9939,11 +9992,20 @@
+     s_depth_resolve_count = 0;
+     s_rt_alias_n = 0;
+     s_d3d.draw_count = 0;
++    memset(s_srv_slot_state, 0, sizeof s_srv_slot_state);
++    memset(s_off_rt_srv_state, 0, sizeof s_off_rt_srv_state);
++    s_screen_copy_id = 0;
+     if (!s_d3d.initialized) return;
+ 
+     wait_for_gpu();
+     vp_release_frame_psos();
+     depth_pool_shutdown();
++
++    if (s_d3d.tex_resource) { s_d3d.tex_resource->lpVtbl->Release(s_d3d.tex_resource); s_d3d.tex_resource = NULL; }
++    if (s_d3d.tex_upload)   { s_d3d.tex_upload->lpVtbl->Release(s_d3d.tex_upload);     s_d3d.tex_upload = NULL; }
++    s_d3d.tex_res_w = s_d3d.tex_res_h = 0;
++    s_d3d.tex_upload_cap = 0;
++    s_d3d.tex_ready = 0;
+ 
+     free(s_d3d.vp_vb_mapped);
+     s_d3d.vp_vb_mapped = NULL;
