@@ -138,6 +138,7 @@ unsigned cellGcm_flip_request_count(void);
 extern "C" int  rsx_d3d12_backend_init(uint32_t w, uint32_t h, const char* title);
 extern "C" void rsx_d3d12_backend_present(void);
 extern "C" void rsx_d3d12_backend_flush_shader_cache(void);
+extern "C" void rsx_d3d12_backend_shutdown(void);
 extern "C" int  rsx_d3d12_backend_pump_messages(void);
 #  define rsx_backend_init    rsx_d3d12_backend_init
 #  define rsx_backend_present rsx_d3d12_backend_present
@@ -366,11 +367,14 @@ static int pump_timed(void)
     s_pump_s += (double)(b.QuadPart - a.QuadPart) / s_qpc_freq2;
 #ifdef _WIN32
     if (r != 0) {
-        fprintf(stderr, "[shutdown] window closed; stopping host audio\n");
+        fprintf(stderr, "[shutdown] window closed; shutting down subsystems\n");
+        extern void bakugan_shutdown_video();
         extern void bakugan_input_shutdown();
+        bakugan_shutdown_video();
         bakugan_input_shutdown();
         cellAudioQuit();
-        rsx_d3d12_backend_flush_shader_cache();
+        rsx_d3d12_backend_shutdown();
+        timeEndPeriod(1);
         fflush(NULL);
         ExitProcess(0);
     }
@@ -847,6 +851,16 @@ int main(int argc, char** argv)
     __cpuid(cpu_features, 1);
     if (!(cpu_features[2] & (1 << 19))) {
         fprintf(stderr, "This build requires SSE4.1. Rebuild with -DPORT_SPU_SSE41=OFF for this CPU.\n");
+#ifdef _WIN32
+        const bool spanish = PRIMARYLANGID(GetUserDefaultUILanguage()) == LANG_SPANISH;
+        MessageBoxW(
+            NULL,
+            spanish
+                ? L"Este procesador no soporta instrucciones SSE4.1, necesarias para ejecutar Bakugan: Battle Brawlers."
+                : L"This CPU does not support SSE4.1 instructions, which are required to run Bakugan: Battle Brawlers.",
+            L"Bakugan: Battle Brawlers",
+            MB_OK | MB_ICONERROR);
+#endif
         return 2;
     }
 #if defined(BAKUGAN_SPU_AVX2)
@@ -855,6 +869,16 @@ int main(int argc, char** argv)
     if (!(cpu_extended[1] & (1 << 5)) || !(cpu_features[2] & (1 << 27)) ||
         !(cpu_features[2] & (1 << 28))) {
         fprintf(stderr, "This build requires AVX2. Rebuild with -DPORT_SPU_AVX2=OFF for this CPU.\n");
+#ifdef _WIN32
+        const bool spanish = PRIMARYLANGID(GetUserDefaultUILanguage()) == LANG_SPANISH;
+        MessageBoxW(
+            NULL,
+            spanish
+                ? L"Este procesador (o el sistema operativo) no soporta AVX2, necesario para ejecutar Bakugan: Battle Brawlers."
+                : L"This CPU (or OS configuration) does not support AVX2, which is required to run Bakugan: Battle Brawlers.",
+            L"Bakugan: Battle Brawlers",
+            MB_OK | MB_ICONERROR);
+#endif
         return 2;
     }
 #endif

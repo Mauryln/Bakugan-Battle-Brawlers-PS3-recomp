@@ -315,3 +315,17 @@ void bakugan_install_video()
     };
     for (const auto& h:hooks) ps3_hle_register_ctx(h.nid,h.name,h.fn);
 }
+
+void bakugan_shutdown_video()
+{
+    std::lock_guard lock(sail_mutex);
+    for (auto& entry : players) {
+        if (!entry.second) continue;
+        entry.second->video.close();
+        entry.second->audio.stop();
+        entry.second->running = false;
+        entry.second->opened = false;
+    }
+    rsx_d3d12_backend_video_frame(nullptr, 0, 0);
+    players.clear();
+}

@@ -777,6 +777,12 @@ int overlay_input(void*, unsigned msg, unsigned long long wp, long long lp)
         move_selection(delta > 0 ? -1 : 1);
         return 1;
     }
+    case WM_SETCURSOR:
+        if (LOWORD(lp) == HTCLIENT) {
+            SetCursor(LoadCursor(nullptr, IDC_ARROW));
+            return 1;
+        }
+        return 0;
     }
     return 0;
 }
@@ -825,7 +831,11 @@ void poll_pad(void)
 
 int overlay_record(void*, void* command_list, void* target, u32, u32 width, u32 height)
 {
+    static int was_active = 0;
     if (!g.ready) return 0;
+    if (g.active && !was_active)
+        SetCursor(LoadCursor(nullptr, IDC_ARROW));
+    was_active = g.active;
     if (!g.active) return 0;
 
     poll_pad();

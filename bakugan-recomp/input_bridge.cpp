@@ -40,8 +40,11 @@ int provider(u32 port, ps3_host_pad_report *out, void *) {
 bool focused(HWND &hwnd) {
     hwnd = GetForegroundWindow();
     DWORD pid = 0;
-    return hwnd && !IsIconic(hwnd) && GetWindowThreadProcessId(hwnd, &pid) &&
-           pid == GetCurrentProcessId();
+    if (!hwnd || IsIconic(hwnd) || !GetWindowThreadProcessId(hwnd, &pid) ||
+        pid != GetCurrentProcessId())
+        return false;
+    char cls[32]{};
+    return GetClassNameA(hwnd, cls, sizeof cls) > 0 && std::strcmp(cls, "ps3recomp_d3d12") == 0;
 }
 
 /* MOUSE_SCRIPT=<path>: autonomous gameplay input. The thread polls for the

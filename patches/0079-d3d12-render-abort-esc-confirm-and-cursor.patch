@@ -1,0 +1,123 @@
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -988,13 +988,15 @@
+ 
+ static LRESULT CALLBACK d3d12_wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
+ {
++    static int s_exit_prompt = 0;
++
+     /* The host overlay (save picker) is modal: it sees the message first and
+      * consumes keys/mouse while it is open, including Esc -- which otherwise
+-     * closes the game in the switch below. */
++     * prompts to close the game in the switch below. */
+     if (s_host_overlay_ready && s_host_overlay.input &&
+         s_host_overlay.input(s_host_overlay.userdata, msg,
+                              (unsigned long long)wp, (long long)lp))
+-        return 0;
++        return (msg == WM_SETCURSOR) ? TRUE : 0;
+ 
+     switch (msg) {
+     case WM_CLOSE:
+@@ -1002,16 +1004,34 @@
+         DestroyWindow(hwnd);
+         return 0;
+     case WM_DESTROY:
++        s_d3d.hwnd = NULL;
+         PostQuitMessage(0);
+         return 0;
++    case WM_SETCURSOR:
++        if (LOWORD(lp) == HTCLIENT && !s_exit_prompt && GetForegroundWindow() == hwnd) {
++            SetCursor(NULL);
++            return TRUE;
++        }
++        break;
+     case WM_KEYDOWN:
+         if (wp == VK_F11) {
+             toggle_fullscreen(hwnd);
+             return 0;
+         }
+-        if (wp == VK_ESCAPE) {
+-            s_d3d.window_closed = 1;
+-            DestroyWindow(hwnd);
++        if (wp == VK_ESCAPE && !(lp & (1LL << 30)) && !s_exit_prompt) {
++            int spanish = PRIMARYLANGID(GetUserDefaultUILanguage()) == LANG_SPANISH;
++            s_exit_prompt = 1;
++            int choice = MessageBoxW(
++                hwnd,
++                spanish ? L"¿Salir de Bakugan: Battle Brawlers?\nSe perderá el progreso no guardado."
++                        : L"Exit Bakugan: Battle Brawlers?\nUnsaved progress will be lost.",
++                L"Bakugan: Battle Brawlers",
++                MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2 | MB_SETFOREGROUND);
++            s_exit_prompt = 0;
++            if (choice == IDYES) {
++                s_d3d.window_closed = 1;
++                DestroyWindow(hwnd);
++            }
+         }
+         return 0;
+     }
+@@ -5724,6 +5744,17 @@
+     return 1;
+ }
+ 
++static void render_frame_abort(int close_cmd_list)
++{
++    if (close_cmd_list && s_d3d.cmd_list)
++        s_d3d.cmd_list->lpVtbl->Close(s_d3d.cmd_list);
++    s_d3d.vb_offset = 0;
++    vp_staging_frame_end();
++    memset(s_fp_units, 0, sizeof s_fp_units);
++    s_d3d.draw_count = 0;
++    s_depth_resolve_count = 0;
++}
++
+ static void render_frame(void)
+ {
+     double _rf0 = perf_on() ? perf_now() : 0.0;
+@@ -5762,7 +5793,7 @@
+     if (perf_on()) s_perf_fence += perf_now() - fence_start;
+     double flush_start = perf_on() ? perf_now() : 0.0;
+     vp_release_frame_psos();
+-    if (!rsx_prepare_samplers()) return;
++    if (!rsx_prepare_samplers()) { render_frame_abort(0); return; }
+     if (perf_on()) s_perf_flush += perf_now() - flush_start;
+     /* Compile the real vertex program once its microcode is captured, and keep
+      * the constant bank uploaded for the VS. */
+@@ -6096,7 +6127,7 @@
+     }
+ 
+     int pack_parallel = vp_pack_workers_active();
+-    if (pack_parallel && !vp_upload_compact_frame(1)) return;
++    if (pack_parallel && !vp_upload_compact_frame(1)) { render_frame_abort(1); return; }
+ 
+     /* Per-frame VP textures + guest-FP pipelines: for each VP draw, upload the
+      * texture it had bound at submit time into a resource-cache slot (plasma
+@@ -6363,7 +6394,7 @@
+ 
+     flush_start = perf_on() ? perf_now() : 0.0;
+     if (pack_parallel) vp_pack_workers_join();
+-    else if (!vp_upload_compact_frame(0)) return;
++    else if (!vp_upload_compact_frame(0)) { render_frame_abort(1); return; }
+     if (perf_on()) s_perf_flush += perf_now() - flush_start;
+ 
+     /* Transition render target to RENDER_TARGET state */
+@@ -9905,6 +9936,9 @@
+     fp_cache_flush();
+     vs_cache_flush();
+     vp_pack_workers_shutdown();
++    s_depth_resolve_count = 0;
++    s_rt_alias_n = 0;
++    s_d3d.draw_count = 0;
+     if (!s_d3d.initialized) return;
+ 
+     wait_for_gpu();
+@@ -9952,7 +9986,7 @@
+     if (s_d3d.cmd_queue) s_d3d.cmd_queue->lpVtbl->Release(s_d3d.cmd_queue);
+     if (s_d3d.device) s_d3d.device->lpVtbl->Release(s_d3d.device);
+ 
+-    if (s_d3d.hwnd) DestroyWindow(s_d3d.hwnd);
++    if (s_d3d.hwnd) { DestroyWindow(s_d3d.hwnd); s_d3d.hwnd = NULL; }
+ 
+     rsx_d3d12_backend_video_frame(NULL, 0, 0);
+     free(s_video_pixels); s_video_pixels = NULL;
