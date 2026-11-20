@@ -215,6 +215,12 @@ if(PORT_SPU_SSE41 AND SPU_SOURCES AND WIN32 AND CMAKE_SIZEOF_VOID_P EQUAL 8
             "/clang:-mavx2" "/clang:-ffp-contract=off")
         set_property(SOURCE main.cpp APPEND PROPERTY COMPILE_DEFINITIONS BAKUGAN_SPU_AVX2=1)
     endif()
+    # MultiStream audio kernel and DSP overlays benefit from hardware SSE float32 without impacting SPURS gameplay tasks.
+    foreach(_spu_src IN LISTS SPU_SOURCES)
+        if(_spu_src MATCHES "(spu_0000_at_0063C400|audio_pcm|audio_mix)[/\\\\]spu_recomp\\.c$")
+            set_property(SOURCE "${_spu_src}" APPEND PROPERTY COMPILE_DEFINITIONS SPU_FAST_FLOAT=1)
+        endif()
+    endforeach()
 endif()
 
 # Keep version information even when there is no locally generated icon.

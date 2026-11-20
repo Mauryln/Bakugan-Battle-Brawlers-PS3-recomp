@@ -1,0 +1,131 @@
+diff --git a/libs/audio/cellAudio.c b/libs/audio/cellAudio.c
+--- a/libs/audio/cellAudio.c
++++ b/libs/audio/cellAudio.c
+@@ -574,6 +574,12 @@
+ {
+     if (s_wasapi_event) WaitForSingleObject(s_wasapi_event, 10);
+     else Sleep(1);
++}
++
++static u32 audio_backend_queued_frames(int room)
++{
++    if (room < 0 || (u32)room >= s_wasapi_buf_frames) return 0;
++    return s_wasapi_buf_frames - (u32)room;
+ }
+ 
+ 
+@@ -815,11 +821,44 @@
+         }
+     }
+ 
+-    /* Clip to [-1.0, 1.0] */
++    /* Sanitize non-finite samples and soft-limit peaks above 0.85 into [-1.0, 1.0]
++     * so overlapping combat SFX bursts do not produce harsh hard-clip crackle. */
+     for (u32 i = 0; i < CELL_AUDIO_BLOCK_SAMPLES * 2; i++) {
+-        if (s_mix_buffer[i] > 1.0f) s_mix_buffer[i] = 1.0f;
+-        if (s_mix_buffer[i] < -1.0f) s_mix_buffer[i] = -1.0f;
+-    }
++        float x = s_mix_buffer[i];
++        if (!isfinite(x)) {
++            s_mix_buffer[i] = 0.0f;
++            continue;
++        }
++        float ax = fabsf(x);
++        if (ax > 0.85f) {
++            float y = 0.85f + 0.15f * tanhf((ax - 0.85f) / 0.15f);
++            if (y > 1.0f) y = 1.0f;
++            s_mix_buffer[i] = (x < 0.0f) ? -y : y;
++        }
++    }
++}
++
++static int audio_port_needs_jitter_cushion(int* out_port)
++{
++    int needs = 0;
++    mutex_lock(&s_audio_mutex);
++    for (int p = 0; p < CELL_AUDIO_PORT_MAX; ++p) {
++        AudioPortSlot* port = &s_ports[p];
++        if (!port->in_use || !port->running || !port->buffer) continue;
++        if (!s_port_ever_had_pcm[p] || s_port_underrun_streak[p] > 0) continue;
++        u32 nch = (u32)port->param.nChannel;
++        u32 nblock = (u32)port->param.nBlock;
++        u32 block_idx = (u32)(port->read_index % nblock);
++        u32 samples = CELL_AUDIO_BLOCK_SAMPLES * nch;
++        const float* src = port->buffer + block_idx * samples;
++        if (!audio_debug_slot_nonzero(src, samples)) {
++            if (out_port) *out_port = p;
++            needs = 1;
++            break;
++        }
++    }
++    mutex_unlock(&s_audio_mutex);
++    return needs;
+ }
+ 
+ /* ---------------------------------------------------------------------------
+@@ -861,6 +900,7 @@
+ {
+     fprintf(stderr, "[PORTTID] audio_mix=%lu\n", (unsigned long)GetCurrentThreadId());
+     (void)arg;
++    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
+     printf("[cellAudio] Mixing thread started\n");
+ 
+     /* Pace to the device clock. The PS3 consumes one block every 5.33 ms;
+@@ -922,6 +962,29 @@
+             }
+         }
+         stall_waits = 0;
++        if (audio_backend_queued_frames(room) >= CELL_AUDIO_BLOCK_SAMPLES * 2u) {
++            int wait_port = -1;
++            for (unsigned w = 0; w <= 2u && s_mix_thread_running; ++w) {
++                if (!audio_port_needs_jitter_cushion(&wait_port)) {
++                    if (w > 0 && audio_debug_enabled()) {
++                        static unsigned long long s_last_rescue_ms = 0;
++                        static u32 s_rescued_win = 0;
++                        ++s_rescued_win;
++                        unsigned long long now_ms = audio_debug_ms();
++                        if (s_rescued_win == 1 || now_ms - s_last_rescue_ms >= 100) {
++                            fprintf(stderr, "[AUDIO_DEBUG] t=%llums blk=%llu port=%d JITTER_RESCUED "
++                                    "count=%u wait_ms=%u queued=%u\n",
++                                    now_ms, (unsigned long long)(s_debug_mix_seq + 1),
++                                    wait_port, s_rescued_win, w, audio_backend_queued_frames(room));
++                            s_last_rescue_ms = now_ms;
++                            s_rescued_win = 0;
++                        }
++                    }
++                    break;
++                }
++                if (w < 2u) Sleep(1);
++            }
++        }
+         blocks++;
+         LARGE_INTEGER mark;
+         if (trace && trace_count < AUDIO_TRACE_CAPACITY) {
+diff --git a/runtime/syscalls/lv2_register.c b/runtime/syscalls/lv2_register.c
+--- a/runtime/syscalls/lv2_register.c
++++ b/runtime/syscalls/lv2_register.c
+@@ -347,6 +347,7 @@
+     int      in_use;
+     uint32_t id;
+     int      state;
++    int32_t  priority;
+     uint32_t num_threads;
+     uint32_t thread_indices[8];  /* table index into s_spu_threads */
+     char     name[32];
+@@ -523,6 +524,7 @@
+     }
+     if (num > 8) num = 8;
+     g->num_threads = num;
++    g->priority    = prio;
+ 
+     int32_t  gtype   = 0;
+     uint32_t name_ea = 0;
+@@ -1057,6 +1059,8 @@
+                 t->host_thread = CreateThread(NULL, spu_host_stack_bytes(),
+                                               spu_exec_thread_proc, t,
+                                               STACK_SIZE_PARAM_IS_A_RESERVATION, NULL);
++                if (t->host_thread && g->priority >= 0 && g->priority <= 100)
++                    SetThreadPriority(t->host_thread, THREAD_PRIORITY_ABOVE_NORMAL);
+ #else
+                 pthread_mutex_init(&t->finish_event.mu, NULL);
+                 pthread_cond_init(&t->finish_event.cv, NULL);

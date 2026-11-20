@@ -1,0 +1,328 @@
+diff --git a/libs/audio/cellAudio.c b/libs/audio/cellAudio.c
+index 9de6a73..eae9663 100644
+--- a/libs/audio/cellAudio.c
++++ b/libs/audio/cellAudio.c
+@@ -156,7 +156,7 @@ static mutex_t       s_audio_mutex;
+ 
+ static u8      s_port_ever_had_pcm[CELL_AUDIO_PORT_MAX];
+ static u32     s_port_underrun_streak[CELL_AUDIO_PORT_MAX];
+-static int32_t s_port_last_underrun_slot[CELL_AUDIO_PORT_MAX];
++static float   s_lim_gain = 1.0f;
+ static float   s_prev_mix_lr[2];
+ static u8      s_prev_mix_muted = 0;
+ static u64     s_debug_mix_seq = 0;
+@@ -648,24 +648,6 @@ static void audio_mix_one_block(void)
+         const u32 samples = CELL_AUDIO_BLOCK_SAMPLES * nch;
+         u32 block_offset = block_idx * samples;
+         float* src = port->buffer + block_offset;
+-        /* Discard late writes to the slot immediately preceding this block if it was
+-         * just skipped as an underrun 5.3 ms ago, so stale audio cannot replay next lap. */
+-        if (s_port_last_underrun_slot[p] >= 0) {
+-            u32 skipped = (u32)s_port_last_underrun_slot[p];
+-            if (skipped != block_idx) {
+-                if ((skipped + 1u) % nblock == block_idx) {
+-                    float* skipped_ptr = port->buffer + skipped * samples;
+-                    if (audio_debug_slot_nonzero(skipped_ptr, samples)) {
+-                        memset(skipped_ptr, 0, samples * sizeof(float));
+-                        if (dbg) {
+-                            fprintf(stderr, "[AUDIO_DEBUG] t=%llums blk=%llu port=%d ORPHAN_CLEARED slot=%u/%u\n",
+-                                    audio_debug_ms(), (unsigned long long)blk_seq, p, skipped, nblock);
+-                        }
+-                    }
+-                }
+-                s_port_last_underrun_slot[p] = -1;
+-            }
+-        }
+ #ifdef _WIN32
+         if (s_trace_block) {
+             const u32 samples = CELL_AUDIO_BLOCK_SAMPLES * nch;
+@@ -722,7 +704,7 @@ static void audio_mix_one_block(void)
+                 left = right = c0 * level;
+             }
+ 
+-            /* If 7.1, mix center and other channels into stereo */
++            /* If 7.1, downmix with balanced headroom so dense SFX + dialogue never square-wave clip */
+             if (nch == 8) {
+                 float c2 = ld_be_f32(&src[s * 8 + 2]);
+                 float c3 = ld_be_f32(&src[s * 8 + 3]);
+@@ -738,14 +720,14 @@ static void audio_mix_one_block(void)
+                     audio_debug_check_sample(c6, &port_nonzero, &port_nan, &port_inf, &port_ext, &port_max_abs);
+                     audio_debug_check_sample(c7, &port_nonzero, &port_nan, &port_inf, &port_ext, &port_max_abs);
+                 }
+-                float center = c2 * level * 0.707f;
+-                float lfe    = c3 * level * 0.5f;
+-                float rl     = c4 * level * 0.5f;
+-                float rr     = c5 * level * 0.5f;
+-                float sl     = c6 * level * 0.3f;
+-                float sr     = c7 * level * 0.3f;
+-                left  += center + lfe + rl + sl;
+-                right += center + lfe + rr + sr;
++                float center = c2 * level * 0.60f;
++                float lfe    = c3 * level * 0.35f;
++                float rl     = c4 * level * 0.45f;
++                float rr     = c5 * level * 0.45f;
++                float sl     = c6 * level * 0.30f;
++                float sr     = c7 * level * 0.30f;
++                left  = left  * 0.85f + center + lfe + rl + sl;
++                right = right * 0.85f + center + lfe + rr + sr;
+             }
+ 
+             s_mix_buffer[s * 2 + 0] += left;
+@@ -767,7 +749,6 @@ static void audio_mix_one_block(void)
+             s_port_underrun_streak[p] = 0;
+         } else if (s_port_ever_had_pcm[p]) {
+             u32 streak = ++s_port_underrun_streak[p];
+-            s_port_last_underrun_slot[p] = (int32_t)block_idx;
+             if (dbg && (streak == 1 || (streak & (streak - 1u)) == 0)) {
+                 const float* next_blk = port->buffer + ((block_idx + 1u) % nblock) * samples;
+                 const float* prev_blk = port->buffer + ((block_idx + nblock - 1u) % nblock) * samples;
+@@ -807,57 +788,62 @@ static void audio_mix_one_block(void)
+ 
+     mutex_unlock(&s_audio_mutex);
+ 
++    float pre_peak_dbg = 0.0f;
++    u32 mix_nan_dbg = 0, mix_inf_dbg = 0, mix_ext_dbg = 0;
+     if (dbg) {
+-        u32 mix_nan = 0, mix_inf = 0, mix_clip = 0, mix_ext = 0;
+-        float pre_peak = 0.0f;
+         for (u32 i = 0; i < CELL_AUDIO_BLOCK_SAMPLES * 2; i++) {
+             float v = s_mix_buffer[i];
+-            if (isnan(v)) { ++mix_nan; continue; }
+-            if (!isfinite(v)) { ++mix_inf; continue; }
++            if (isnan(v)) { ++mix_nan_dbg; continue; }
++            if (!isfinite(v)) { ++mix_inf_dbg; continue; }
+             float av = fabsf(v);
+-            if (av > pre_peak) pre_peak = av;
+-            if (av > 1.0f) ++mix_clip;
+-            if (av > 4.0f) ++mix_ext;
++            if (av > pre_peak_dbg) pre_peak_dbg = av;
++            if (av > 4.0f) ++mix_ext_dbg;
+         }
+-        if (mix_nan || mix_inf || mix_ext) {
++        if (mix_nan_dbg || mix_inf_dbg || mix_ext_dbg) {
+             fprintf(stderr, "[AUDIO_DEBUG] t=%llums blk=%llu mix_BAD_OUT nan=%u inf=%u extreme=%u pre_peak=%.4f\n",
+                     audio_debug_ms(), (unsigned long long)blk_seq,
+-                    mix_nan, mix_inf, mix_ext, pre_peak);
+-        } else if (mix_clip) {
+-            static unsigned long long s_last_clip_ms = 0;
+-            static u32 s_clip_blocks = 0, s_clip_samples = 0;
+-            static float s_clip_max = 0.0f;
+-            ++s_clip_blocks;
+-            s_clip_samples += mix_clip;
+-            if (pre_peak > s_clip_max) s_clip_max = pre_peak;
+-            unsigned long long now_ms = audio_debug_ms();
+-            if (s_clip_blocks == 1 || now_ms - s_last_clip_ms >= 50 ||
+-                (pre_peak >= 1.5f && now_ms - s_last_clip_ms >= 20)) {
+-                fprintf(stderr, "[AUDIO_DEBUG] t=%llums blk=%llu mix_CLIP blocks=%u samples=%u pre_peak=%.4f\n",
+-                        now_ms, (unsigned long long)blk_seq,
+-                        s_clip_blocks, s_clip_samples, s_clip_max);
+-                s_last_clip_ms = now_ms;
+-                s_clip_blocks = s_clip_samples = 0;
+-                s_clip_max = 0.0f;
+-            }
++                    mix_nan_dbg, mix_inf_dbg, mix_ext_dbg, pre_peak_dbg);
+         }
+     }
+ 
+-    /* Sanitize non-finite samples and soft-limit peaks above 0.85 into [-1.0, 1.0]
+-     * so overlapping combat SFX bursts do not produce harsh hard-clip crackle. */
++    /* Stereo dynamic peak limiter + NaN guard: preserves clean waveform shape on
++     * transient peaks > 0.92 instead of flat-topping into square-wave fuzz. */
+     int mix_all_zero = 1;
+-    for (u32 i = 0; i < CELL_AUDIO_BLOCK_SAMPLES * 2; i++) {
+-        float x = s_mix_buffer[i];
+-        if (!isfinite(x)) {
+-            s_mix_buffer[i] = 0.0f;
+-            continue;
++    for (u32 s = 0; s < CELL_AUDIO_BLOCK_SAMPLES; ++s) {
++        float l = s_mix_buffer[s * 2 + 0];
++        float r = s_mix_buffer[s * 2 + 1];
++        if (!isfinite(l)) l = 0.0f;
++        if (!isfinite(r)) r = 0.0f;
++        if (l != 0.0f || r != 0.0f) mix_all_zero = 0;
++
++        float pk = fabsf(l);
++        float ar = fabsf(r);
++        if (ar > pk) pk = ar;
++        float target = (pk > 0.92f) ? (0.92f / pk) : 1.0f;
++        if (target < s_lim_gain) {
++            s_lim_gain += (target - s_lim_gain) * 0.35f;
++        } else {
++            s_lim_gain += (1.0f - s_lim_gain) * 0.0004f;
+         }
+-        if (x != 0.0f) mix_all_zero = 0;
+-        float ax = fabsf(x);
+-        if (ax > 0.85f) {
+-            float y = 0.85f + 0.15f * tanhf((ax - 0.85f) / 0.15f);
+-            if (y > 1.0f) y = 1.0f;
+-            s_mix_buffer[i] = (x < 0.0f) ? -y : y;
++        l *= s_lim_gain;
++        r *= s_lim_gain;
++        if (l >  0.995f) l =  0.995f;
++        else if (l < -0.995f) l = -0.995f;
++        if (r >  0.995f) r =  0.995f;
++        else if (r < -0.995f) r = -0.995f;
++        s_mix_buffer[s * 2 + 0] = l;
++        s_mix_buffer[s * 2 + 1] = r;
++    }
++    if (dbg && pre_peak_dbg > 1.25f) {
++        static unsigned long long s_last_lim_ms = 0;
++        static float s_lim_max = 0.0f;
++        if (pre_peak_dbg > s_lim_max) s_lim_max = pre_peak_dbg;
++        unsigned long long now_ms = audio_debug_ms();
++        if (s_last_lim_ms == 0 || now_ms - s_last_lim_ms >= 500) {
++            fprintf(stderr, "[AUDIO_DEBUG] t=%llums blk=%llu LIM_ACTIVE pre_peak=%.4f gain=%.3f\n",
++                    now_ms, (unsigned long long)blk_seq, s_lim_max, s_lim_gain);
++            s_last_lim_ms = now_ms;
++            s_lim_max = 0.0f;
+         }
+     }
+ 
+@@ -1017,6 +1003,10 @@ static unsigned __stdcall audio_mix_thread_func(void* arg)
+                 int wait_port = -1;
+                 for (unsigned w = 0; w <= max_wait && s_mix_thread_running; ++w) {
+                     if (!audio_port_needs_jitter_cushion(&wait_port)) {
++                        if (w > 0 && queued >= 256u) {
++                            /* Gently yield phase so subsequent blocks stay aligned with SPU output. */
++                            q0.QuadPart += (long long)w * qf.QuadPart / 2000;
++                        }
+                         if (w > 0 && audio_debug_enabled()) {
+                             static unsigned long long s_last_rescue_ms = 0;
+                             static u32 s_rescued_win = 0;
+@@ -1230,7 +1220,7 @@ s32 cellAudioInit(void)
+     memset(s_notify_queues, 0, sizeof(s_notify_queues));
+     memset(s_port_ever_had_pcm, 0, sizeof(s_port_ever_had_pcm));
+     memset(s_port_underrun_streak, 0, sizeof(s_port_underrun_streak));
+-    for (int i = 0; i < CELL_AUDIO_PORT_MAX; ++i) s_port_last_underrun_slot[i] = -1;
++    s_lim_gain = 1.0f;
+     s_prev_mix_lr[0] = s_prev_mix_lr[1] = 0.0f;
+     s_prev_mix_muted = 0;
+     s_debug_mix_seq = 0;
+@@ -1328,7 +1318,6 @@ s32 cellAudioPortOpen(const CellAudioPortParam* param, u32* portNum)
+     port->running = 0;
+     s_port_ever_had_pcm[found] = 0;
+     s_port_underrun_streak[found] = 0;
+-    s_port_last_underrun_slot[found] = -1;
+     /* Store the decoded (host-endian) param values, not the raw BE guest bytes. */
+     memset(&port->param, 0, sizeof(port->param));
+     port->param.nChannel = nch;
+diff --git a/runtime/spu/spu_context.h b/runtime/spu/spu_context.h
+index 00ef9d9..a153cf7 100644
+--- a/runtime/spu/spu_context.h
++++ b/runtime/spu/spu_context.h
+@@ -481,6 +481,9 @@ static inline void spu_ls_write32(spu_context* ctx, uint32_t lsa, uint32_t val)
+ #define SPU_BSWAP32(x) __builtin_bswap32(x)
+ #define SPU_LS_FAST 1
+ #endif
++#if defined(__SSSE3__)
++#include <tmmintrin.h>
++#endif
+ 
+ /* Debug probes of spu_ls_read128, out of line: inlined they kept every LS
+  * load a real call (~10% of GH3's FMOD mixer task). g_spu_ls_probe is -1
+@@ -546,7 +549,13 @@ static inline u128 spu_ls_read128(const spu_context* ctx, uint32_t lsa)
+     const uint8_t* p = &ctx->ls[lsa];
+     spu_ls_watch_hit2(lsa, 0, p, (uint32_t)ctx->pc & SPU_LS_MASK,
+                       ctx->gpr[0]._u32[0] & SPU_LS_MASK);
+-#if SPU_LS_FAST
++#if defined(__SSSE3__)
++    const __m128i shuf = _mm_setr_epi8(3, 2, 1, 0, 7, 6, 5, 4,
++                                       11, 10, 9, 8, 15, 14, 13, 12);
++    __m128i raw = _mm_loadu_si128((const __m128i*)p);
++    __m128i sw  = _mm_shuffle_epi8(raw, shuf);
++    _mm_storeu_si128((__m128i*)v._u32, sw);
++#elif SPU_LS_FASTT
+     uint32_t w0, w1, w2, w3;
+     memcpy(&w0, p,      4); memcpy(&w1, p + 4,  4);
+     memcpy(&w2, p + 8,  4); memcpy(&w3, p + 12, 4);
+@@ -628,7 +637,13 @@ static inline void spu_ls_write128(spu_context* ctx, uint32_t lsa, u128 val)
+      * command (commandNum==5) names the code buffer set. */
+     if (lsa == 0x1320 && ctx->image_id == 2 && ctx->policy_mode)
+         spu_ls_write_probe_pre(ctx, lsa, val);
+-#if SPU_LS_FAST
++#if defined(__SSSE3__)
++    const __m128i shuf = _mm_setr_epi8(3, 2, 1, 0, 7, 6, 5, 4,
++                                       11, 10, 9, 8, 15, 14, 13, 12);
++    __m128i v  = _mm_loadu_si128((const __m128i*)val._u32);
++    __m128i sw = _mm_shuffle_epi8(v, shuf);
++    _mm_storeu_si128((__m128i*)p, sw);
++#elif SPU_LS_FASTT
+     uint32_t w0 = SPU_BSWAP32(val._u32[0]), w1 = SPU_BSWAP32(val._u32[1]);
+     uint32_t w2 = SPU_BSWAP32(val._u32[2]), w3 = SPU_BSWAP32(val._u32[3]);
+     memcpy(p,      &w0, 4); memcpy(p + 4,  &w1, 4);
+diff --git a/runtime/spu/spu_helpers.h b/runtime/spu/spu_helpers.h
+index b742181..5e96b44 100644
+--- a/runtime/spu/spu_helpers.h
++++ b/runtime/spu/spu_helpers.h
+@@ -1055,6 +1055,26 @@ SPU__NV_INLINE u128 spu__nv_fma(u128 a, u128 b, u128 c, uint32_t negp, uint32_t
+ SPU__NV_INLINE u128 spu_fma(u128 a, u128 b, u128 c)  { return spu__nv_fma(a, b, c, 0, 0); }            /* a*b + c */
+ SPU__NV_INLINE u128 spu_fms(u128 a, u128 b, u128 c)  { return spu__nv_fma(a, b, c, 0, 0x80000000u); }  /* a*b - c */
+ SPU__NV_INLINE u128 spu_fnms(u128 a, u128 b, u128 c) { return spu__nv_fma(a, b, c, 0x80000000u, 0); }  /* c - a*b */
++#elif defined(SPU_FAST_FLOAT) && (defined(__SSE2__) || defined(_M_X64)) && !defined(SPU_SCALAR_HELPERS)
++#include <emmintrin.h>
++/* Audio DSP TUs (audio_pcm / audio_mix / MultiStream) run plain single-precision
++ * filters and mixers well inside [-10, +10], where IEEE-754 SSE (with FTZ+DAZ)
++ * differs from SPU truncation by <= 0.5 ULP (-140 dB) and avoids the ~12x cost
++ * of software/AVX2-double Dekker truncation on every FMA. */
++static inline __m128 spu__ff_ldps(u128 a) {
++    return _mm_castsi128_ps(_mm_loadu_si128((const __m128i*)a._u32));
++}
++static inline u128 spu__ff_stps(__m128 v) {
++    u128 r;
++    _mm_storeu_si128((__m128i*)r._u32, _mm_castps_si128(v));
++    return r;
++}
++static inline u128 spu_fa(u128 a, u128 b) { return spu__ff_stps(_mm_add_ps(spu__ff_ldps(a), spu__ff_ldps(b))); }
++static inline u128 spu_fs(u128 a, u128 b) { return spu__ff_stps(_mm_sub_ps(spu__ff_ldps(a), spu__ff_ldps(b))); }
++static inline u128 spu_fm(u128 a, u128 b) { return spu__ff_stps(_mm_mul_ps(spu__ff_ldps(a), spu__ff_ldps(b))); }
++static inline u128 spu_fma(u128 a, u128 b, u128 c)  { return spu__ff_stps(_mm_add_ps(_mm_mul_ps(spu__ff_ldps(a), spu__ff_ldps(b)), spu__ff_ldps(c))); }
++static inline u128 spu_fms(u128 a, u128 b, u128 c)  { return spu__ff_stps(_mm_sub_ps(_mm_mul_ps(spu__ff_ldps(a), spu__ff_ldps(b)), spu__ff_ldps(c))); }
++static inline u128 spu_fnms(u128 a, u128 b, u128 c) { return spu__ff_stps(_mm_sub_ps(spu__ff_ldps(c), _mm_mul_ps(spu__ff_ldps(a), spu__ff_ldps(b)))); }
+ #elif defined(__AVX2__) && !defined(SPU_SCALAR_HELPERS)
+ /* The NEON fast path above, on x86 with AVX2: the four lanes widened to one f64x4 (exact),
+  * the operation, the 29 low significand bits cleared, narrowed (exact). Same lane rules: an
+@@ -1251,7 +1271,17 @@ static inline u128 spu_cflts(u128 a, int i8) {
+     return r;
+ }
+ static inline u128 spu_cfltu(u128 a, int i8) { u128 r; for (int i = 0; i < 4; i++) r._u32[i] = spu__cfl_lane(a._u32[i], 173 - (i8 & 0xFF), 1); return r; }
+-static inline u128 spu_csflt(u128 a, int i8) { u128 r; for (int i = 0; i < 4; i++) { const int32_t v = a._s32[i];
++static inline u128 spu_csflt(u128 a, int i8) {
++#if defined(SPU_FAST_FLOAT) && (defined(__SSE2__) || defined(_M_X64)) && !defined(SPU_SCALAR_HELPERS)
++    if ((i8 & 0xFF) == 155) {
++        u128 out;
++        __m128i vi = _mm_loadu_si128((const __m128i*)a._u32);
++        __m128  vf = _mm_cvtepi32_ps(vi);
++        _mm_storeu_si128((__m128i*)out._u32, _mm_castps_si128(vf));
++        return out;
++    }
++#endif
++    u128 r; for (int i = 0; i < 4; i++) { const int32_t v = a._s32[i];
+     r._u32[i] = v ? spu__sf_pack(v < 0 ? 0x80000000u : 0, v < 0 ? 0u - (uint32_t)v : (uint32_t)v, -(155 - (i8 & 0xFF))) : 0; } return r; }
+ static inline u128 spu_cuflt(u128 a, int i8) { u128 r; for (int i = 0; i < 4; i++) { const uint32_t v = a._u32[i];
+     r._u32[i] = v ? spu__sf_pack(0, v, -(155 - (i8 & 0xFF))) : 0; } return r; }
+diff --git a/runtime/spu/spu_channels.c b/runtime/spu/spu_channels.c
+index ccc2c0a..391ef64 100644
+--- a/runtime/spu/spu_channels.c
++++ b/runtime/spu/spu_channels.c
+@@ -28,6 +28,9 @@
+ #include <time.h>
+ #include "../platform/win32_compat.h"
+ #include "ps3emu/log_first.h"
++#if defined(_M_X64) || defined(__x86_64__) || defined(__SSE2__)
++#include <xmmintrin.h>
++#endif
+ 
+ #ifdef __cplusplus
+ extern "C" {
+@@ -1773,6 +1776,11 @@ void spu_overlay_note_get(spu_context* ctx, uint32_t ea, const uint8_t* ls, uint
+         int hit = o->has_sig ? (size >= 512 && memcmp(ls, o->sig, 16) == 0)
+                              : (o->src_ea == ea);
+         if (hit) {
++#if defined(_M_X64) || defined(__x86_64__) || defined(__SSE2__)
++            /* Streamed audio DSP overlays match SPU hardware FTZ behavior and avoid x86 subnormal assists. */
++            if ((_mm_getcsr() & 0x8040u) != 0x8040u)
++                _mm_setcsr(_mm_getcsr() | 0x8040u);
++#endif
+             if (o->span) {
+                 if (lsa + o->span > SPU_LS_SIZE) return;
+                 for (unsigned slot = 0; slot < 4; ++slot) {

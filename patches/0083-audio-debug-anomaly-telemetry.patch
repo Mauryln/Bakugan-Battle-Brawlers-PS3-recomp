@@ -1,0 +1,315 @@
+diff --git a/libs/audio/cellAudio.c b/libs/audio/cellAudio.c
+--- a/libs/audio/cellAudio.c
++++ b/libs/audio/cellAudio.c
+@@ -154,6 +154,61 @@
+ #endif
+ static mutex_t       s_audio_mutex;
+ 
++static u8  s_port_ever_had_pcm[CELL_AUDIO_PORT_MAX];
++static u32 s_port_underrun_streak[CELL_AUDIO_PORT_MAX];
++static u64 s_debug_mix_seq = 0;
++
++static int audio_debug_enabled(void)
++{
++    static int s_dbg = -1;
++    if (s_dbg < 0) {
++        const char* e = getenv("AUDIO_DEBUG");
++        s_dbg = (e && e[0] && strcmp(e, "0") != 0) ? 1 : 0;
++    }
++    return s_dbg;
++}
++
++static unsigned long long audio_debug_ms(void)
++{
++#ifdef _WIN32
++    static ULONGLONG s_t0 = 0;
++    ULONGLONG now = GetTickCount64();
++    if (!s_t0) s_t0 = now;
++    return (unsigned long long)(now - s_t0);
++#else
++    return 0ull;
++#endif
++}
++
++static int audio_debug_slot_nonzero(const float* src, u32 samples)
++{
++    for (u32 i = 0; i < samples; ++i) {
++        uint32_t bits;
++        memcpy(&bits, src + i, sizeof(bits));
++        if (bits) return 1;
++    }
++    return 0;
++}
++
++static inline void audio_debug_check_sample(float v, int* nonzero, u32* nan_c,
++                                            u32* inf_c, u32* ext_c, float* max_abs)
++{
++    if (isnan(v)) {
++        ++(*nan_c);
++        *nonzero = 1;
++        return;
++    }
++    if (!isfinite(v)) {
++        ++(*inf_c);
++        *nonzero = 1;
++        return;
++    }
++    float av = fabsf(v);
++    if (av > 0.0f) *nonzero = 1;
++    if (av > *max_abs) *max_abs = av;
++    if (av > 4.0f) ++(*ext_c);
++}
++
+ /* Output mix buffer (stereo, one block worth) */
+ static float s_mix_buffer[CELL_AUDIO_BLOCK_SAMPLES * 2];
+ 
+@@ -444,7 +499,14 @@
+     UINT32 available = (SUCCEEDED(padding_result) && padding < s_wasapi_buf_frames)
+                      ? (s_wasapi_buf_frames - padding) : 0;
+     if (num_samples > available) {
+-        g_audio_dropped += num_samples - available;
++        u32 dropped = num_samples - available;
++        g_audio_dropped += dropped;
++        if (audio_debug_enabled()) {
++            fprintf(stderr, "[AUDIO_DEBUG] t=%llums blk=%llu WASAPI_DROP dropped=%u/%u avail=%u pad=%u buf=%u hr_pad=0x%08lX\n",
++                    audio_debug_ms(), (unsigned long long)s_debug_mix_seq,
++                    dropped, num_samples, (unsigned)available, (unsigned)padding,
++                    (unsigned)s_wasapi_buf_frames, (unsigned long)padding_result);
++        }
+         num_samples = available;
+     }
+     if (num_samples == 0) return;
+@@ -461,6 +523,15 @@
+         memcpy(buf, stereo_samples, num_samples * 2 * sizeof(float));
+         hr = s_wasapi_render->lpVtbl->ReleaseBuffer(s_wasapi_render, num_samples,
+                                                    mute ? AUDCLNT_BUFFERFLAGS_SILENT : 0);
++        if (FAILED(hr) && audio_debug_enabled()) {
++            fprintf(stderr, "[AUDIO_DEBUG] t=%llums blk=%llu WASAPI_RELEASE_ERR hr=0x%08lX frames=%u\n",
++                    audio_debug_ms(), (unsigned long long)s_debug_mix_seq,
++                    (unsigned long)hr, num_samples);
++        }
++    } else if (audio_debug_enabled()) {
++        fprintf(stderr, "[AUDIO_DEBUG] t=%llums blk=%llu WASAPI_GETBUF_ERR hr=0x%08lX buf=%d req=%u\n",
++                audio_debug_ms(), (unsigned long long)s_debug_mix_seq,
++                (unsigned long)hr, buf != NULL, num_samples);
+     }
+     if (s_trace_block) {
+         s_trace_block->submit_result = FAILED(padding_result) ? padding_result : hr;
+@@ -529,6 +600,8 @@
+ /* Mix one block from all active ports into s_mix_buffer (stereo float) */
+ static void audio_mix_one_block(void)
+ {
++    const int dbg = audio_debug_enabled();
++    u64 blk_seq = ++s_debug_mix_seq;
+     memset(s_mix_buffer, 0, sizeof(s_mix_buffer));
+ 
+     mutex_lock(&s_audio_mutex);
+@@ -595,30 +668,100 @@
+                         p, (unsigned long long)port->read_index, block_idx, map);
+             } } }
+ 
++        int port_nonzero = 0;
++        u32 port_nan = 0, port_inf = 0, port_ext = 0;
++        float port_max_abs = 0.0f;
++
+         for (u32 s = 0; s < CELL_AUDIO_BLOCK_SAMPLES; s++) {
+             float left, right;
+             if (nch >= 2) {
+-                left  = ld_be_f32(&src[s * nch + 0]) * level;
+-                right = ld_be_f32(&src[s * nch + 1]) * level;
++                float c0 = ld_be_f32(&src[s * nch + 0]);
++                float c1 = ld_be_f32(&src[s * nch + 1]);
++                if (dbg) {
++                    audio_debug_check_sample(c0, &port_nonzero, &port_nan, &port_inf, &port_ext, &port_max_abs);
++                    audio_debug_check_sample(c1, &port_nonzero, &port_nan, &port_inf, &port_ext, &port_max_abs);
++                }
++                left  = c0 * level;
++                right = c1 * level;
+             } else {
+                 /* Mono: duplicate to both channels */
+-                left = right = ld_be_f32(&src[s]) * level;
++                float c0 = ld_be_f32(&src[s]);
++                if (dbg) {
++                    audio_debug_check_sample(c0, &port_nonzero, &port_nan, &port_inf, &port_ext, &port_max_abs);
++                }
++                left = right = c0 * level;
+             }
+ 
+             /* If 7.1, mix center and other channels into stereo */
+             if (nch == 8) {
+-                float center = ld_be_f32(&src[s * 8 + 2]) * level * 0.707f;
+-                float lfe    = ld_be_f32(&src[s * 8 + 3]) * level * 0.5f;
+-                float rl     = ld_be_f32(&src[s * 8 + 4]) * level * 0.5f;
+-                float rr     = ld_be_f32(&src[s * 8 + 5]) * level * 0.5f;
+-                float sl     = ld_be_f32(&src[s * 8 + 6]) * level * 0.3f;
+-                float sr     = ld_be_f32(&src[s * 8 + 7]) * level * 0.3f;
++                float c2 = ld_be_f32(&src[s * 8 + 2]);
++                float c3 = ld_be_f32(&src[s * 8 + 3]);
++                float c4 = ld_be_f32(&src[s * 8 + 4]);
++                float c5 = ld_be_f32(&src[s * 8 + 5]);
++                float c6 = ld_be_f32(&src[s * 8 + 6]);
++                float c7 = ld_be_f32(&src[s * 8 + 7]);
++                if (dbg) {
++                    audio_debug_check_sample(c2, &port_nonzero, &port_nan, &port_inf, &port_ext, &port_max_abs);
++                    audio_debug_check_sample(c3, &port_nonzero, &port_nan, &port_inf, &port_ext, &port_max_abs);
++                    audio_debug_check_sample(c4, &port_nonzero, &port_nan, &port_inf, &port_ext, &port_max_abs);
++                    audio_debug_check_sample(c5, &port_nonzero, &port_nan, &port_inf, &port_ext, &port_max_abs);
++                    audio_debug_check_sample(c6, &port_nonzero, &port_nan, &port_inf, &port_ext, &port_max_abs);
++                    audio_debug_check_sample(c7, &port_nonzero, &port_nan, &port_inf, &port_ext, &port_max_abs);
++                }
++                float center = c2 * level * 0.707f;
++                float lfe    = c3 * level * 0.5f;
++                float rl     = c4 * level * 0.5f;
++                float rr     = c5 * level * 0.5f;
++                float sl     = c6 * level * 0.3f;
++                float sr     = c7 * level * 0.3f;
+                 left  += center + lfe + rl + sl;
+                 right += center + lfe + rr + sr;
+             }
+ 
+             s_mix_buffer[s * 2 + 0] += left;
+             s_mix_buffer[s * 2 + 1] += right;
++        }
++
++        if (dbg) {
++            const u32 samples = CELL_AUDIO_BLOCK_SAMPLES * nch;
++            if (!port_nonzero && audio_debug_slot_nonzero(src, samples))
++                port_nonzero = 1;
++            if (port_nonzero) {
++                if (s_port_underrun_streak[p] > 0) {
++                    fprintf(stderr, "[AUDIO_DEBUG] t=%llums blk=%llu port=%d ring_underrun RECOVERED "
++                            "after %u zero blocks (%.1fms) slot=%u/%u ridx=%llu\n",
++                            audio_debug_ms(), (unsigned long long)blk_seq, p,
++                            s_port_underrun_streak[p],
++                            s_port_underrun_streak[p] * (CELL_AUDIO_BLOCK_SAMPLES * 1000.0 / CELL_AUDIO_SAMPLE_RATE),
++                            block_idx, nblock, (unsigned long long)port->read_index);
++                }
++                s_port_ever_had_pcm[p] = 1;
++                s_port_underrun_streak[p] = 0;
++            } else if (s_port_ever_had_pcm[p]) {
++                u32 streak = ++s_port_underrun_streak[p];
++                if (streak == 1 || (streak & (streak - 1u)) == 0) {
++                    const float* next_blk = port->buffer + ((block_idx + 1u) % nblock) * samples;
++                    const float* prev_blk = port->buffer + ((block_idx + nblock - 1u) % nblock) * samples;
++                    int next_ready = audio_debug_slot_nonzero(next_blk, samples);
++                    int prev_late  = audio_debug_slot_nonzero(prev_blk, samples);
++                    fprintf(stderr, "[AUDIO_DEBUG] t=%llums blk=%llu port=%d ring_UNDERRUN "
++                            "streak=%u slot=%u/%u ridx=%llu next_ready=%d prev_late=%d\n",
++                            audio_debug_ms(), (unsigned long long)blk_seq, p, streak,
++                            block_idx, nblock, (unsigned long long)port->read_index,
++                            next_ready, prev_late);
++                }
++            }
++            if (port_nan || port_inf || port_ext) {
++                static unsigned long long s_last_bad_ms = 0;
++                unsigned long long now_ms = audio_debug_ms();
++                if (port_nan || port_inf || now_ms - s_last_bad_ms >= 50) {
++                    s_last_bad_ms = now_ms;
++                    fprintf(stderr, "[AUDIO_DEBUG] t=%llums blk=%llu port=%d slot=%u/%u guest_BAD_PCM "
++                            "nan=%u inf=%u extreme=%u max=%.4f\n",
++                            now_ms, (unsigned long long)blk_seq, p, block_idx, nblock,
++                            port_nan, port_inf, port_ext, port_max_abs);
++                }
++            }
+         }
+ 
+         /* Firmware clears a ring-buffer block after consuming it. Besides
+@@ -635,6 +778,42 @@
+     }
+ 
+     mutex_unlock(&s_audio_mutex);
++
++    if (dbg) {
++        u32 mix_nan = 0, mix_inf = 0, mix_clip = 0, mix_ext = 0;
++        float pre_peak = 0.0f;
++        for (u32 i = 0; i < CELL_AUDIO_BLOCK_SAMPLES * 2; i++) {
++            float v = s_mix_buffer[i];
++            if (isnan(v)) { ++mix_nan; continue; }
++            if (!isfinite(v)) { ++mix_inf; continue; }
++            float av = fabsf(v);
++            if (av > pre_peak) pre_peak = av;
++            if (av > 1.0f) ++mix_clip;
++            if (av > 4.0f) ++mix_ext;
++        }
++        if (mix_nan || mix_inf || mix_ext) {
++            fprintf(stderr, "[AUDIO_DEBUG] t=%llums blk=%llu mix_BAD_OUT nan=%u inf=%u extreme=%u pre_peak=%.4f\n",
++                    audio_debug_ms(), (unsigned long long)blk_seq,
++                    mix_nan, mix_inf, mix_ext, pre_peak);
++        } else if (mix_clip) {
++            static unsigned long long s_last_clip_ms = 0;
++            static u32 s_clip_blocks = 0, s_clip_samples = 0;
++            static float s_clip_max = 0.0f;
++            ++s_clip_blocks;
++            s_clip_samples += mix_clip;
++            if (pre_peak > s_clip_max) s_clip_max = pre_peak;
++            unsigned long long now_ms = audio_debug_ms();
++            if (s_clip_blocks == 1 || now_ms - s_last_clip_ms >= 50 ||
++                (pre_peak >= 1.5f && now_ms - s_last_clip_ms >= 20)) {
++                fprintf(stderr, "[AUDIO_DEBUG] t=%llums blk=%llu mix_CLIP blocks=%u samples=%u pre_peak=%.4f\n",
++                        now_ms, (unsigned long long)blk_seq,
++                        s_clip_blocks, s_clip_samples, s_clip_max);
++                s_last_clip_ms = now_ms;
++                s_clip_blocks = s_clip_samples = 0;
++                s_clip_max = 0.0f;
++            }
++        }
++    }
+ 
+     /* Clip to [-1.0, 1.0] */
+     for (u32 i = 0; i < CELL_AUDIO_BLOCK_SAMPLES * 2; i++) {
+@@ -709,11 +888,13 @@
+          * the producer awakened by each audio event and clears unwritten slots.
+          * Keep the PS3 heartbeat steady even with a working host device. */
+         long long due;
++        double lag_ms = 0.0;
+         {
+             LARGE_INTEGER now; QueryPerformanceCounter(&now);
+             due = q0.QuadPart +
+                 (long long)(blocks * CELL_AUDIO_BLOCK_SAMPLES * qf.QuadPart / CELL_AUDIO_SAMPLE_RATE);
+             if (now.QuadPart < due) { Sleep(1); continue; }
++            lag_ms = (now.QuadPart - due) * 1000.0 / (double)qf.QuadPart;
+             /* More than 50 ms behind (device just went away, a debugger
+              * stop): drop the backlog instead of mixing it in a burst. */
+             if (now.QuadPart - due > qf.QuadPart / 20)
+@@ -726,6 +907,19 @@
+             ++stall_waits;
+             audio_backend_wait();
+             continue;
++        }
++        if (stall_waits > 0 && audio_debug_enabled()) {
++            if (room >= 0 && room < CELL_AUDIO_BLOCK_SAMPLES) {
++                fprintf(stderr, "[AUDIO_DEBUG] t=%llums blk=%llu STALL_WAITS_EXHAUSTED "
++                        "waits=%u room=%d lag=%.2fms -> forcing mix/read_index advance\n",
++                        audio_debug_ms(), (unsigned long long)(s_debug_mix_seq + 1),
++                        stall_waits, room, lag_ms);
++            } else if (stall_waits >= 2u || lag_ms > 10.0) {
++                fprintf(stderr, "[AUDIO_DEBUG] t=%llums blk=%llu STALL_WAIT_RECOVERED "
++                        "waits=%u room=%d lag=%.2fms\n",
++                        audio_debug_ms(), (unsigned long long)(s_debug_mix_seq + 1),
++                        stall_waits, room, lag_ms);
++            }
+         }
+         stall_waits = 0;
+         blocks++;
+@@ -919,6 +1113,12 @@
+ 
+     memset(s_ports, 0, sizeof(s_ports));
+     memset(s_notify_queues, 0, sizeof(s_notify_queues));
++    memset(s_port_ever_had_pcm, 0, sizeof(s_port_ever_had_pcm));
++    memset(s_port_underrun_streak, 0, sizeof(s_port_underrun_streak));
++    s_debug_mix_seq = 0;
++    if (audio_debug_enabled()) {
++        fprintf(stderr, "[AUDIO_DEBUG] enabled (underruns, mix clipping/NaN, stall_waits drops)\n");
++    }
+     mutex_init(&s_audio_mutex);
+ 
+     if (audio_backend_init() < 0) {
+@@ -1008,6 +1208,8 @@
+     AudioPortSlot* port = &s_ports[found];
+     port->in_use  = 1;
+     port->running = 0;
++    s_port_ever_had_pcm[found] = 0;
++    s_port_underrun_streak[found] = 0;
+     /* Store the decoded (host-endian) param values, not the raw BE guest bytes. */
+     memset(&port->param, 0, sizeof(port->param));
+     port->param.nChannel = nch;
