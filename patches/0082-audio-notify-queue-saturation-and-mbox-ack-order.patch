@@ -1,0 +1,299 @@
+diff --git a/libs/audio/cellAudio.c b/libs/audio/cellAudio.c
+--- a/libs/audio/cellAudio.c
++++ b/libs/audio/cellAudio.c
+@@ -441,7 +441,8 @@
+ 
+     if (s_trace_block)
+         s_trace_block->padding = SUCCEEDED(padding_result) ? (int32_t)padding : -1;
+-    UINT32 available = s_wasapi_buf_frames - padding;
++    UINT32 available = (SUCCEEDED(padding_result) && padding < s_wasapi_buf_frames)
++                     ? (s_wasapi_buf_frames - padding) : 0;
+     if (num_samples > available) {
+         g_audio_dropped += num_samples - available;
+         num_samples = available;
+@@ -494,7 +495,7 @@
+             fprintf(stderr, "[cellAudio] GetCurrentPadding failed 0x%08lX -- clock pacing%c", (unsigned long)hr, 10);
+         return -1;
+     }
+-    return (int)(s_wasapi_buf_frames - padding);
++    return padding < s_wasapi_buf_frames ? (int)(s_wasapi_buf_frames - padding) : 0;
+ }
+ 
+ /* Block until the device has consumed some of its buffer. */
+@@ -700,6 +701,7 @@
+         ReleaseSRWLockExclusive(&s_trace_event_lock);
+     }
+     unsigned long long blocks = 0;
++    unsigned stall_waits = 0;
+     while (s_mix_thread_running) {
+         const int room = audio_backend_room();
+         /* WASAPI releases space in device-period batches. Spare capacity is
+@@ -718,7 +720,14 @@
+                 q0.QuadPart = now.QuadPart -
+                     (long long)(blocks * CELL_AUDIO_BLOCK_SAMPLES * qf.QuadPart / CELL_AUDIO_SAMPLE_RATE);
+         }
+-        if (room >= 0 && room < CELL_AUDIO_BLOCK_SAMPLES) { audio_backend_wait(); continue; }
++        /* Bound backpressure waits (~40 ms max) so a stalled host endpoint never
++         * freezes guest read_index progression or notify queue heartbeats. */
++        if (room >= 0 && room < CELL_AUDIO_BLOCK_SAMPLES && stall_waits < 4u) {
++            ++stall_waits;
++            audio_backend_wait();
++            continue;
++        }
++        stall_waits = 0;
+         blocks++;
+         LARGE_INTEGER mark;
+         if (trace && trace_count < AUDIO_TRACE_CAPACITY) {
+@@ -1074,13 +1083,18 @@
+     if (!s_audio_initialized)
+         return CELL_AUDIO_ERROR_NOT_INIT;
+ 
+-    if (portNum >= CELL_AUDIO_PORT_MAX || !s_ports[portNum].in_use)
++    if (portNum >= CELL_AUDIO_PORT_MAX)
+         return CELL_AUDIO_ERROR_PORT_NOT_OPEN;
+ 
+-    if (s_ports[portNum].running)
++    mutex_lock(&s_audio_mutex);
++    if (!s_ports[portNum].in_use) {
++        mutex_unlock(&s_audio_mutex);
++        return CELL_AUDIO_ERROR_PORT_NOT_OPEN;
++    }
++    if (s_ports[portNum].running) {
++        mutex_unlock(&s_audio_mutex);
+         return CELL_AUDIO_ERROR_PORT_ALREADY_RUN;
+-
+-    mutex_lock(&s_audio_mutex);
++    }
+     s_ports[portNum].running = 1;
+     mutex_unlock(&s_audio_mutex);
+ 
+@@ -1094,13 +1108,18 @@
+     if (!s_audio_initialized)
+         return CELL_AUDIO_ERROR_NOT_INIT;
+ 
+-    if (portNum >= CELL_AUDIO_PORT_MAX || !s_ports[portNum].in_use)
++    if (portNum >= CELL_AUDIO_PORT_MAX)
+         return CELL_AUDIO_ERROR_PORT_NOT_OPEN;
+ 
+-    if (!s_ports[portNum].running)
++    mutex_lock(&s_audio_mutex);
++    if (!s_ports[portNum].in_use) {
++        mutex_unlock(&s_audio_mutex);
++        return CELL_AUDIO_ERROR_PORT_NOT_OPEN;
++    }
++    if (!s_ports[portNum].running) {
++        mutex_unlock(&s_audio_mutex);
+         return CELL_AUDIO_ERROR_PORT_NOT_RUN;
+-
+-    mutex_lock(&s_audio_mutex);
++    }
+     s_ports[portNum].running = 0;
+     mutex_unlock(&s_audio_mutex);
+ 
+@@ -1189,18 +1208,32 @@
+     static uint64_t s_next_key = 0x8000000000000001ull;
+     uint64_t k = s_next_key++;
+ 
+-    uint32_t qid = sys_event_queue_create_direct(k, 8);
+-    if (!qid)
+-        return CELL_AUDIO_ERROR_EVENT_QUEUE;
+-
+     mutex_lock(&s_audio_mutex);
+     int slot = -1;
+     for (int i = 0; i < CELL_AUDIO_MAX_NOTIFY_EVENT_QUEUES; i++) {
+         if (!s_notify_queues[i].in_use) { slot = i; break; }
+     }
+-    if (slot < 0) { mutex_unlock(&s_audio_mutex); return CELL_AUDIO_ERROR_PARAM; }
++    if (slot < 0) {
++        mutex_unlock(&s_audio_mutex);
++        return CELL_AUDIO_ERROR_PARAM;
++    }
++    /* Reserve the slot before allocating the LV2 queue so full notify tables
++     * never leak an orphan event queue. Key 0 stays unroutable until ready. */
+     s_notify_queues[slot].in_use = 1;
+-    s_notify_queues[slot].key    = k;
++    s_notify_queues[slot].key    = 0;
++    mutex_unlock(&s_audio_mutex);
++
++    uint32_t qid = sys_event_queue_create_direct(k, 8);
++    if (!qid) {
++        mutex_lock(&s_audio_mutex);
++        s_notify_queues[slot].in_use = 0;
++        s_notify_queues[slot].key    = 0;
++        mutex_unlock(&s_audio_mutex);
++        return CELL_AUDIO_ERROR_EVENT_QUEUE;
++    }
++
++    mutex_lock(&s_audio_mutex);
++    s_notify_queues[slot].key = k;
+     mutex_unlock(&s_audio_mutex);
+ 
+     vm_write32(id_ea, qid);
+@@ -1264,10 +1297,7 @@
+     if (!s_audio_initialized)
+         return CELL_AUDIO_ERROR_NOT_INIT;
+ 
+-    if (portNum >= CELL_AUDIO_PORT_MAX || !s_ports[portNum].in_use)
+-        return CELL_AUDIO_ERROR_PORT_NOT_OPEN;
+-
+-    if (!config)
++    if (portNum >= CELL_AUDIO_PORT_MAX || !config)
+         return CELL_AUDIO_ERROR_PARAM;
+ 
+     /* `config` is a GUEST address; write the BE struct field-by-field at its
+@@ -1278,6 +1308,10 @@
+ 
+     mutex_lock(&s_audio_mutex);
+     AudioPortSlot* port = &s_ports[portNum];
++    if (!port->in_use) {
++        mutex_unlock(&s_audio_mutex);
++        return CELL_AUDIO_ERROR_PORT_NOT_OPEN;
++    }
+ 
+     /* CellAudioPortConfig (cell/audio.h). sys_addr_t is uintptr_t, which on the
+      * 32-bit PPU ABI is FOUR bytes -- not eight. Writing the two sys_addr_t
+@@ -1314,13 +1348,13 @@
+     if (portNum >= CELL_AUDIO_PORT_MAX || !status)
+         return CELL_AUDIO_ERROR_PARAM;
+ 
+-    if (!s_ports[portNum].in_use) {
+-        vm_write32((u32)(uintptr_t)status, CELL_AUDIO_STATUS_CLOSE);
+-    } else if (s_ports[portNum].running) {
+-        vm_write32((u32)(uintptr_t)status, CELL_AUDIO_STATUS_RUN);
+-    } else {
+-        vm_write32((u32)(uintptr_t)status, CELL_AUDIO_STATUS_READY);
+-    }
++    mutex_lock(&s_audio_mutex);
++    u32 val = CELL_AUDIO_STATUS_CLOSE;
++    if (s_ports[portNum].in_use) {
++        val = s_ports[portNum].running ? CELL_AUDIO_STATUS_RUN : CELL_AUDIO_STATUS_READY;
++    }
++    mutex_unlock(&s_audio_mutex);
++    vm_write32((u32)(uintptr_t)status, val);
+ 
+     return CELL_OK;
+ }
+diff --git a/runtime/spu/spu_context.h b/runtime/spu/spu_context.h
+--- a/runtime/spu/spu_context.h
++++ b/runtime/spu/spu_context.h
+@@ -740,6 +740,22 @@
+     (void)spu_channel_try_write(ch, val, SPU_CHANNEL_CAP);
+ }
+ 
++/* Prepend synchronous SPU-thread syscall acks ahead of concurrent PPU mailbox writes. */
++static inline int spu_channel_push_front(spu_channel* ch, uint32_t val)
++{
++    SPU_CH_LOCK(ch);
++    if (ch->count >= SPU_CHANNEL_CAP) {
++        SPU_CH_UNLOCK(ch);
++        return 0;
++    }
++    ch->head = (ch->head + SPU_CHANNEL_CAP - 1u) % SPU_CHANNEL_CAP;
++    ch->q[ch->head] = val;
++    ch->value = val;
++    ch->count++;
++    SPU_CH_UNLOCK(ch);
++    return 1;
++}
++
+ static inline uint32_t spu_channel_read(spu_channel* ch)
+ {
+     SPU_CH_LOCK(ch);
+diff --git a/runtime/syscalls/lv2_register.c b/runtime/syscalls/lv2_register.c
+--- a/runtime/syscalls/lv2_register.c
++++ b/runtime/syscalls/lv2_register.c
+@@ -1646,7 +1646,7 @@
+                 result = (uint32_t)sys_event_flag_set(&call);
+             }
+         }
+-        if (code == 128) spu_channel_write(&spu->ch_in_mbox, result);
++        if (code == 128) spu_channel_push_front(&spu->ch_in_mbox, result);
+         return 1;
+     }
+     if (code >= 128) return 0;
+@@ -1681,7 +1681,7 @@
+             result = rc == 0 ? CELL_OK : CELL_EBUSY;
+         }
+     }
+-    if (code < 64) spu_channel_write(&spu->ch_in_mbox, result);
++    if (code < 64) spu_channel_push_front(&spu->ch_in_mbox, result);
+     return 1;
+ }
+ 
+diff --git a/runtime/syscalls/sys_event.c b/runtime/syscalls/sys_event.c
+--- a/runtime/syscalls/sys_event.c
++++ b/runtime/syscalls/sys_event.c
+@@ -228,14 +228,21 @@
+         return getenv("YDKJ_EVT_LENIENT") ? CELL_OK : (int64_t)(int32_t)CELL_ESRCH;  /* idempotent teardown */
+     }
+ 
+-#ifdef _WIN32
++    q->active = 0;
++
++#ifdef _WIN32
++    EnterCriticalSection(&q->lock);
++    WakeAllConditionVariable(&q->not_empty);
++    LeaveCriticalSection(&q->lock);
+     DeleteCriticalSection(&q->lock);
+ #else
++    pthread_mutex_lock(&q->lock);
++    pthread_cond_broadcast(&q->not_empty);
++    pthread_mutex_unlock(&q->lock);
+     pthread_cond_destroy(&q->not_empty);
+     pthread_mutex_destroy(&q->lock);
+ #endif
+ 
+-    q->active = 0;
+     evt_table_unlock();
+     return CELL_OK;
+ }
+@@ -528,8 +535,16 @@
+             return (int64_t)(int32_t)CELL_ETIMEDOUT;
+         }
+     } else {
+-        DWORD ms = (DWORD)(timeout_us / 1000);
++        const ULONGLONG start_ms = GetTickCount64();
++        const ULONGLONG duration_ms = (timeout_us + 999ull) / 1000ull;
+         while (q->count == 0 && q->active && !q->cancelled) {
++            const ULONGLONG elapsed_ms = GetTickCount64() - start_ms;
++            if (elapsed_ms >= duration_ms) {
++                LeaveCriticalSection(&q->lock);
++                return (int64_t)(int32_t)CELL_ETIMEDOUT;
++            }
++            const ULONGLONG rem_ms = duration_ms - elapsed_ms;
++            const DWORD ms = rem_ms >= INFINITE ? (INFINITE - 1u) : (DWORD)rem_ms;
+             if (!SleepConditionVariableCS(&q->not_empty, &q->lock, ms)) {
+                 if (GetLastError() == ERROR_TIMEOUT) {
+                     LeaveCriticalSection(&q->lock);
+@@ -739,8 +754,6 @@
+ /* Helper to enqueue an event into a queue */
+ static int event_queue_push(sys_event_queue_info* q, const sys_event_t* evt)
+ {
+-    { const int qi = (int)(q - g_sys_event_queues);
+-      if (qi >= 0 && qi < SYS_EVENT_QUEUE_MAX) { s_last_evt[qi] = *evt; s_have_last_evt[qi] = 1; } }
+     /* EVT_PUSHLOG=<qid>: log every push to that queue with the host caller, to
+      * find which producer feeds a queue when nothing logs a port_send. */
+     { static int s_q = -1; if (s_q < 0) { const char* e = getenv("EVT_PUSHLOG"); s_q = e ? atoi(e) : 0; }
+@@ -778,6 +791,9 @@
+     pthread_mutex_lock(&q->lock);
+ #endif
+ 
++    { const int qi = (int)(q - g_sys_event_queues);
++      if (qi >= 0 && qi < SYS_EVENT_QUEUE_MAX) { s_last_evt[qi] = *evt; s_have_last_evt[qi] = 1; } }
++
+     if (q->count >= q->capacity) {
+ #ifdef _WIN32
+         LeaveCriticalSection(&q->lock);
+@@ -792,10 +808,10 @@
+     q->count++;
+ 
+ #ifdef _WIN32
+-    WakeConditionVariable(&q->not_empty);
++    WakeAllConditionVariable(&q->not_empty);
+     LeaveCriticalSection(&q->lock);
+ #else
+-    pthread_cond_signal(&q->not_empty);
++    pthread_cond_broadcast(&q->not_empty);
+     pthread_mutex_unlock(&q->lock);
+ #endif
+ 

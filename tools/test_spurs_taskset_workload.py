@@ -21,7 +21,7 @@ def main():
                  "/Fe" + str(work / "test.exe"),
                  "/link", "/OPT:REF",
                  str(root / "bakugan-recomp/build/ps3recomp_sdk/ps3recomp_runtime.lib"),
-                 "user32.lib", "winmm.lib", "ws2_32.lib", "bcrypt.lib"]
+                 "user32.lib", "winmm.lib", "ws2_32.lib", "bcrypt.lib", "ole32.lib"]
         subprocess.run(args, cwd=work, check=True)
         subprocess.run([str(work / "test.exe")], check=True)
 

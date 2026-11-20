@@ -39,6 +39,14 @@ int main(void)
     spu_channel_write(&ctx->ch_out_mbox, 9);
     CHECK(spu_deliver_user_event(ctx, 0x80000003) == 1 && flag_bits == 8);
     CHECK(spu_channel_read(&ctx->ch_in_mbox) == CELL_OK);
+    /* Concurrent PPU write_spu_mb before user-event ACK must not displace the ACK. */
+    queue = 77;
+    spu_channel_write(&ctx->ch_in_mbox, 0x00786F00u);
+    spu_channel_write(&ctx->ch_out_mbox, 0xABCD);
+    CHECK(spu_deliver_user_event(ctx, 0x2A000001) == 1);
+    CHECK(ctx->ch_in_mbox.count == 2);
+    CHECK(spu_channel_read(&ctx->ch_in_mbox) == CELL_OK);
+    CHECK(spu_channel_read(&ctx->ch_in_mbox) == 0x00786F00u);
     free(ctx);
     puts("PASS: SPURS send/throw and flag acknowledgements, including unbound ports");
     return 0;
