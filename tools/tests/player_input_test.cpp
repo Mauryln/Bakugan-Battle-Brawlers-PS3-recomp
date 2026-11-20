@@ -31,6 +31,9 @@ int main() {
     c.language = L"es";
     c.output = L"1440p";
     c.cap = L"60";
+    c.aa_mode = L"off";
+    c.sharpness = 1.2f;
+    c.aniso = 4;
     c.deadzone = 0.22f;
     c.keyboard[CROSS] = {BindingKind::Key, 'B'};
     c.gamepad[CROSS] = {BindingKind::Button, SDL_GAMEPAD_BUTTON_WEST};
@@ -42,15 +45,29 @@ int main() {
     Config loaded;
     CHECK(load(loaded, path.wstring(), &error));
     CHECK(loaded.language == c.language && loaded.output == c.output && loaded.cap == c.cap);
+    CHECK(loaded.aa_mode == L"off" && std::abs(loaded.sharpness - 1.2f) < 0.001f && loaded.aniso == 4);
     CHECK(std::abs(loaded.deadzone - c.deadzone) < 0.001f && loaded.motion == c.motion);
     CHECK(loaded.keyboard[CROSS].code == 'B' && loaded.gamepad[CROSS].code == SDL_GAMEPAD_BUTTON_WEST);
     CHECK(loaded.device_guid == c.device_guid && loaded.device_serial == c.device_serial);
     CHECK(WritePrivateProfileStringW(L"Graphics", L"Sharpness", L"nan", path.c_str()));
     CHECK(WritePrivateProfileStringW(L"Graphics", L"Output", L"nonsense", path.c_str()));
+    CHECK(WritePrivateProfileStringW(L"Graphics", L"AAMode", L"invalid", path.c_str()));
     CHECK(WritePrivateProfileStringW(L"Keyboard", L"14", L"key:9999", path.c_str()));
     CHECK(load(loaded, path.wstring(), &error));
-    CHECK(loaded.sharpness == 0.6f && loaded.output == L"720p");
+    CHECK(loaded.sharpness == 0.6f && loaded.output == L"720p" && loaded.aa_mode == L"smaa");
     CHECK(loaded.keyboard[CROSS].code == 'X');
+
+    // Aliases for aa_mode, fsr_sharpness, and anisotropic in player.ini
+    auto alias_path = std::filesystem::temp_directory_path() / L"bakugan-gfx-alias-test.ini";
+    std::filesystem::remove(alias_path);
+    CHECK(WritePrivateProfileStringW(L"Player", L"Version", L"1", alias_path.c_str()));
+    CHECK(WritePrivateProfileStringW(L"Graphics", L"aa_mode", L"off", alias_path.c_str()));
+    CHECK(WritePrivateProfileStringW(L"Graphics", L"fsr_sharpness", L"high", alias_path.c_str()));
+    CHECK(WritePrivateProfileStringW(L"Graphics", L"anisotropic", L"off", alias_path.c_str()));
+    Config alias_cfg;
+    CHECK(load(alias_cfg, alias_path.wstring(), &error));
+    CHECK(alias_cfg.aa_mode == L"off" && std::abs(alias_cfg.sharpness - 0.25f) < 0.001f && alias_cfg.aniso == 1);
+    std::filesystem::remove(alias_path);
     CHECK(WritePrivateProfileStringW(L"Player", L"Version", L"999", path.c_str()));
     CHECK(!load(loaded, path.wstring(), &error));
     c.language = L"auto";
@@ -61,6 +78,8 @@ int main() {
     CHECK(!GetEnvironmentVariableW(L"PAD_AUTOPRESS", env, 128));
     CHECK(!GetEnvironmentVariableW(L"PS3_LANG", env, 128));
     CHECK(GetEnvironmentVariableW(L"PS3_OUTPUT", env, 128) && std::wstring(env) == L"1440p");
+    CHECK(GetEnvironmentVariableW(L"PS3_AA", env, 128) && std::wstring(env) == L"off");
+    CHECK(GetEnvironmentVariableW(L"PS3_ANISO", env, 128) && std::wstring(env) == L"4");
     SetEnvironmentVariableW(L"PS3_DEBUG", L"1");
     SetEnvironmentVariableW(L"PAD_REPLAY", L"test.padrec");
     SetEnvironmentVariableW(L"PS3_SAVEDATA_CHOICE", L"BLES00758-PLAYER-DATA-00");

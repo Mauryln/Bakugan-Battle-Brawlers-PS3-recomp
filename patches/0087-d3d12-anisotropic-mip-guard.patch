@@ -1,0 +1,47 @@
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -598,7 +598,7 @@ static D3D12_TEXTURE_ADDRESS_MODE rsx_sampler_wrap(u32 wrap)
+ 
+ /* GCM field layout shared with the live draw backend. Extended CLAMP and
+  * MIRROR modes use D3D's edge approximation; convolution uses linear. */
+-static D3D12_SAMPLER_DESC rsx_sampler_desc(u32 address, u32 filter, u32 control, u32 border)
++static D3D12_SAMPLER_DESC rsx_sampler_desc(u32 address, u32 filter, u32 control, u32 border, int allow_aniso)
+ {
+     D3D12_SAMPLER_DESC d = {0};
+     u32 minf = (filter >> 16) & 7u, magf = (filter >> 24) & 7u;
+@@ -617,14 +617,12 @@ static D3D12_SAMPLER_DESC rsx_sampler_desc(u32 address, u32 filter, u32 control,
+     int bias = (int)(filter & 0x1FFFu); /* signed 5.8 fixed point */
+     if (bias & 0x1000) bias -= 0x2000;
+     d.MipLODBias = (float)bias / 256.0f;
+-    /* Cheap texture-detail win: 16x anisotropic on trilinear samplers. The
+-     * RSX itself had no aniso, so this is an enhancement, not fidelity; it is
+-     * env-gated so captures can A/B it. PS3_LOD_BIAS is optional and negative
+-     * values sharpen the mip selection. */
++    /* Cheap texture-detail win: 16x anisotropic on mipmapped 2D trilinear samplers.
++     * Excludes offscreen RTs, depth/shadow units and 1-mip textures. */
+     { static int aniso = -1;
+       if (aniso < 0) { const char* e = getenv("PS3_ANISO"); aniso = e ? atoi(e) : 16;
+                        if (aniso < 1 || aniso > 16) aniso = 1; }
+-      if (aniso > 1 && mn == D3D12_FILTER_TYPE_LINEAR &&
++      if (allow_aniso && aniso > 1 && d.MaxLOD > 0.0f && mn == D3D12_FILTER_TYPE_LINEAR &&
+           mg == D3D12_FILTER_TYPE_LINEAR && mp == D3D12_FILTER_TYPE_LINEAR) {
+           d.Filter = D3D12_FILTER_ANISOTROPIC;
+           d.MaxAnisotropy = (UINT)aniso;
+@@ -654,10 +652,13 @@ static int rsx_prepare_samplers(void)
+         if (!dr->is_vp || dr->is_clear) continue;
+         D3D12_SAMPLER_DESC table[RSX_MAX_TEXTURES];
+         for (u32 u = 0; u < RSX_MAX_TEXTURES; ++u) {
+-            table[u] = rsx_sampler_desc(0x30303u, 0x01012000u, 0, 0);
+-            if (dr->tex[u].set && (dr->sampled_units & (1u << u)))
++            table[u] = rsx_sampler_desc(0x30303u, 0x01012000u, 0, 0, 0);
++            if (dr->tex[u].set && (dr->sampled_units & (1u << u))) {
++                int allow_aniso = (dr->tex[u].mips > 1 && !dr->tex[u].cube && !dr->shadow[u].enabled);
+                 table[u] = rsx_sampler_desc(dr->tex[u].sampler_address,
+-                    dr->tex[u].sampler_filter, dr->tex[u].sampler_control, dr->tex[u].sampler_border);
++                    dr->tex[u].sampler_filter, dr->tex[u].sampler_control, dr->tex[u].sampler_border,
++                    allow_aniso);
++            }
+         }
+         u32 slot;
+         for (slot = 0; slot < s_sampler_pages[page].count; ++slot)

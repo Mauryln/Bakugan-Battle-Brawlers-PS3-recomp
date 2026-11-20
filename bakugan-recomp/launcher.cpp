@@ -37,7 +37,9 @@ enum {
     ID_GAMEPAD_CANVAS,
     ID_SIXAXIS_PROFILE,
     ID_MOTION_MODE,
-    ID_SIXAXIS_SMOOTH
+    ID_SIXAXIS_SMOOTH,
+    ID_AA_MODE,
+    ID_SHARPNESS
 };
 constexpr UINT WM_APP_REBUILD = WM_APP + 1;
 constexpr int WIDTH = 1000, HEIGHT = 800;
@@ -206,7 +208,14 @@ void read_controls() {
     config.cap = L"30";
     config.window = windows[index(ID_WINDOW, 2)];
     config.fsr = L"auto";
-    config.sharpness = 0.6f;
+    config.aa_mode = index(ID_AA_MODE, 2) == 1 ? L"off" : L"smaa";
+    int sharp_idx = index(ID_SHARPNESS, 4);
+    if (sharp_idx == 0)
+        config.sharpness = 1.2f;
+    else if (sharp_idx == 1)
+        config.sharpness = 0.6f;
+    else if (sharp_idx == 2)
+        config.sharpness = 0.25f;
     const int aniso[] = {1, 2, 4, 8, 16};
     config.aniso = aniso[index(ID_ANISO, 5)];
     config.language = languages[index(ID_LANG, 8)];
@@ -239,6 +248,15 @@ void fill_controls() {
     for (int n = config.aniso; n > 1; n /= 2)
         ++a;
     choose(ID_ANISO, a);
+    choose(ID_AA_MODE, config.aa_mode == L"off" ? 1 : 0);
+    int sharp_idx = 3;
+    if (std::abs(config.sharpness - 1.2f) < 0.05f)
+        sharp_idx = 0;
+    else if (std::abs(config.sharpness - 0.6f) < 0.05f)
+        sharp_idx = 1;
+    else if (std::abs(config.sharpness - 0.25f) < 0.05f)
+        sharp_idx = 2;
+    choose(ID_SHARPNESS, sharp_idx);
     choose(ID_SIXAXIS_PROFILE, (int)config.sixaxis_profile);
     choose(ID_MOTION_MODE, (int)config.motion);
     sync_sixaxis_sliders();
@@ -843,41 +861,47 @@ void create_controls() {
     combo(ID_OUTPUT, 32, 192, 268,
           {L"1280 × 720", L"1920 × 1080", L"2560 × 1440", L"3840 × 2160",
            S(L"Automática", L"Automatic"), S(L"Resolución del monitor", L"Monitor resolution")});
-    label(S(L"Modo de ventana", L"Window mode"), 32, 230, 270);
-    combo(ID_WINDOW, 32, 252, 268,
+    label(S(L"Modo de ventana", L"Window mode"), 32, 226, 270);
+    combo(ID_WINDOW, 32, 248, 268,
           {S(L"Sin bordes (Borderless)", L"Borderless windowed"), S(L"Ventana", L"Windowed")});
-    label(S(L"Filtrado anisotrópico", L"Anisotropic filtering"), 32, 290, 270);
-    combo(ID_ANISO, 32, 312, 268, {L"1×", L"2×", L"4×", L"8×", L"16×"});
+    label(S(L"Filtrado anisotrópico", L"Anisotropic filtering"), 32, 282, 270);
+    combo(ID_ANISO, 32, 304, 268, {L"1× (Off)", L"2×", L"4×", L"8×", L"16×"});
 
-    add(L"STATIC",
-        S(L"El juego se ejecuta a 30 FPS con frame pacing uniforme y FSR1 automático en resoluciones superiores a 720p.",
-          L"The game runs at 30 FPS with uniform frame pacing and automatic FSR1 above 720p."),
-        0, 32, 356, 268, 52);
+    label(S(L"Antialiasing", L"Antialiasing"), 32, 344, 115);
+    combo(ID_AA_MODE, 152, 340, 148,
+          {S(L"SMAA (Rec.)", L"SMAA (Rec.)"),
+           S(L"Desactivado", L"Off")});
+    label(S(L"Nitidez FSR", L"FSR sharpness"), 32, 378, 115);
+    combo(ID_SHARPNESS, 152, 374, 148,
+          {S(L"Baja", L"Low"),
+           S(L"Media (Rec.)", L"Medium (Rec.)"),
+           S(L"Alta", L"High"),
+           S(L"Personalizada", L"Custom")});
 
-    add(L"BUTTON", S(L"Mantener clic derecho: apuntar", L"Hold right click: aim"), ID_MOUSE_LOOK, 32, 424,
+    add(L"BUTTON", S(L"Mantener clic derecho: apuntar", L"Hold right click: aim"), ID_MOUSE_LOOK, 32, 414,
         268, 24, BS_AUTOCHECKBOX | WS_TABSTOP);
-    add(L"BUTTON", S(L"Clic izquierdo: Cruz (X)", L"Left click: Cross (X)"), ID_MOUSE_CROSS, 32, 452,
+    add(L"BUTTON", S(L"Clic izquierdo: Cruz (X)", L"Left click: Cross (X)"), ID_MOUSE_CROSS, 32, 442,
         268, 24, BS_AUTOCHECKBOX | WS_TABSTOP);
-    label(S(L"Sensibilidad del ratón", L"Mouse sensitivity"), 32, 488, 270);
-    slider(ID_SENSITIVITY, 28, 510, 274, 5, 200, 50);
+    label(S(L"Sensibilidad del ratón", L"Mouse sensitivity"), 32, 476, 270);
+    slider(ID_SENSITIVITY, 28, 498, 274, 5, 200, 50);
 
-    label(S(L"Perfil Sixaxis", L"Sixaxis profile"), 32, 552, 115);
-    combo(ID_SIXAXIS_PROFILE, 152, 548, 148,
+    label(S(L"Perfil Sixaxis", L"Sixaxis profile"), 32, 544, 115);
+    combo(ID_SIXAXIS_PROFILE, 152, 540, 148,
           {S(L"Suave / Preciso", L"Smooth / Precise"),
            S(L"Estándar (Rec.)", L"Standard (Rec.)"),
            S(L"Rápido / Sensible", L"Fast / Responsive"),
            S(L"Personalizado", L"Custom")});
-    label(S(L"Modo Sixaxis", L"Sixaxis mode"), 32, 586, 115);
-    combo(ID_MOTION_MODE, 152, 582, 148,
+    label(S(L"Modo Sixaxis", L"Sixaxis mode"), 32, 578, 115);
+    combo(ID_MOTION_MODE, 152, 574, 148,
           {S(L"Híbrido (Auto)", L"Hybrid (Auto)"),
            S(L"Solo sensores", L"Sensors only"),
            S(L"Solo stick R", L"Right stick only")});
-    label(S(L"Suavizado Sixaxis", L"Sixaxis smoothing"), 32, 616, 270);
-    slider(ID_SIXAXIS_SMOOTH, 28, 638, 274, 0, 100, 45);
+    label(S(L"Suavizado Sixaxis", L"Sixaxis smoothing"), 32, 612, 270);
+    slider(ID_SIXAXIS_SMOOTH, 28, 634, 274, 0, 100, 45);
 
     add(L"STATIC",
-        S(L"Pantalla principal asignada automáticamente.",
-          L"Primary display selected automatically."),
+        S(L"30 FPS uniformes · FSR1 automático > 720p.",
+          L"Uniform 30 FPS · Auto FSR1 above 720p."),
         0, 32, 672, 268, 24);
 
     // Panel derecho: Idioma y controles interactivos

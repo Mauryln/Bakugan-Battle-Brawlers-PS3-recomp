@@ -217,12 +217,47 @@ bool load(Config &c, const std::wstring &path, std::wstring *error) {
         choose(get(L"Graphics", L"FPS", c.cap, path), {L"0", L"30", L"60", L"90", L"120", L"monitor"}, c.cap);
     c.window = choose(get(L"Graphics", L"Window", c.window, path), {L"windowed", L"borderless"}, c.window);
     c.fsr = choose(get(L"Graphics", L"FSR", c.fsr, path), {L"auto", L"fsr1", L"0"}, c.fsr);
+    auto first_set = [&](const wchar_t *k1, const wchar_t *k2, const std::wstring &fb) {
+        std::wstring v = get(L"Graphics", k1, L"", path);
+        if (v.empty() && k2)
+            v = get(L"Graphics", k2, L"", path);
+        return v.empty() ? fb : v;
+    };
+    auto lower_ws = [](std::wstring s) {
+        for (auto &ch : s)
+            ch = (wchar_t)towlower(ch);
+        return s;
+    };
+    std::wstring aa_raw = lower_ws(first_set(L"AAMode", L"aa_mode", c.aa_mode));
+    if (aa_raw == L"off" || aa_raw == L"0")
+        c.aa_mode = L"off";
+    else
+        c.aa_mode = L"smaa";
     c.language = choose(get(L"Player", L"Language", c.language, path),
                         {L"auto", L"en", L"fr", L"es", L"de", L"it", L"nl", L"sv"}, c.language);
     c.ui_language = choose(get(L"Player", L"LauncherLanguage", c.ui_language, path),
                            {L"auto", L"en", L"es"}, c.ui_language);
-    c.sharpness = number(get(L"Graphics", L"Sharpness", L"0.6", path), 0.6f, 0, 2);
-    int a = (int)number(get(L"Graphics", L"Anisotropy", L"16", path), 16, 1, 16);
+    std::wstring sharp_raw = lower_ws(first_set(L"Sharpness", L"fsr_sharpness", L"0.6"));
+    if (sharp_raw == L"low")
+        c.sharpness = 1.2f;
+    else if (sharp_raw == L"medium")
+        c.sharpness = 0.6f;
+    else if (sharp_raw == L"high")
+        c.sharpness = 0.25f;
+    else
+        c.sharpness = number(sharp_raw, 0.6f, 0, 2);
+    std::wstring aniso_raw = lower_ws(first_set(L"Anisotropy", L"anisotropic", L"16"));
+    int a = 16;
+    if (aniso_raw == L"off")
+        a = 1;
+    else if (aniso_raw == L"4x")
+        a = 4;
+    else if (aniso_raw == L"8x")
+        a = 8;
+    else if (aniso_raw == L"16x")
+        a = 16;
+    else
+        a = (int)number(aniso_raw, 16, 1, 16);
     c.aniso = (a == 1 || a == 2 || a == 4 || a == 8 || a == 16) ? a : 16;
     c.input = (InputMode)(int)number(get(L"Input", L"Mode", L"0", path), 0, 0, 2);
     c.motion = (MotionMode)(int)number(get(L"Input", L"Motion", L"0", path), 0, 0, 2);
@@ -286,6 +321,7 @@ bool save(const Config &c, const std::wstring &path, std::wstring *error) {
     put(L"Graphics", L"FPS", c.cap);
     put(L"Graphics", L"Window", c.window);
     put(L"Graphics", L"FSR", c.fsr);
+    put(L"Graphics", L"AAMode", c.aa_mode);
     put(L"Graphics", L"Sharpness", std::to_wstring(c.sharpness));
     put(L"Graphics", L"Anisotropy", std::to_wstring(c.aniso));
     put(L"Input", L"Mode", std::to_wstring((int)c.input));
@@ -353,6 +389,7 @@ void apply_environment(const Config &c, const std::wstring &path) {
     env(L"PS3_INTERNAL", L"720");
     env(L"PS3_OUTPUT", c.output);
     env(L"PS3_FSR", c.fsr);
+    env(L"PS3_AA", c.aa_mode);
     env(L"PS3_FSR_SHARPNESS", std::to_wstring(c.sharpness));
     env(L"PS3_ANISO", std::to_wstring(c.aniso));
     env(L"PS3_LOD_BIAS", L"0");

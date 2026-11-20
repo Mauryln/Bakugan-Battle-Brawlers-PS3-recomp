@@ -19,6 +19,7 @@
 #define PS3_ENV_WINDOW_MODE     "PS3_WINDOW_MODE"
 #define PS3_ENV_ANISO           "PS3_ANISO"
 #define PS3_ENV_LOD_BIAS        "PS3_LOD_BIAS"
+#define PS3_ENV_AA              "PS3_AA"
 
 #define PS3_DEFAULT_INTERNAL    "720"
 #define PS3_DEFAULT_OUTPUT      "1080p"
@@ -28,3 +29,4 @@
 #define PS3_DEFAULT_WINDOW_MODE "borderless"
 #define PS3_DEFAULT_ANISO       "16"
 #define PS3_DEFAULT_LOD_BIAS    "0"
+#define PS3_DEFAULT_AA          "smaa"

@@ -42,7 +42,7 @@ enum class MotionMode { Auto, Sensors, RightStick };
 enum class SixaxisProfile { Smooth, Standard, Fast, Custom };
 struct Config {
     std::wstring output = L"1080p", cap = L"30", window = L"borderless";
-    std::wstring fsr = L"auto", language = L"auto", ui_language = L"auto";
+    std::wstring fsr = L"auto", aa_mode = L"smaa", language = L"auto", ui_language = L"auto";
     float sharpness = 0.6f, mouse_sensitivity = 0.5f, deadzone = 0.15f;
     float gyro_sensitivity = 1.0f, gyro_deadzone = 0.05f;
     float sixaxis_curve = 0.50f, sixaxis_smoothing = 0.45f;
