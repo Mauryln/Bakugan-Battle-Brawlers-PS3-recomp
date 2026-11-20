@@ -13,7 +13,7 @@ def main():
     compiler = parser.parse_args().compiler
     with tempfile.TemporaryDirectory(prefix="bakugan-taskset-") as directory:
         work = Path(directory)
-        args = [str(compiler), "/nologo", "/O2", "/MD", "/Gy", "/D_CRT_SECURE_NO_WARNINGS"]
+        args = [str(compiler), "/nologo", "/O2", "/MT", "/Gy", "/D_CRT_SECURE_NO_WARNINGS"]
         args += ["/I" + str(sdk / p) for p in
                  (".", "include", "runtime/spu", "runtime/ppu", "runtime/memory", "runtime/syscalls")]
         args += [str(root / "tools/tests/spurs_taskset_workload_test.c"),

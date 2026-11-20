@@ -98,6 +98,15 @@ int main() {
     CHECK(GetEnvironmentVariableW(L"PS3_OUTPUT", env, 128) && std::wstring(env) == L"1440p");
     CHECK(GetEnvironmentVariableW(L"PS3_AA", env, 128) && std::wstring(env) == L"off");
     CHECK(GetEnvironmentVariableW(L"PS3_ANISO", env, 128) && std::wstring(env) == L"4");
+    CHECK(GetEnvironmentVariableW(L"PS3_FRAME_GEN", env, 128) && std::wstring(env) == L"fsr3");
+    CHECK(GetEnvironmentVariableW(L"PS3_FPS_CAP", env, 128) && std::wstring(env) == L"60");
+    c.frame_gen = L"invalid";
+    c.cap = L"30";
+    apply_environment(c, path.wstring());
+    CHECK(!GetEnvironmentVariableW(L"PS3_FRAME_GEN", env, 128));
+    CHECK(GetEnvironmentVariableW(L"PS3_FPS_CAP", env, 128) && std::wstring(env) == L"30");
+    c.frame_gen = L"fsr3";
+    c.cap = L"60";
     SetEnvironmentVariableW(L"PS3_DEBUG", L"1");
     SetEnvironmentVariableW(L"PAD_REPLAY", L"test.padrec");
     SetEnvironmentVariableW(L"PS3_SAVEDATA_CHOICE", L"BLES00758-PLAYER-DATA-00");
@@ -243,9 +252,10 @@ int main() {
     CHECK(rtx > 0.90f); // steering-wheel roll (g[2]) also drives tilt_x (+right)
     auto roll_rep = make_report_with_tilt(std::array<float, ACTION_COUNT>{}, rtx, rty,
                                           MotionMode::Sensors, true, out_a, out_g, 2500, pulse);
-    CHECK(roll_rep.sensors[0] > 600 && roll_rep.sensors[3] > 512); // SENSOR_X and SENSOR_G agree on right steer
+    CHECK(roll_rep.sensors[0] == 512 && roll_rep.sensors[3] > 512); // stick_s0 is not added when has_real is true
 
-    // Gravity-referenced roll holds steady tilt angle even after gyro rate drops to 0
+    // Gravity-referenced roll holds steady tilt angle even after gyro rate drops to 0,
+    // without duplicating stick_s0 on top of base_s0
     SixaxisState hold_state;
     float htx = 0.f, hty = 0.f;
     const float tilt25 = 25.0f * (3.14159265f / 180.0f);
@@ -254,6 +264,30 @@ int main() {
         step_sixaxis(hold_state, 0.0f, 0.0f, 0.0f, true, held_accel,
                      std::array<float, 3>{0.f, 0.f, 0.f}, mode_cfg, 0.010f, htx, hty, out_a, out_g);
     CHECK(htx > 0.70f); // holding 25 deg right roll maintains steady steering
+    auto hold_rep = make_report_with_tilt(std::array<float, ACTION_COUNT>{}, htx, hty,
+                                          MotionMode::Sensors, true, out_a, out_g, 2600, pulse);
+    CHECK(hold_rep.sensors[0] == 560 && hold_rep.sensors[3] == 512);
+
+    // gyro_invert_x also inverts base_s0 (SENSOR_X) around 512
+    Config inv_cfg = mode_cfg;
+    inv_cfg.gyro_invert_x = true;
+    SixaxisState inv_state;
+    float itx = 0.f, ity = 0.f;
+    for (int i = 0; i < 30; ++i)
+        step_sixaxis(inv_state, 0.0f, 0.0f, 0.0f, true, held_accel,
+                     std::array<float, 3>{0.f, 0.f, -1.0f}, inv_cfg, 0.010f, itx, ity, out_a, out_g);
+    auto inv_rep = make_report_with_tilt(std::array<float, ACTION_COUNT>{}, itx, ity,
+                                         MotionMode::Sensors, true, out_a, out_g, 2700, pulse);
+    CHECK(itx < -0.70f && inv_rep.sensors[0] == 464 && inv_rep.sensors[3] < 512);
+
+    // Sub-deadzone raw_gyro on roll/pitch must not integrate into complementary filter
+    SixaxisState dz_cf_state;
+    float dztx = 0.f, dzty = 0.f;
+    for (int i = 0; i < 50; ++i)
+        step_sixaxis(dz_cf_state, 0.0f, 0.0f, 0.0f, true,
+                     std::array<float, 3>{0.f, 9.80665f, 0.f},
+                     std::array<float, 3>{0.04f, 0.0f, -0.04f}, mode_cfg, 0.020f, dztx, dzty, out_a, out_g);
+    CHECK(dztx == 0.0f && dzty == 0.0f && dz_cf_state.roll_angle == 0.0f && dz_cf_state.pitch_angle == 0.0f);
 
     // Ergonomic tilted hand posture calibrates neutral pitch, then further forward tilt drives up (-y)
     SixaxisState pose_state;

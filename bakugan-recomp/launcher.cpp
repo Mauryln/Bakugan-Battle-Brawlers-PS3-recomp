@@ -204,11 +204,17 @@ void refresh_devices(bool force = false) {
 }
 
 void read_controls() {
+    Config disk;
+    if (!path.empty() && std::filesystem::exists(path) && load(disk, path)) {
+        config.cap = disk.cap;
+        config.fsr = disk.fsr;
+        config.input = disk.input;
+        config.gyro_invert_x = disk.gyro_invert_x;
+        config.gyro_invert_y = disk.gyro_invert_y;
+    }
     auto index = [](int id, int count) { return std::clamp(selected(id), 0, count - 1); };
     config.output = outputs[index(ID_OUTPUT, 6)];
-    config.cap = L"30";
     config.window = windows[index(ID_WINDOW, 2)];
-    config.fsr = L"auto";
     config.frame_gen = index(ID_FRAME_GEN, 2) == 1 ? bakugan::FRAME_GEN_FSR3 : bakugan::FRAME_GEN_OFF;
     config.aa_mode = index(ID_AA_MODE, 2) == 1 ? L"off" : L"smaa";
     int sharp_idx = index(ID_SHARPNESS, 4);
@@ -222,10 +228,9 @@ void read_controls() {
     config.aniso = aniso[index(ID_ANISO, 5)];
     config.language = languages[index(ID_LANG, 8)];
     config.ui_language = ui_languages[index(ID_UI_LANG, 3)];
-    config.input = InputMode::Auto;
     config.motion = (MotionMode)index(ID_MOTION_MODE, 3);
     config.sixaxis_profile = (SixaxisProfile)index(ID_SIXAXIS_PROFILE, 4);
-    config.gyro_sensitivity = position(ID_GYRO_SENS) / 100.f;
+    config.gyro_sensitivity = std::clamp(position(ID_GYRO_SENS) / 100.f, 0.1f, 5.0f);
     config.deadzone = position(ID_DEADZONE) / 100.f;
     config.sixaxis_smoothing = position(ID_SIXAXIS_SMOOTH) / 100.f;
     config.mouse_sensitivity = position(ID_SENSITIVITY) / 100.f;
@@ -236,7 +241,8 @@ void read_controls() {
 
 void sync_sixaxis_sliders() {
     SendMessageW(GetDlgItem(window, ID_DEADZONE), TBM_SETPOS, TRUE, (int)std::lround(config.deadzone * 100.f));
-    SendMessageW(GetDlgItem(window, ID_GYRO_SENS), TBM_SETPOS, TRUE, (int)std::lround(config.gyro_sensitivity * 100.f));
+    SendMessageW(GetDlgItem(window, ID_GYRO_SENS), TBM_SETPOS, TRUE,
+                 (int)std::lround(std::clamp(config.gyro_sensitivity, 0.1f, 5.0f) * 100.f));
     SendMessageW(GetDlgItem(window, ID_SIXAXIS_SMOOTH), TBM_SETPOS, TRUE,
                  (int)std::lround(config.sixaxis_smoothing * 100.f));
 }
@@ -384,8 +390,30 @@ void launch() {
         return;
     }
     if (log != INVALID_HANDLE_VALUE) CloseHandle(log);
+    DWORD wait_res = WaitForSingleObject(process.hProcess, 1500);
+    DWORD exit_code = 0;
+    bool aborted = (wait_res == WAIT_OBJECT_0 &&
+                    GetExitCodeProcess(process.hProcess, &exit_code) &&
+                    exit_code != 0);
     CloseHandle(process.hThread);
     CloseHandle(process.hProcess);
+    if (aborted) {
+        std::wstring err_msg =
+            (exit_code == 2 || exit_code == STATUS_ILLEGAL_INSTRUCTION)
+                ? S(L"BakuganRecomp.exe se cerró al arrancar (código ",
+                    L"BakuganRecomp.exe aborted on startup (code ") +
+                      std::to_wstring(exit_code) +
+                      S(L"). Verifica que tu CPU soporte AVX2/SSE4.1 y revisa BakuganRecomp.log.",
+                        L"). Verify that your CPU supports AVX2/SSE4.1 and check BakuganRecomp.log.")
+                : S(L"BakuganRecomp.exe falló al arrancar (código ",
+                    L"BakuganRecomp.exe failed to start (code ") +
+                      std::to_wstring(exit_code) +
+                      S(L"). Revisa BakuganRecomp.log.",
+                        L"). Check BakuganRecomp.log.");
+        message(err_msg);
+        MessageBoxW(window, err_msg.c_str(), L"Bakugan: Battle Brawlers", MB_OK | MB_ICONERROR);
+        return;
+    }
     PostMessageW(window, WM_CLOSE, 0, 0);
 }
 
@@ -918,7 +946,7 @@ void create_controls() {
     combo(ID_DEVICE, 718, 168, 250, {S(L"Buscando mandos…", L"Searching for controllers…")});
 
     label(S(L"Sensibilidad Sixaxis", L"Sixaxis sensitivity"), 348, 206, 136);
-    slider(ID_GYRO_SENS, 488, 202, 150, 20, 300, 100);
+    slider(ID_GYRO_SENS, 488, 202, 150, 10, 500, 100);
     label(S(L"Zona muerta", L"Deadzone"), 654, 206, 88);
     slider(ID_DEADZONE, 746, 202, 114, 2, 50, 15);
     sensor_status = add(L"STATIC", L"", 0, 866, 204, 102, 24);

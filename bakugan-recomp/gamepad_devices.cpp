@@ -124,7 +124,9 @@ float binding_strength(Binding b, SDL_Gamepad *pad, bool keyboard, float deadzon
         return 0;
     int raw = SDL_GetGamepadAxis(pad, (SDL_GamepadAxis)b.code);
     float value = b.kind == BindingKind::AxisNegative ? -(float)raw / 32768.f : (float)raw / 32767.f;
-    return std::clamp((value - deadzone) / (1.f - deadzone), 0.f, 1.f);
+    bool is_trigger = (b.code == SDL_GAMEPAD_AXIS_LEFT_TRIGGER || b.code == SDL_GAMEPAD_AXIS_RIGHT_TRIGGER);
+    float dz = is_trigger ? 0.0f : std::clamp(deadzone, 0.0f, 0.95f);
+    return std::clamp((value - dz) / (1.f - dz), 0.f, 1.f);
 }
 static float raw_axis_component(Binding b, SDL_Gamepad *pad) {
     int raw = SDL_GetGamepadAxis(pad, (SDL_GamepadAxis)b.code);
@@ -157,8 +159,10 @@ void read_gamepad_actions(const Config &config, SDL_Gamepad *pad, std::array<flo
     out.fill(0.f);
     if (!pad)
         return;
-    for (int i = 0; i < L_UP; ++i)
-        out[i] = binding_strength(config.gamepad[i], pad, false, config.deadzone);
+    for (int i = 0; i < L_UP; ++i) {
+        float dz = (i == L2 || i == R2) ? 0.0f : config.deadzone;
+        out[i] = binding_strength(config.gamepad[i], pad, false, dz);
+    }
     sample_stick_2d(config, pad, L_LEFT, L_RIGHT, L_UP, L_DOWN, out);
     sample_stick_2d(config, pad, R_LEFT, R_RIGHT, R_UP, R_DOWN, out);
 }

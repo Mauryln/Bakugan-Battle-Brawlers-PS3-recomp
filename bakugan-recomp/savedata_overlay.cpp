@@ -58,6 +58,7 @@ struct OverlayState {
     HANDLE done;
     int ready;              /* render resources are live */
     int active;
+    int input_blocked;
     int is_save;
     int count;
     int sel;
@@ -66,6 +67,8 @@ struct OverlayState {
     int icons_dirty;        /* reload slot icons for this session */
     int pad_primed;
     int result;             /* 1 = picked, 0 = cancelled */
+    HWND hwnd;
+    HCURSOR prev_cursor;
     char out_dir[CELL_SAVEDATA_DIRNAME_SIZE];
     CellSaveDataSlotInfo slots[kMaxSlots];
 
@@ -658,8 +661,8 @@ int overlay_initialize(void*, void* device, void*, u32, u32, u32 out_w, u32 out_
         fprintf(stderr, "[savedata-ui] canvas upload setup failed (out=%ux%u)\n", out_w, out_h);
         return -1;
     }
-    g.width = out_w;
-    g.height = out_h;
+    g.width = g.tex_w;
+    g.height = g.tex_h;
     g.ready = 1;
     fprintf(stderr, "[savedata-ui] in-game overlay ready (GDI+ canvas %ux%u)%c",
             g.tex_w, g.tex_h, 10);
@@ -712,15 +715,43 @@ void move_selection(int delta)
     }
 }
 
+HWND overlay_window(void)
+{
+    if (g.hwnd && IsWindow(g.hwnd))
+        return g.hwnd;
+    HWND fg = GetActiveWindow();
+    char cls[32]{};
+    if (fg && GetClassNameA(fg, cls, sizeof cls) > 0 && std::strcmp(cls, "ps3recomp_d3d12") == 0) {
+        g.hwnd = fg;
+        return g.hwnd;
+    }
+    HWND found = nullptr;
+    while ((found = FindWindowExA(nullptr, found, "ps3recomp_d3d12", nullptr)) != nullptr) {
+        DWORD pid = 0;
+        GetWindowThreadProcessId(found, &pid);
+        if (pid == GetCurrentProcessId()) {
+            g.hwnd = found;
+            return g.hwnd;
+        }
+    }
+    return nullptr;
+}
+
 int hit_test(int x, int y)
 {
-    if (g.count <= 0 || g.width == 0 || g.height == 0) return -2;
+    if (g.width == 0 || g.height == 0) return -3;
     const Layout l = make_layout(g.width, g.height, g.count, g.sel);
-    const float fx = static_cast<float>(x), fy = static_cast<float>(y);
+    float fx = static_cast<float>(x), fy = static_cast<float>(y);
+    RECT client{};
+    if (HWND hwnd = overlay_window(); hwnd && GetClientRect(hwnd, &client) &&
+        client.right > client.left && client.bottom > client.top) {
+        fx = fx * static_cast<float>(g.width) / static_cast<float>(client.right - client.left);
+        fy = fy * static_cast<float>(g.height) / static_cast<float>(client.bottom - client.top);
+    }
     auto inside = [](const RectF& r, float px, float py) {
         return px >= r.X && px < r.GetRight() && py >= r.Y && py < r.GetBottom();
     };
-    if (inside(RectF(l.ok_x, l.ok_y, l.ok_w, l.ok_h), fx, fy)) return -1;
+    if (g.count > 0 && inside(RectF(l.ok_x, l.ok_y, l.ok_w, l.ok_h), fx, fy)) return -1;
     if (inside(RectF(l.cancel_x, l.cancel_y, l.cancel_w, l.cancel_h), fx, fy)) return -2;
     for (int row = 0; row < kRowsVisible; row++) {
         const int idx = l.start + row;
@@ -728,12 +759,20 @@ int hit_test(int x, int y)
         if (inside(RectF(l.lx, l.ly + row * l.row_h, l.lw, l.row_h - 10 * l.scale), fx, fy))
             return idx;
     }
-    return -2;
+    return -3;
 }
 
 int overlay_input(void*, unsigned msg, unsigned long long wp, long long lp)
 {
-    if (!g.active) return 0;
+    const bool active = __atomic_load_n(&g.active, __ATOMIC_RELAXED) != 0;
+    const bool blocked = __atomic_load_n(&g.input_blocked, __ATOMIC_RELAXED) != 0;
+    if (!active) {
+        if (blocked && ((msg >= WM_KEYFIRST && msg <= WM_KEYLAST) ||
+                        (msg >= WM_MOUSEFIRST && msg <= WM_MOUSELAST) ||
+                        msg == WM_INPUT))
+            return 1;
+        return 0;
+    }
 
     switch (msg) {
     case WM_KEYDOWN:
@@ -757,6 +796,7 @@ int overlay_input(void*, unsigned msg, unsigned long long wp, long long lp)
     case WM_LBUTTONDOWN: {
         int hit = hit_test(GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
         if (hit == -1) accept_choice();
+        else if (hit == -2) cancel_choice();
         else if (hit >= 0) { g.sel = hit; g.dirty = 1; }
         return 1;
     }
@@ -775,6 +815,10 @@ int overlay_input(void*, unsigned msg, unsigned long long wp, long long lp)
         }
         return 0;
     }
+    if ((msg >= WM_KEYFIRST && msg <= WM_KEYLAST) ||
+        (msg >= WM_MOUSEFIRST && msg <= WM_MOUSELAST) ||
+        msg == WM_INPUT)
+        return 1;
     return 0;
 }
 
@@ -824,10 +868,22 @@ int overlay_record(void*, void* command_list, void* target, u32, u32 width, u32 
 {
     static int was_active = 0;
     if (!g.ready) return 0;
-    if (g.active && !was_active)
-        SetCursor(LoadCursor(nullptr, IDC_ARROW));
-    was_active = g.active;
-    if (!g.active) return 0;
+    const int active = __atomic_load_n(&g.active, __ATOMIC_RELAXED);
+    if (active && !was_active) {
+        g.prev_cursor = SetCursor(LoadCursor(nullptr, IDC_ARROW));
+    } else if (!active && was_active) {
+        SetCursor(g.prev_cursor);
+        if (HWND hwnd = overlay_window(); hwnd && GetForegroundWindow() == hwnd) {
+            POINT pt{};
+            RECT client{};
+            if (GetCursorPos(&pt) && ScreenToClient(hwnd, &pt) &&
+                GetClientRect(hwnd, &client) && PtInRect(&client, pt)) {
+                SendMessageA(hwnd, WM_SETCURSOR, (WPARAM)hwnd, MAKELPARAM(HTCLIENT, WM_MOUSEMOVE));
+            }
+        }
+    }
+    was_active = active;
+    if (!active) return 0;
 
     poll_pad();
     if (g.icons_dirty) {
@@ -931,6 +987,7 @@ void wait_for_input_release(void)
         any = any || (GetAsyncKeyState(VK_ESCAPE) & 0x8000) != 0;
         any = any || (GetAsyncKeyState(VK_UP) & 0x8000) != 0;
         any = any || (GetAsyncKeyState(VK_DOWN) & 0x8000) != 0;
+        any = any || (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
         if (!any) break;
         Sleep(25);
     }
@@ -943,7 +1000,8 @@ int pick_slot(int is_save, const CellSaveDataSlotInfo* slots, int count, int foc
     if (!g.ready) return -1;   /* backend not up: use the headless default */
 
     EnterCriticalSection(&g.lock);
-    g.active = 1;
+    __atomic_store_n(&g.input_blocked, 1, __ATOMIC_RELAXED);
+    __atomic_store_n(&g.active, 1, __ATOMIC_RELAXED);
     g.is_save = is_save;
     g.count = count < kMaxSlots ? count : kMaxSlots;
     if (g.count < 0) g.count = 0;
@@ -960,11 +1018,12 @@ int pick_slot(int is_save, const CellSaveDataSlotInfo* slots, int count, int foc
 
     EnterCriticalSection(&g.lock);
     const int result = g.result;
-    g.active = 0;
+    __atomic_store_n(&g.active, 0, __ATOMIC_RELAXED);
     if (result == 1) snprintf(out_dir, out_size, "%s", g.out_dir);
     LeaveCriticalSection(&g.lock);
 
     wait_for_input_release();
+    __atomic_store_n(&g.input_blocked, 0, __ATOMIC_RELAXED);
     printf("[savedata-ui] %s -> '%s'\n", is_save ? "save" : "load",
            result == 1 ? out_dir : "(cancelled)");
     return result;
@@ -973,7 +1032,8 @@ int pick_slot(int is_save, const CellSaveDataSlotInfo* slots, int count, int foc
 } // namespace
 
 extern "C" bool bakugan_savedata_overlay_active() {
-    return __atomic_load_n(&g.active, __ATOMIC_RELAXED) != 0;
+    return __atomic_load_n(&g.active, __ATOMIC_RELAXED) != 0 ||
+           __atomic_load_n(&g.input_blocked, __ATOMIC_RELAXED) != 0;
 }
 
 void bakugan_savedata_overlay_install(const char* vfs_root)

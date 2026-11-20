@@ -151,10 +151,10 @@ inline void step_sixaxis(SixaxisState &s, float raw_tilt_x, float raw_tilt_y, fl
             float alpha_cf = kTauCf / (kTauCf + dt_sec * grav_weight);
 
             s.roll_angle = std::clamp(
-                alpha_cf * (s.roll_angle + (-raw_gyro[2]) * dt_sec) + (1.0f - alpha_cf) * accel_roll,
+                alpha_cf * (s.roll_angle + (-dz_roll) * dt_sec) + (1.0f - alpha_cf) * accel_roll,
                 -1.5f, 1.5f);
             s.pitch_angle = std::clamp(
-                alpha_cf * (s.pitch_angle + raw_gyro[0] * dt_sec) + (1.0f - alpha_cf) * accel_pitch,
+                alpha_cf * (s.pitch_angle + dz_pitch * dt_sec) + (1.0f - alpha_cf) * accel_pitch,
                 -1.5f, 1.5f);
 
             // Track resting hand pitch only when controller is steady and horizontally level.
@@ -229,6 +229,8 @@ inline void step_sixaxis(SixaxisState &s, float raw_tilt_x, float raw_tilt_y, fl
     out_tilt_x = std::clamp(s.tilt_x, -1.0f, 1.0f);
     out_tilt_y = std::clamp(s.tilt_y, -1.0f, 1.0f);
     out_accel = s.accel;
+    if (cfg.gyro_invert_x)
+        out_accel[0] = -out_accel[0];
     out_gyro = s.gyro;
 }
 // Integrate mouse pixel deltas into a leaky virtual stick: captures 1px slow sweeps,
@@ -268,7 +270,8 @@ inline void step_mouse_virtual_stick(float &virt_x, float &virt_y, int raw_dx, i
 }
 inline Report make_report_with_tilt(const std::array<float, ACTION_COUNT> &values, float tilt_x, float tilt_y,
                                     MotionMode mode, bool real_motion, const std::array<float, 3> &accel,
-                                    const std::array<float, 3> &gyro, uint64_t now, MotionPulse &pulse) {
+                                    const std::array<float, 3> &gyro, uint64_t now, MotionPulse &pulse,
+                                    bool gyro_invert_x = false) {
     Report r;
     for (int a = 0; a < 16; ++a)
         if (values[a] > 0.25f)
@@ -290,16 +293,21 @@ inline Report make_report_with_tilt(const std::array<float, ACTION_COUNT> &value
     bool has_real = (mode != MotionMode::RightStick) && real_motion && finite_motion(accel, gyro);
     float base_s0 = 512.f, base_s1 = 399.f, base_s2 = 512.f, base_s3 = 512.f;
     if (has_real) {
-        base_s0 = 512.f - accel[0] * (113.f / 9.80665f);
+        float ax = gyro_invert_x ? -accel[0] : accel[0];
+        base_s0 = 512.f - ax * (113.f / 9.80665f);
         base_s1 = 512.f - accel[1] * (113.f / 9.80665f);
         base_s2 = 512.f - accel[2] * (113.f / 9.80665f);
         base_s3 = 512.f + gyro[1] * (180.f / 3.14159265358979323846f) * (123.f / 90.f);
+        r.sensors[0] = sensor(base_s0);
+        r.sensors[1] = sensor(base_s1);
+        r.sensors[2] = sensor(base_s2);
+        r.sensors[3] = sensor(base_s3);
+    } else {
+        r.sensors[0] = sensor(base_s0 + stick_s0);
+        r.sensors[1] = sensor(base_s1 + stick_s1);
+        r.sensors[2] = sensor(base_s2);
+        r.sensors[3] = sensor(base_s3 + stick_s3);
     }
-
-    r.sensors[0] = sensor(base_s0 + stick_s0);
-    r.sensors[1] = sensor(base_s1 + stick_s1);
-    r.sensors[2] = sensor(base_s2);
-    r.sensors[3] = sensor(base_s3 + stick_s3);
     bool press = values[MOTION_THROW] > 0.25f;
     if (press && !pulse.held) {
         pulse.start = now;

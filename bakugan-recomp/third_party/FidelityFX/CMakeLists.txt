@@ -30,7 +30,7 @@ set(FFX_FI ON)
 set(FFX_OF ON)
 set(FFX_BUILD_AS_DLL OFF)
 set(FFX_AUTO_COMPILE_SHADERS ON)
-set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
+set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 add_subdirectory("${fidelityfx_sdk}" "${fidelityfx_BINARY_DIR}" EXCLUDE_FROM_ALL)
 
 set(_ffx_targets

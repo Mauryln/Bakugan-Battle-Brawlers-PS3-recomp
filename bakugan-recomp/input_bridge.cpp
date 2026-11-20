@@ -29,13 +29,22 @@ struct PortState {
 };
 std::array<PortState, MAX_PORTS> ports{};
 bool installed = false;
+ps3_host_pad_report neutral_report() {
+    ps3_host_pad_report r{};
+    r.lx = r.ly = r.rx = r.ry = 128;
+    r.sensors[0] = 512;
+    r.sensors[1] = 399;
+    r.sensors[2] = r.sensors[3] = 512;
+    r.sensors_valid = 1;
+    return r;
+}
 int provider(u32 port, ps3_host_pad_report *out, void *) {
     if (port >= MAX_PORTS)
         return 0;
     AcquireSRWLockShared(&lock);
     const bool ok = ports[port].connected;
     if (ok)
-        *out = ports[port].report;
+        *out = bakugan_savedata_overlay_active() ? neutral_report() : ports[port].report;
     ReleaseSRWLockShared(&lock);
     return ok ? 1 : 0;
 }
@@ -173,10 +182,14 @@ void update_mouse(HWND hwnd, std::array<float, player::ACTION_COUNT> &v,
             raw_dy = cursor.y - previous_cursor.y;
         }
 
-        POINT center{(screen_rect.left + screen_rect.right) / 2,
-                     (screen_rect.top + screen_rect.bottom) / 2};
-        if ((cursor.x != center.x || cursor.y != center.y) && SetCursorPos(center.x, center.y)) {
-            previous_cursor = center;
+        if (is_borderless) {
+            POINT center{(screen_rect.left + screen_rect.right) / 2,
+                         (screen_rect.top + screen_rect.bottom) / 2};
+            if ((cursor.x != center.x || cursor.y != center.y) && SetCursorPos(center.x, center.y)) {
+                previous_cursor = center;
+            } else {
+                previous_cursor = cursor;
+            }
         } else {
             previous_cursor = cursor;
         }
@@ -196,15 +209,6 @@ void update_mouse(HWND hwnd, std::array<float, player::ACTION_COUNT> &v,
         player::step_mouse_virtual_stick(mouse_virt_x, mouse_virt_y, raw_dx, raw_dy, sens, dt_sec);
         player::step_mouse_virtual_stick(mouse_look_x, mouse_look_y, 0, 0, sens, dt_sec);
     }
-}
-ps3_host_pad_report neutral_report() {
-    ps3_host_pad_report r{};
-    r.lx = r.ly = r.rx = r.ry = 128;
-    r.sensors[0] = 512;
-    r.sensors[1] = 399;
-    r.sensors[2] = r.sensors[3] = 512;
-    r.sensors_valid = 1;
-    return r;
 }
 ps3_host_pad_report to_host_report(const player::Report &r) {
     ps3_host_pad_report out{};
@@ -259,7 +263,8 @@ ps3_host_pad_report sample_keyboard(bool foreground, HWND hwnd, POINT &previous_
                                     const VirtualMouse &vm, ULONGLONG now, float dt_sec,
                                     player::MotionPulse &pulse) {
     std::array<float, player::ACTION_COUNT> kb_values{};
-    if (foreground) {
+    const bool overlay_open = bakugan_savedata_overlay_active();
+    if (foreground && !overlay_open) {
         for (int i = 0; i < player::ACTION_COUNT; ++i)
             kb_values[i] = player::binding_strength(config.keyboard[i], nullptr, true, config.deadzone);
         int mouse_buttons = ((GetAsyncKeyState(VK_LBUTTON) & 0x8000) ? 1 : 0) |
@@ -288,7 +293,7 @@ ps3_host_pad_report sample_keyboard(bool foreground, HWND hwnd, POINT &previous_
     float raw_tilt_y = std::clamp(kb_tilt_y + mouse_virt_y, -1.0f, 1.0f);
     float tilt_x = 0.0f, tilt_y = 0.0f;
     std::array<float, 3> a{0.0f, 9.80665f, 0.0f}, g{}, filt_a{0.0f, 9.80665f, 0.0f}, filt_g{};
-    if (foreground) {
+    if (foreground && !overlay_open) {
         player::step_sixaxis(kb_sixaxis, raw_tilt_x, raw_tilt_y, 0.0f, false, a, g,
                              config, dt_sec, tilt_x, tilt_y, filt_a, filt_g);
         kb_values[player::R_LEFT] = std::max(kb_values[player::R_LEFT], std::max(0.0f, -tilt_x));
@@ -301,7 +306,7 @@ ps3_host_pad_report sample_keyboard(bool foreground, HWND hwnd, POINT &previous_
                                      : config.motion;
     ps3_host_pad_report result = to_host_report(
         player::make_report_with_tilt(kb_values, tilt_x, tilt_y, kb_mode, false, filt_a, filt_g, now, pulse));
-    if (foreground && vm.active)
+    if (foreground && !overlay_open && vm.active)
         result.buttons |= (uint16_t)vm.segs[vm.cur].pad;
     return result;
 }

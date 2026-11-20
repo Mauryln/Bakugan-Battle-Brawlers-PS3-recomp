@@ -153,7 +153,7 @@ namespace BakuganInstaller
                 };
                 foreach (string guess in guesses)
                 {
-                    if (File.Exists(guess)) { o.Eboot = Path.GetFullPath(guess); break; }
+                    if (Installer.IsValidElf(guess)) { o.Eboot = Path.GetFullPath(guess); break; }
                 }
             }
             return o;
@@ -218,9 +218,79 @@ namespace BakuganInstaller
         private static long copiedBytes;
         private static Action<int, string> report;
 
+        public static bool IsValidElf(string path)
+        {
+            if (string.IsNullOrEmpty(path) || !File.Exists(path))
+                return false;
+            try
+            {
+                var info = new FileInfo(path);
+                if (info.Length < 1000000)
+                    return false;
+                using (var f = File.OpenRead(path))
+                {
+                    var head = new byte[4];
+                    return f.Read(head, 0, 4) == 4 &&
+                           head[0] == 0x7F && head[1] == (byte)'E' &&
+                           head[2] == (byte)'L' && head[3] == (byte)'F';
+                }
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        public static bool IsUnsafeInstallDirectory(string dir, out string reason)
+        {
+            reason = null;
+            if (string.IsNullOrWhiteSpace(dir))
+            {
+                reason = Loc.T("Selecciona la carpeta de instalación.",
+                               "Please select the installation folder.");
+                return true;
+            }
+            string full;
+            try
+            {
+                full = Path.GetFullPath(dir).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            }
+            catch
+            {
+                reason = Loc.T("La ruta de instalación no es válida.",
+                               "The installation path is invalid.");
+                return true;
+            }
+            string localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+            if (string.IsNullOrEmpty(localAppData))
+                localAppData = Environment.GetEnvironmentVariable("LOCALAPPDATA") ?? "";
+            if (!string.IsNullOrEmpty(localAppData))
+            {
+                string saveRoot = Path.GetFullPath(Path.Combine(localAppData, "BakuganRecomp"))
+                    .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+                string savePrefix = saveRoot + Path.DirectorySeparatorChar;
+                string fullPrefix = full + Path.DirectorySeparatorChar;
+                if (string.Equals(full, saveRoot, StringComparison.OrdinalIgnoreCase) ||
+                    full.StartsWith(savePrefix, StringComparison.OrdinalIgnoreCase) ||
+                    saveRoot.StartsWith(fullPrefix, StringComparison.OrdinalIgnoreCase))
+                {
+                    reason = Loc.T(
+                        "No se puede instalar en '" + saveRoot + "' (ni en una carpeta que la contenga) porque ahí se guardan tus partidas y ajustes (player.ini), y Uninstall.exe borraría tus partidas.\n\n" +
+                        "Elige otra carpeta de instalación, por ejemplo:\n" + Path.Combine(localAppData, "Programs", "BakuganRecomp"),
+                        "Cannot install into '" + saveRoot + "' (or a folder containing it) because your save data and settings (player.ini) are stored there, and Uninstall.exe would delete your saves.\n\n" +
+                        "Please choose another installation folder, for example:\n" + Path.Combine(localAppData, "Programs", "BakuganRecomp"));
+                    return true;
+                }
+            }
+            return false;
+        }
+
         public static void Run(Options o, StringBuilder log, Action<int, string> progress)
         {
             report = progress;
+            string unsafeReason;
+            if (IsUnsafeInstallDirectory(o.Dir, out unsafeReason))
+                throw new Exception(unsafeReason);
             string exeDir = Path.GetDirectoryName(Application.ExecutablePath);
             string payload = Path.Combine(exeDir, "payload");
             if (!Directory.Exists(payload) || !File.Exists(Path.Combine(payload, "BakuganLauncher.exe")))
@@ -270,13 +340,15 @@ namespace BakuganInstaller
 
                 /* Retail discs carry an encrypted EBOOT.BIN. The port boots the
                  * decrypted ELF, which is extracted automatically using RPCS3 or
-                 * the built-in decrypter. */
+                 * the built-in decrypter. Re-installations also validate any
+                 * existing EBOOT.elf and re-extract it if missing or corrupted. */
                 string installedElf = Path.Combine(o.Dir, "game", "PS3_GAME", "USRDIR", "EBOOT.elf");
-                if (!File.Exists(installedElf))
+                string reason = "";
+                if (!IsValidElf(installedElf))
                 {
-                    string reason = "";
+                    try { if (File.Exists(installedElf)) File.Delete(installedElf); } catch { }
                     bool extracted = false;
-                    if (File.Exists(sourceElf))
+                    if (IsValidElf(sourceElf))
                     {
                         File.Copy(sourceElf, installedElf, true);
                         extracted = true;
@@ -286,7 +358,7 @@ namespace BakuganInstaller
                     {
                         Status(95, Loc.T("Extrayendo EBOOT.elf...", "Extracting EBOOT.elf..."));
                         extracted = SelfExtract.TryExtract(sourceBin, installedElf, out reason);
-                        if (extracted)
+                        if (extracted && IsValidElf(installedElf))
                         {
                             log.AppendLine("EBOOT.elf extracted with SelfExtract: " + reason);
                         }
@@ -299,7 +371,7 @@ namespace BakuganInstaller
                             string workDir = Path.Combine(o.Dir, ".decrypt");
                             extracted = Rpcs3Decrypt.TryDecrypt(sourceBin, workDir, rpcs3Dir,
                                                                 out rpcs3Elf, out rpcs3Reason);
-                            if (extracted && File.Exists(rpcs3Elf))
+                            if (extracted && IsValidElf(rpcs3Elf))
                             {
                                 File.Copy(rpcs3Elf, installedElf, true);
                                 try { Directory.Delete(workDir, true); } catch { }
@@ -312,18 +384,23 @@ namespace BakuganInstaller
                             }
                         }
                     }
-
-                    // Verify resulting ELF
-                    if (!File.Exists(installedElf) || new FileInfo(installedElf).Length < 1000000)
+                    else if (File.Exists(sourceElf))
                     {
-                        throw new Exception(Loc.T(
-                            "No se pudo extraer o descifrar automáticamente EBOOT.elf desde la imagen ISO.\n\n" +
-                            "Causa: " + reason + "\n\n" +
-                            "Asegúrate de seleccionar una copia legal de la versión europea de PS3 (BLES00758) sin corrupción y con suficiente espacio en disco.",
-                            "Could not automatically extract or decrypt EBOOT.elf from the ISO image.\n\n" +
-                            "Cause: " + reason + "\n\n" +
-                            "Ensure you select a valid dump of the European PS3 version (BLES00758) without corruption and with sufficient disk space."));
+                        reason = Loc.T("El archivo EBOOT.elf de la ISO está truncado o dañado.",
+                                       "The EBOOT.elf file in the ISO is truncated or corrupted.");
                     }
+                }
+
+                // Always verify resulting ELF integrity and size (including re-installations)
+                if (!IsValidElf(installedElf))
+                {
+                    throw new Exception(Loc.T(
+                        "No se pudo extraer o descifrar automáticamente un EBOOT.elf válido desde la imagen ISO.\n\n" +
+                        "Causa: " + (string.IsNullOrEmpty(reason) ? "EBOOT.elf ausente, truncado (< 1 MB) o cabecera ELF inválida" : reason) + "\n\n" +
+                        "Asegúrate de seleccionar una copia legal de la versión europea de PS3 (BLES00758) sin corrupción y con suficiente espacio en disco.",
+                        "Could not automatically extract or decrypt a valid EBOOT.elf from the ISO image.\n\n" +
+                        "Cause: " + (string.IsNullOrEmpty(reason) ? "EBOOT.elf missing, truncated (< 1 MB), or invalid ELF header" : reason) + "\n\n" +
+                        "Ensure you select a valid dump of the European PS3 version (BLES00758) without corruption and with sufficient disk space."));
                 }
                 log.AppendLine("game data copied to " + gameDir);
             }
@@ -580,12 +657,12 @@ namespace BakuganInstaller
                                 MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return;
             }
-            if (string.IsNullOrEmpty(dir.Text))
+            string unsafeReason;
+            if (Installer.IsUnsafeInstallDirectory(dir.Text, out unsafeReason))
             {
                 MessageBox.Show(this,
-                                Loc.T("Selecciona la carpeta de instalación.",
-                                      "Please select the installation folder."),
-                                Loc.T("Falta la carpeta", "Missing Folder"),
+                                unsafeReason,
+                                Loc.T("Carpeta no permitida", "Disallowed Folder"),
                                 MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return;
             }

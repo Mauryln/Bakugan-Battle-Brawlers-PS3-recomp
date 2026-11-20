@@ -401,10 +401,11 @@ void apply_environment(const Config &c, const std::wstring &path) {
     env(L"PS3_FSR", c.fsr);
     env(L"PS3_AA", c.aa_mode);
     env(L"PS3_FSR_SHARPNESS", std::to_wstring(c.sharpness));
+    env(bakugan::FRAME_GEN_ENV,
+        choose(c.frame_gen, {bakugan::FRAME_GEN_OFF, bakugan::FRAME_GEN_FSR3}, L""));
     env(L"PS3_ANISO", std::to_wstring(c.aniso));
     env(L"PS3_LOD_BIAS", L"0");
-    /* Fixed shipping limit: the launcher no longer exposes an FPS selector. */
-    env(L"PS3_FPS_CAP", L"30");
+    env(L"PS3_FPS_CAP", choose(c.cap, {L"0", L"30", L"60", L"90", L"120", L"monitor"}, L"30"));
     env(L"PS3_TICK_HZ", L"");
     env(L"PS3_WINDOW_MODE", c.window);
     env(L"PS3_WINDOW_MONITOR", L"primary");
