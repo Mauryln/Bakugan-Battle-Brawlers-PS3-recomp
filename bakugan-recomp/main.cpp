@@ -134,8 +134,10 @@ unsigned cellGcm_flip_request_count(void);
 #include "fps_cap.h"
 #if defined(_WIN32)
 #include "output_upscale.h"
+#include "frame_generation.h"
 #include "scene_state.h"
 #include "player_config.h"
+#include "third_party/FidelityFX/fidelityfx_boot_report.h"
 extern "C" int  rsx_d3d12_backend_init(uint32_t w, uint32_t h, const char* title);
 extern "C" void rsx_d3d12_backend_present(void);
 extern "C" void rsx_d3d12_backend_flush_shader_cache(void);
@@ -265,6 +267,7 @@ static void fps_cap_wait(void)
     static int cap = -1;
     static int vsync_on = -1;
     static double next = 0.0;
+    bool interpolating = false;
     if (cap < 0) {
         const char* e = getenv("PS3_FPS_CAP");
         if (e && (!strcmp(e, "monitor") || !strcmp(e, "auto"))) {
@@ -285,11 +288,22 @@ static void fps_cap_wait(void)
         vsync_on = 0;
 #endif
     }
-    if (cap <= 0) return;
+#ifdef _WIN32
+    static bool was_interpolating = false;
+    interpolating = bakugan_frame_generation_active();
+    if (was_interpolating != interpolating) {
+        next = 0.0;
+        was_interpolating = interpolating;
+    }
+#endif
+    const int base_cap = interpolating ? 30 : cap;
+    if (base_cap <= 0) return;
     if (s_qpc_freq2 == 0.0) { LARGE_INTEGER f; QueryPerformanceFrequency(&f); s_qpc_freq2 = (double)f.QuadPart; }
     LARGE_INTEGER c; QueryPerformanceCounter(&c);
     const double now = (double)c.QuadPart / s_qpc_freq2;
-    const double remaining = bakugan::fps_cap_step(now, 1.0 / cap, vsync_on != 0, &next);
+    // When the proxy owns display pacing, cap real frames without reserving
+    // the wake margin for a native Present that waits on vertical blank.
+    const double remaining = bakugan::fps_cap_step(now, 1.0 / base_cap, vsync_on != 0 && !interpolating, &next);
     if (remaining > 0.0) {
         const double target = now + remaining;
         if (remaining > 0.002) Sleep((DWORD)((remaining - 0.001) * 1000.0));
@@ -945,6 +959,7 @@ int main(int argc, char** argv)
         } else {
             fprintf(stderr, "[boot] invalid player.ini; using defaults\n");
         }
+        _wputenv_s(bakugan::FRAME_GEN_ENV, player::resolve_frame_gen(cfg).c_str());
     }
     if (!getenv("PS3_VERBOSE")) _putenv_s("PS3_VERBOSE", "0");
     /* The same applies to the renderer's diagnostic switches: every one of
@@ -978,11 +993,13 @@ int main(int argc, char** argv)
         if (FILE* file = fopen(report, "wb")) {
             const char* keys[] = {"PS3_DEBUG", "PS3_VERBOSE", "PS3_VFS_ROOT", "PS3_GAMEDATA_ROOT",
                 "PS3_PLAYER_CONFIG", "PS3_INTERNAL", "PS3_OUTPUT", "PS3_FSR", "PS3_AA", "PS3_FSR_SHARPNESS",
-                "PS3_FPS_CAP", "PS3_TICK_HZ", "PS3_WINDOW_MODE", "PS3_WINDOW_MONITOR", "PS3_LANG", "PS3_ANISO",
+                PS3_ENV_FRAME_GEN, "PS3_FPS_CAP", "PS3_TICK_HZ", "PS3_WINDOW_MODE",
+                "PS3_WINDOW_MONITOR", "PS3_LANG", "PS3_ANISO",
                 "PS3_LOD_BIAS", "SPU_INTERP_UNLIFTED", "RSX_ACCUM_FRAME", "GCM_FULL_FRAMES",
                 "RSX_PACK_WORKERS", "PAD_REPLAY", "PAD_CLOCK", "PS3_SAVEDATA_CHOICE"};
             for (const char* key : keys)
                 fprintf(file, "%s=%s\n", key, getenv(key) ? getenv(key) : "<unset>");
+            bakugan::write_fidelityfx_boot_report(file);
             fprintf(file, "stdio_types=%lu,%lu,%lu priority=%lu\n",
                 GetFileType(GetStdHandle(STD_INPUT_HANDLE)),
                 GetFileType(GetStdHandle(STD_OUTPUT_HANDLE)),
@@ -1077,6 +1094,9 @@ int main(int argc, char** argv)
      * until the title registers its vblank and flip handlers during init. */
     g_ps3_guest_caller = harness_guest_caller;
     if (bakugan_output_configure() != 0) return 1;
+#ifdef _WIN32
+    if (bakugan_frame_generation_configure() != 0) return 1;
+#endif
     CreateThread(NULL, 4u * 1024 * 1024, frame_clock, NULL, 0, NULL);
     if (getenv("BAKUGAN_DUMP_TEX"))
         CreateThread(NULL, 256u * 1024, debug_dump_tex, NULL, 0, NULL);

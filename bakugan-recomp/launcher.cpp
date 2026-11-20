@@ -39,7 +39,8 @@ enum {
     ID_MOTION_MODE,
     ID_SIXAXIS_SMOOTH,
     ID_AA_MODE,
-    ID_SHARPNESS
+    ID_SHARPNESS,
+    ID_FRAME_GEN
 };
 constexpr UINT WM_APP_REBUILD = WM_APP + 1;
 constexpr int WIDTH = 1000, HEIGHT = 800;
@@ -208,6 +209,7 @@ void read_controls() {
     config.cap = L"30";
     config.window = windows[index(ID_WINDOW, 2)];
     config.fsr = L"auto";
+    config.frame_gen = index(ID_FRAME_GEN, 2) == 1 ? bakugan::FRAME_GEN_FSR3 : bakugan::FRAME_GEN_OFF;
     config.aa_mode = index(ID_AA_MODE, 2) == 1 ? L"off" : L"smaa";
     int sharp_idx = index(ID_SHARPNESS, 4);
     if (sharp_idx == 0)
@@ -249,6 +251,7 @@ void fill_controls() {
         ++a;
     choose(ID_ANISO, a);
     choose(ID_AA_MODE, config.aa_mode == L"off" ? 1 : 0);
+    choose(ID_FRAME_GEN, config.frame_gen == bakugan::FRAME_GEN_FSR3 ? 1 : 0);
     int sharp_idx = 3;
     if (std::abs(config.sharpness - 1.2f) < 0.05f)
         sharp_idx = 0;
@@ -899,10 +902,11 @@ void create_controls() {
     label(S(L"Suavizado Sixaxis", L"Sixaxis smoothing"), 32, 612, 270);
     slider(ID_SIXAXIS_SMOOTH, 28, 634, 274, 0, 100, 45);
 
-    add(L"STATIC",
-        S(L"30 FPS uniformes · FSR1 automático > 720p.",
-          L"Uniform 30 FPS · Auto FSR1 above 720p."),
-        0, 32, 672, 268, 24);
+    label(S(L"Interpolación", L"Frame generation"), 32, 676, 115);
+    combo(ID_FRAME_GEN, 152, 672, 148,
+          {S(L"Desactivada", L"Off"), L"FSR 3.1 (experimental)"});
+    label(S(L"30 FPS uniformes · FSR1 automático > 720p.",
+            L"Uniform 30 FPS · Auto FSR1 above 720p."), 32, 702, 268);
 
     // Panel derecho: Idioma y controles interactivos
     add(L"BUTTON", S(L"Idioma y controles interactivos", L"Language and interactive controls"), 0, 332, 146, 652, 558, BS_GROUPBOX);

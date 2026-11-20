@@ -3,7 +3,6 @@
 #include <windows.h>
 #include <SDL3/SDL.h>
 #include "player_config.h"
-#include "graphics_config.h"
 #include <filesystem>
 #include <fstream>
 #include <algorithm>
@@ -217,6 +216,8 @@ bool load(Config &c, const std::wstring &path, std::wstring *error) {
         choose(get(L"Graphics", L"FPS", c.cap, path), {L"0", L"30", L"60", L"90", L"120", L"monitor"}, c.cap);
     c.window = choose(get(L"Graphics", L"Window", c.window, path), {L"windowed", L"borderless"}, c.window);
     c.fsr = choose(get(L"Graphics", L"FSR", c.fsr, path), {L"auto", L"fsr1", L"0"}, c.fsr);
+    c.frame_gen = choose(get(L"Graphics", L"frame_gen", c.frame_gen, path),
+                         {bakugan::FRAME_GEN_OFF, bakugan::FRAME_GEN_FSR3}, c.frame_gen);
     auto first_set = [&](const wchar_t *k1, const wchar_t *k2, const std::wstring &fb) {
         std::wstring v = get(L"Graphics", k1, L"", path);
         if (v.empty() && k2)
@@ -321,6 +322,7 @@ bool save(const Config &c, const std::wstring &path, std::wstring *error) {
     put(L"Graphics", L"FPS", c.cap);
     put(L"Graphics", L"Window", c.window);
     put(L"Graphics", L"FSR", c.fsr);
+    put(L"Graphics", L"frame_gen", c.frame_gen);
     put(L"Graphics", L"AAMode", c.aa_mode);
     put(L"Graphics", L"Sharpness", std::to_wstring(c.sharpness));
     put(L"Graphics", L"Anisotropy", std::to_wstring(c.aniso));
@@ -377,6 +379,14 @@ std::wstring binding_name(Binding b, bool english) {
     std::string n = a ? a : (english ? "axis" : "eje");
     return std::wstring(n.begin(), n.end()) + (b.kind == BindingKind::AxisNegative ? L" -" : L" +");
 }
+std::wstring resolve_frame_gen(const Config &c) {
+    wchar_t value[std::size(bakugan::FRAME_GEN_FSR3)];
+    const DWORD size = GetEnvironmentVariableW(bakugan::FRAME_GEN_ENV, value, (DWORD)std::size(value));
+    if (size > 0 && size < std::size(value))
+        return choose(value, {bakugan::FRAME_GEN_OFF, bakugan::FRAME_GEN_FSR3}, c.frame_gen);
+    return c.frame_gen;
+}
+
 void apply_environment(const Config &c, const std::wstring &path) {
     auto env = [](const wchar_t *key, const std::wstring &value) {
         SetEnvironmentVariableW(key, value.empty() ? nullptr : value.c_str());

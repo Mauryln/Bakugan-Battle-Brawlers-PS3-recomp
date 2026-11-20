@@ -1,0 +1,339 @@
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -282,6 +282,8 @@
+     u32                        rtv_descriptor_size;
+     ID3D12Resource*            render_targets[FRAME_COUNT];
+     ID3D12Resource*            output_targets[FRAME_COUNT];
++    ID3D12Resource*            hudless_native[FRAME_COUNT];
++    ID3D12Resource*            hudless_output[FRAME_COUNT];
+     ID3D12CommandAllocator*    cmd_allocators[FRAME_COUNT];
+     ID3D12GraphicsCommandList* cmd_list;
+ 
+@@ -398,7 +400,9 @@
+     u32 fps;
+     u64 fps_title_start;
+     u32 fps_title_presents;
++    u32 fps_title_last_present;
+     int fps_title_enabled;
++    int custom_swapchain;
+ 
+     int initialized;
+ } D3D12State;
+@@ -408,6 +412,16 @@
+ static int s_output_pass_ready;
+ static rsx_d3d12_host_overlay s_host_overlay;
+ static int s_host_overlay_ready;
++static rsx_d3d12_swapchain_provider s_swapchain_provider;
++static rsx_d3d12_present_scene s_pending_scene;
++static u32 s_pending_scene_zeta;
++
++int rsx_d3d12_backend_set_swapchain_provider(const rsx_d3d12_swapchain_provider* provider)
++{
++    if (s_d3d.device || !provider || !provider->create || !provider->record || !provider->drain) return -1;
++    s_swapchain_provider = *provider;
++    return 0;
++}
+ 
+ int rsx_d3d12_backend_set_host_overlay(const rsx_d3d12_host_overlay* overlay)
+ {
+@@ -1282,13 +1296,19 @@
+     sc_desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
+ 
+     IDXGISwapChain1* swap_chain1 = NULL;
+-    hr = factory->lpVtbl->CreateSwapChainForHwnd(
+-        factory, (IUnknown*)s_d3d.cmd_queue,
+-        s_d3d.hwnd, &sc_desc, NULL, NULL, &swap_chain1);
+-    if (FAILED(hr)) {
+-        printf("[D3D12] ERROR: CreateSwapChainForHwnd failed (0x%08lX)\n", hr);
+-        factory->lpVtbl->Release(factory);
+-        return -1;
++    if (s_swapchain_provider.create) {
++        swap_chain1 = s_swapchain_provider.create(s_d3d.hwnd, &sc_desc, s_d3d.cmd_queue, factory);
++    }
++    s_d3d.custom_swapchain = swap_chain1 != NULL;
++    if (!swap_chain1) {
++        hr = factory->lpVtbl->CreateSwapChainForHwnd(
++            factory, (IUnknown*)s_d3d.cmd_queue,
++            s_d3d.hwnd, &sc_desc, NULL, NULL, &swap_chain1);
++        if (FAILED(hr)) {
++            printf("[D3D12] ERROR: CreateSwapChainForHwnd failed (0x%08lX)\n", hr);
++            factory->lpVtbl->Release(factory);
++            return -1;
++        }
+     }
+ 
+     /* Disable Alt+Enter fullscreen toggle */
+@@ -2178,7 +2198,7 @@
+     rb->lpVtbl->Release(rb);
+ }
+ 
+-static void rsx_capture_frame(u32 fi, u32 ndraws, u32 capidx)
++static void rsx_capture_frame(u32 fi, u32 ndraws, u32 capidx, ID3D12Resource* hudless)
+ {
+     char dir[300]; const char* base = getenv("RSX_CAP_DIR");
+     if (!base || !*base) base = "rsxcap";
+@@ -2271,6 +2291,12 @@
+         snprintf(path, sizeof path, "%s/output.bmp", dir);
+         cap_readback_write(s_d3d.output_targets[fi], s_output_pass.width, s_output_pass.height,
+                            DXGI_FORMAT_R8G8B8A8_UNORM, D3D12_RESOURCE_STATE_PRESENT, fi, path);
++    }
++    if (hudless) {
++        snprintf(path, sizeof path, "%s/hudless.bmp", dir);
++        cap_readback_write(hudless, s_output_pass_ready ? s_output_pass.width : s_d3d.width,
++                           s_output_pass_ready ? s_output_pass.height : s_d3d.height,
++                           DXGI_FORMAT_R8G8B8A8_UNORM, D3D12_RESOURCE_STATE_COMMON, fi, path);
+     }
+     for (int i = 0; i < MAX_OFF_RTS; i++) {
+         OffRT* r = &s_d3d.off_rt[i];
+@@ -6758,10 +6784,91 @@
+     }
+ }
+ 
++static ID3D12Resource* create_hudless_target(u32 width, u32 height, D3D12_RESOURCE_FLAGS flags)
++{
++    D3D12_HEAP_PROPERTIES heap = {0};
++    heap.Type = D3D12_HEAP_TYPE_DEFAULT;
++    D3D12_RESOURCE_DESC texture = {0};
++    texture.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
++    texture.Width = width;
++    texture.Height = height;
++    texture.DepthOrArraySize = texture.MipLevels = 1;
++    texture.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
++    texture.SampleDesc.Count = 1;
++    texture.Flags = flags;
++    ID3D12Resource* result = NULL;
++    s_d3d.device->lpVtbl->CreateCommittedResource(s_d3d.device, &heap, D3D12_HEAP_FLAG_NONE,
++        &texture, D3D12_RESOURCE_STATE_COMMON, NULL, &IID_ID3D12Resource, (void**)&result);
++    return result;
++}
++
++static int capture_hudless(u32 fi)
++{
++    if (!s_d3d.hudless_native[fi])
++        s_d3d.hudless_native[fi] = create_hudless_target(s_d3d.width, s_d3d.height, D3D12_RESOURCE_FLAG_NONE);
++    if (!s_d3d.hudless_native[fi]) return 0;
++    D3D12_RESOURCE_BARRIER barriers[2] = {0};
++    barriers[0].Type = barriers[1].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
++    barriers[0].Transition.Subresource = barriers[1].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
++    barriers[0].Transition.pResource = s_d3d.render_targets[fi];
++    barriers[0].Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
++    barriers[0].Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
++    barriers[1].Transition.pResource = s_d3d.hudless_native[fi];
++    barriers[1].Transition.StateBefore = D3D12_RESOURCE_STATE_COMMON;
++    barriers[1].Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
++    ID3D12GraphicsCommandList* list = s_d3d.cmd_list;
++    list->lpVtbl->ResourceBarrier(list, 2, barriers);
++    list->lpVtbl->CopyResource(list, s_d3d.hudless_native[fi], s_d3d.render_targets[fi]);
++    barriers[0].Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
++    barriers[0].Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
++    barriers[1].Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
++    barriers[1].Transition.StateAfter = D3D12_RESOURCE_STATE_COMMON;
++    list->lpVtbl->ResourceBarrier(list, 2, barriers);
++    return 1;
++}
++
++static ID3D12Resource* output_hudless(u32 fi)
++{
++    if (!s_output_pass_ready) return s_d3d.hudless_native[fi];
++    if (!s_output_pass.record_hudless) return NULL;
++    if (!s_d3d.hudless_output[fi])
++        s_d3d.hudless_output[fi] = create_hudless_target(s_output_pass.width, s_output_pass.height,
++                                                       D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET);
++    if (!s_d3d.hudless_output[fi]) return NULL;
++    if (s_output_pass.record_hudless(s_output_pass.userdata, s_d3d.cmd_list,
++            s_d3d.hudless_native[fi], s_d3d.hudless_output[fi], fi)) return NULL;
++    return s_d3d.hudless_output[fi];
++}
++
++static void fps_title_on_present(void)
++{
++    UINT present_count = s_d3d.fps_title_last_present + 1;
++    /* A provider can submit extra presents for one guest frame. */
++    if (s_d3d.custom_swapchain && FAILED(s_d3d.swap_chain->lpVtbl->GetLastPresentCount(
++            s_d3d.swap_chain, &present_count))) return;
++
++    u64 now = GetTickCount64();
++    if (!s_d3d.fps_title_start) s_d3d.fps_title_start = now;
++    else s_d3d.fps_title_presents += present_count - s_d3d.fps_title_last_present;
++    s_d3d.fps_title_last_present = present_count;
++    u64 elapsed = now - s_d3d.fps_title_start;
++    if (elapsed >= 1000) {
++        char title[160];
++        snprintf(title, sizeof(title), "%s | FPS: %.1f", g_rsx_title_base,
++                 1000.0 * s_d3d.fps_title_presents / (double)elapsed);
++        SetWindowTextA(s_d3d.hwnd, title);
++        s_d3d.fps_title_start = now;
++        s_d3d.fps_title_presents = 0;
++    }
++}
++
+ static void render_frame(void)
+ {
+     double _rf0 = perf_on() ? perf_now() : 0.0;
+     u32 fi = s_d3d.frame_index;
++    int captured_hudless = 0;
++    int recorded_scene = 0;
++    ID3D12Resource* frame_hudless = NULL;
+ 
+     /* Bakugan's battle renders its scene into an offscreen target (1120x584)
+      * and then composites it, but the composite never reaches the display: the
+@@ -7103,6 +7210,11 @@
+       } }
+ 
+     for (int i = 0; i < MAX_DEPTH_SURFACES; ++i) s_depth_pool.surfaces[i].used = 0;
++    if (s_pending_scene_zeta) {
++        int slot = depth_pool_find(s_pending_scene_zeta, s_swapchain_provider.scene_width,
++                                   s_swapchain_provider.scene_height);
++        if (slot >= 0) s_depth_pool.surfaces[slot].used = 1;
++    }
+     for (u32 d = 0; d < s_d3d.draw_count && d < MAX_DRAWS; ++d) {
+         D3D12DrawRecord* dr = &s_d3d.draws[d];
+         int destination = depth_pool_find(dr->zeta_off, dr->zeta_w, dr->zeta_h);
+@@ -7899,6 +8011,32 @@
+                 s_d3d.cmd_list->lpVtbl->IASetVertexBuffers(s_d3d.cmd_list, 0, 1, &vbv);
+                 s_d3d.cmd_list->lpVtbl->DrawInstanced(s_d3d.cmd_list,
+                     dr->vertex_count, 1, 0, 0);
++                if (s_d3d.custom_swapchain && !recorded_scene &&
++                    want_zeta >= 0 && dr->rt_off == s_swapchain_provider.scene_color_offset &&
++                    dr->vp_w == s_swapchain_provider.scene_width && dr->vp_h == s_swapchain_provider.scene_height &&
++                    dr->zeta_w == dr->vp_w && dr->zeta_h == dr->vp_h &&
++                    !dr->blend && (dr->depth_key & 3u) == 3u && dr->cmask) {
++                    const float* cb = (const float*)((const char*)s_d3d.vp_cb_mapped +
++                        ((u64)s_d3d.vp_parity * MAX_DRAWS + dr->cb_slot) * VP_CB_STRIDE);
++                    /* Bakugan's scene VP stores its projection in c[4..7].
++                     * Include the viewport transform applied to SV_Position.z. */
++                    memcpy(s_pending_scene.view, cb, sizeof s_pending_scene.view);
++                    memcpy(s_pending_scene.projection, cb + 4 * 4, sizeof s_pending_scene.projection);
++                    s_pending_scene.depth_scale = cb[RSX_MAX_VERTEX_CONSTANTS * 4 + 2];
++                    s_pending_scene.depth_offset = cb[RSX_MAX_VERTEX_CONSTANTS * 4 + 6];
++                    s_pending_scene_zeta = dr->zeta_off;
++                    recorded_scene = 1;
++                }
++                /* The battle post-process is copied to the display with a full
++                 * viewport, unblended quad. The following 2D draws are HUD. */
++                if (s_present_this_frame && s_pending_scene_zeta && !dr->rt_off && !dr->blend &&
++                    !(dr->depth_key & 1u) && dr->cmask == 0xf &&
++                    dr->vp_x == 0 && dr->vp_y == 0 && dr->vp_w == s_d3d.width && dr->vp_h == s_d3d.height &&
++                    (dr->vertex_count == 4 || dr->vertex_count == 6) && dr->tex_rt[0] >= 0) {
++                    const OffRT* source = &s_d3d.off_rt[dr->tex_rt[0]];
++                    if (source->w == s_d3d.width && source->h == s_d3d.height)
++                        captured_hudless = capture_hudless(fi);
++                }
+                 { static int cap = -1, n = 0;
+                   if (cap < 0) { const char* e = getenv("RX_DISPDBG"); cap = e ? atoi(e) : 0; }
+                   if (cap && n < cap && dr->rt_off == 0 && dr->fp_addr) { n++;
+@@ -8241,6 +8379,21 @@
+         }
+     }
+ 
++    if (s_d3d.custom_swapchain && s_present_this_frame) {
++        int present_depth_slot = s_pending_scene_zeta && captured_hudless
++            ? depth_pool_find(s_pending_scene_zeta, s_swapchain_provider.scene_width,
++                              s_swapchain_provider.scene_height) : -1;
++        s_pending_scene.depth = NULL;
++        if (present_depth_slot >= 0) {
++            depth_pool_transition(s_d3d.cmd_list, present_depth_slot, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
++            s_pending_scene.depth = s_depth_pool.surfaces[present_depth_slot].resource;
++            frame_hudless = output_hudless(fi);
++            s_pending_scene.hudless = frame_hudless;
++        }
++        s_swapchain_provider.record(s_d3d.cmd_list, s_pending_scene.depth ? &s_pending_scene : NULL);
++        s_pending_scene_zeta = 0;
++    }
++
+     /* Close and execute */
+     s_d3d.cmd_list->lpVtbl->Close(s_d3d.cmd_list);
+     ID3D12CommandList* cmd_lists[] = {(ID3D12CommandList*)s_d3d.cmd_list};
+@@ -8390,7 +8543,7 @@
+         if (s_cap_done < s_cap_count) {
+             u32 target = s_cap_start + s_cap_done * s_cap_stride;
+             if (s_d3d.frame_count >= target && s_dbg_last_draws > 0) {
+-                rsx_capture_frame(fi, s_dbg_last_draws, s_cap_done);
++                rsx_capture_frame(fi, s_dbg_last_draws, s_cap_done, frame_hudless);
+                 s_cap_done++;
+             }
+         }
+@@ -8414,7 +8567,7 @@
+                 remove(trigger);
+                 if (now_ms - last_cap_ms >= 500) {
+                     last_cap_ms = now_ms;
+-                    rsx_capture_frame(fi, s_dbg_last_draws, capture_index++);
++                    rsx_capture_frame(fi, s_dbg_last_draws, capture_index++, frame_hudless);
+                 } else {
+                     fprintf(stderr, "[RSXCAP] trigger dropped (throttle 500ms)%c", 10);
+                 }
+@@ -8431,20 +8584,7 @@
+         static int novsync = -1;
+         if (novsync < 0) novsync = getenv("PS3_NOVSYNC") ? 1 : 0;
+         HRESULT result = s_d3d.swap_chain->lpVtbl->Present(s_d3d.swap_chain, novsync ? 0 : 1, 0);
+-        if (s_d3d.fps_title_enabled && result == S_OK) {
+-            u64 now = GetTickCount64();
+-            if (!s_d3d.fps_title_start) s_d3d.fps_title_start = now;
+-            else ++s_d3d.fps_title_presents;
+-            u64 elapsed = now - s_d3d.fps_title_start;
+-            if (elapsed >= 1000) {
+-                char title[160];
+-                snprintf(title, sizeof(title), "%s | FPS: %.1f", g_rsx_title_base,
+-                         1000.0 * s_d3d.fps_title_presents / (double)elapsed);
+-                SetWindowTextA(s_d3d.hwnd, title);
+-                s_d3d.fps_title_start = now;
+-                s_d3d.fps_title_presents = 0;
+-            }
+-        }
++        if (s_d3d.fps_title_enabled && result == S_OK) fps_title_on_present();
+     }
+ 
+     move_to_next_frame();
+@@ -10998,6 +11138,8 @@
+     if (!s_d3d.initialized) return;
+ 
+     wait_for_gpu();
++    if (s_d3d.custom_swapchain) s_swapchain_provider.drain(s_d3d.swap_chain);
++    s_pending_scene_zeta = 0;
+     for (int i = 0; i < VP_TEX_SLOTS; i++) {
+         if (s_d3d.vp_tex[i].res) { s_d3d.vp_tex[i].res->lpVtbl->Release(s_d3d.vp_tex[i].res); s_d3d.vp_tex[i].res = NULL; }
+         if (s_d3d.vp_tex[i].up)  { s_d3d.vp_tex[i].up->lpVtbl->Release(s_d3d.vp_tex[i].up);   s_d3d.vp_tex[i].up  = NULL; }
+@@ -11042,6 +11184,8 @@
+         if (s_d3d.cmd_allocators[i]) s_d3d.cmd_allocators[i]->lpVtbl->Release(s_d3d.cmd_allocators[i]);
+         if (s_d3d.render_targets[i]) s_d3d.render_targets[i]->lpVtbl->Release(s_d3d.render_targets[i]);
+         if (s_d3d.output_targets[i]) s_d3d.output_targets[i]->lpVtbl->Release(s_d3d.output_targets[i]);
++        if (s_d3d.hudless_native[i]) s_d3d.hudless_native[i]->lpVtbl->Release(s_d3d.hudless_native[i]);
++        if (s_d3d.hudless_output[i]) s_d3d.hudless_output[i]->lpVtbl->Release(s_d3d.hudless_output[i]);
+     }
+     if (s_output_pass_ready) {
+         s_output_pass.shutdown(s_output_pass.userdata); s_output_pass_ready = 0;
+diff --git a/libs/video/rsx_d3d12_backend.h b/libs/video/rsx_d3d12_backend.h
+--- a/libs/video/rsx_d3d12_backend.h
++++ b/libs/video/rsx_d3d12_backend.h
+@@ -50,8 +50,30 @@
+     int (*initialize)(void* userdata, void* device, void* queue, u32 input_width, u32 input_height);
+     int (*record)(void* userdata, void* command_list, void* input, void* output, u32 frame_index);
+     void (*shutdown)(void* userdata);
++    int (*record_hudless)(void* userdata, void* command_list, void* input, void* output, u32 frame_index);
+ } rsx_d3d12_output_pass;
+ int rsx_d3d12_backend_set_output_pass(const rsx_d3d12_output_pass* pass);
++
++typedef struct rsx_d3d12_present_scene {
++    void* depth;
++    void* hudless;
++    float view[16];
++    float projection[16];
++    float depth_scale, depth_offset;
++} rsx_d3d12_present_scene;
++
++/* Optional swap-chain provider. create returns an owned IDXGISwapChain1 or
++ * NULL to use DXGI directly. record runs before submitting a presented frame
++ * and receives NULL when the batch lacks the requested scene. Otherwise the
++ * depth is in NON_PIXEL_SHADER_RESOURCE and must be left in that state.
++ * drain runs after the game queue is idle, before releasing swap-chain buffers. */
++typedef struct rsx_d3d12_swapchain_provider {
++    u32 scene_color_offset, scene_width, scene_height;
++    void* (*create)(void* hwnd, const void* desc, void* queue, void* factory);
++    void (*record)(void* command_list, const rsx_d3d12_present_scene* scene);
++    void (*drain)(void* swapchain);
++} rsx_d3d12_swapchain_provider;
++int rsx_d3d12_backend_set_swapchain_provider(const rsx_d3d12_swapchain_provider* provider);
+ 
+ /* Optional host-drawn overlay (the save-data picker). It runs after the frame
+  * and after the output pass, on the finished presentation target, so it is

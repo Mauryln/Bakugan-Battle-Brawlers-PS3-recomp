@@ -18,14 +18,16 @@
 
 using Microsoft::WRL::ComPtr;
 namespace {
+constexpr u32 OUTPUT_FRAMES = 2;
+constexpr u32 HUDLESS_DESCRIPTOR_BASE = 6;
 struct fsr_output {
     ComPtr<ID3D12Device> device;
     ComPtr<ID3D12RootSignature> root;
     ComPtr<ID3D12PipelineState> smaa_edge, smaa_weight, smaa_blend, easu, rcas;
     ComPtr<ID3D12DescriptorHeap> srv_heap, rtv_heap;
     ComPtr<ID3D12Resource> intermediate, smaa_edges, smaa_weights, smaa_color;
-    ID3D12Resource* inputs[2]{};
-    ID3D12Resource* outputs[2]{};
+    ID3D12Resource* inputs[OUTPUT_FRAMES * 2]{};
+    ID3D12Resource* outputs[OUTPUT_FRAMES * 2]{};
     UINT srv_step{}, rtv_step{}, constants[24]{};
     UINT width = 1920, height = 1080;
     UINT input_width = 1280, input_height = 720;
@@ -260,7 +262,7 @@ int initialize(void*, void* device, void*, u32 input_width, u32 input_height) {
             return -1;
     }
     D3D12_DESCRIPTOR_HEAP_DESC heap{};
-    heap.NumDescriptors = 6;
+    heap.NumDescriptors = HUDLESS_DESCRIPTOR_BASE + OUTPUT_FRAMES;
     heap.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
     heap.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     if (failed(output.device->CreateDescriptorHeap(&heap, IID_PPV_ARGS(&output.srv_heap)), "SRV heap")) return -1;
@@ -292,25 +294,27 @@ int initialize(void*, void* device, void*, u32 input_width, u32 input_height) {
                  input_width, input_height, output.width, output.height);
     return 0;
 }
-int record(void*, void* command_list, void* input, void* destination, u32 frame) {
-    if (frame >= 2) return -1;
+int record_output(void* command_list, void* input, void* destination, u32 frame, bool hudless) {
+    if (frame >= OUTPUT_FRAMES) return -1;
+    const u32 descriptor = hudless ? HUDLESS_DESCRIPTOR_BASE + frame : frame;
+    const u32 cache_slot = hudless ? OUTPUT_FRAMES + frame : frame;
     auto* list = static_cast<ID3D12GraphicsCommandList*>(command_list);
     auto* source = static_cast<ID3D12Resource*>(input);
     auto* target = static_cast<ID3D12Resource*>(destination);
-    if (output.inputs[frame] != source) {
+    if (output.inputs[cache_slot] != source) {
         D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
         srv.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
         srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
         srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
         srv.Texture2D.MipLevels = 1;
         output.device->CreateShaderResourceView(source, &srv,
-            cpu_handle(output.srv_heap.Get(), output.srv_step, frame));
-        output.inputs[frame] = source;
+            cpu_handle(output.srv_heap.Get(), output.srv_step, descriptor));
+        output.inputs[cache_slot] = source;
     }
-    if (output.outputs[frame] != target) {
+    if (output.outputs[cache_slot] != target) {
         output.device->CreateRenderTargetView(target, nullptr,
-            cpu_handle(output.rtv_heap.Get(), output.rtv_step, frame));
-        output.outputs[frame] = target;
+            cpu_handle(output.rtv_heap.Get(), output.rtv_step, descriptor));
+        output.outputs[cache_slot] = target;
     }
     transition(list, source, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
     ID3D12DescriptorHeap* heaps[] = {output.srv_heap.Get()};
@@ -329,7 +333,7 @@ int record(void*, void* command_list, void* input, void* destination, u32 frame)
         auto rtv = cpu_handle(output.rtv_heap.Get(), output.rtv_step, 3);
         list->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
         list->SetPipelineState(output.smaa_edge.Get());
-        list->SetGraphicsRootDescriptorTable(0, gpu_handle(frame));
+        list->SetGraphicsRootDescriptorTable(0, gpu_handle(descriptor));
         list->DrawInstanced(3, 1, 0, 0);
         transition(list, output.smaa_edges.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
         output.smaa_edges_state = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
@@ -348,17 +352,17 @@ int record(void*, void* command_list, void* input, void* destination, u32 frame)
             rtv = cpu_handle(output.rtv_heap.Get(), output.rtv_step, 5);
             list->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
             list->SetPipelineState(output.smaa_blend.Get());
-            list->SetGraphicsRootDescriptorTable(0, gpu_handle(frame));
+            list->SetGraphicsRootDescriptorTable(0, gpu_handle(descriptor));
             list->SetGraphicsRootDescriptorTable(1, gpu_handle(4));
             list->DrawInstanced(3, 1, 0, 0);
             transition(list, output.smaa_color.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
             output.smaa_color_state = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
         } else {
             transition(list, target, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET);
-            rtv = cpu_handle(output.rtv_heap.Get(), output.rtv_step, frame);
+            rtv = cpu_handle(output.rtv_heap.Get(), output.rtv_step, descriptor);
             list->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
             list->SetPipelineState(output.smaa_blend.Get());
-            list->SetGraphicsRootDescriptorTable(0, gpu_handle(frame));
+            list->SetGraphicsRootDescriptorTable(0, gpu_handle(descriptor));
             list->SetGraphicsRootDescriptorTable(1, gpu_handle(4));
             list->DrawInstanced(3, 1, 0, 0);
             transition(list, source, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COMMON);
@@ -374,12 +378,12 @@ int record(void*, void* command_list, void* input, void* destination, u32 frame)
     auto rtv = cpu_handle(output.rtv_heap.Get(), output.rtv_step, 2);
     list->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
     list->SetPipelineState(output.easu.Get());
-    list->SetGraphicsRootDescriptorTable(0, gpu_handle(output.aa_enabled ? 5 : frame));
+    list->SetGraphicsRootDescriptorTable(0, gpu_handle(output.aa_enabled ? 5 : descriptor));
     list->DrawInstanced(3, 1, 0, 0);
     transition(list, output.intermediate.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
     output.intermediate_state = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
     transition(list, target, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET);
-    rtv = cpu_handle(output.rtv_heap.Get(), output.rtv_step, frame);
+    rtv = cpu_handle(output.rtv_heap.Get(), output.rtv_step, descriptor);
     list->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
     list->SetPipelineState(output.rcas.Get());
     list->SetGraphicsRootDescriptorTable(0, gpu_handle(2));
@@ -387,6 +391,12 @@ int record(void*, void* command_list, void* input, void* destination, u32 frame)
     transition(list, source, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COMMON);
     transition(list, target, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COMMON);
     return 0;
+}
+int record(void*, void* commands, void* input, void* output, u32 frame) {
+    return record_output(commands, input, output, frame, false);
+}
+int record_hudless(void*, void* commands, void* input, void* output, u32 frame) {
+    return record_output(commands, input, output, frame, true);
 }
 void shutdown(void*) { output = fsr_output{}; }
 }
@@ -447,7 +457,7 @@ int bakugan_output_configure() {
             return 0;
         }
         std::fprintf(stderr, "[OUTPUT] native %ux%u + SMAA\n", output.width, output.height);
-        rsx_d3d12_output_pass pass{output.width, output.height, nullptr, initialize, record, shutdown};
+        rsx_d3d12_output_pass pass{output.width, output.height, nullptr, initialize, record, shutdown, record_hudless};
         return rsx_d3d12_backend_set_output_pass(&pass);
     }
 
@@ -465,6 +475,6 @@ int bakugan_output_configure() {
     std::fprintf(stderr, "[OUTPUT] %dp internal -> %ux%u, AA=%s, FSR1 sharpness %.2f\n",
                  internal_height, output.width, output.height,
                  output.aa_enabled ? "smaa" : "off", output.sharpness);
-    rsx_d3d12_output_pass pass{output.width, output.height, nullptr, initialize, record, shutdown};
+    rsx_d3d12_output_pass pass{output.width, output.height, nullptr, initialize, record, shutdown, record_hudless};
     return rsx_d3d12_backend_set_output_pass(&pass);
 }

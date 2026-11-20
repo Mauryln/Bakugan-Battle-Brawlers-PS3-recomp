@@ -2,9 +2,8 @@
 
 /*
  * Single source of truth for the graphics knobs shared by the game runner and
- * any launcher. The launcher writes these as environment variables before
- * CreateProcess; the runner reads them once at boot. Keep names and defaults
- * here so a release launcher can expose every one without guessing.
+ * any launcher. The runner resolves player.ini and environment overrides at
+ * boot. Keep names and defaults here so both entry points can share them.
  */
 
 #define PS3_ENV_VFS_ROOT        "PS3_VFS_ROOT"
@@ -14,6 +13,7 @@
 #define PS3_ENV_OUTPUT          "PS3_OUTPUT"
 #define PS3_ENV_FSR             "PS3_FSR"
 #define PS3_ENV_FSR_SHARPNESS   "PS3_FSR_SHARPNESS"
+#define PS3_ENV_FRAME_GEN       "PS3_FRAME_GEN"
 #define PS3_ENV_FPS_CAP         "PS3_FPS_CAP"
 #define PS3_ENV_TICK_HZ         "PS3_TICK_HZ"
 #define PS3_ENV_WINDOW_MODE     "PS3_WINDOW_MODE"
@@ -30,3 +30,9 @@
 #define PS3_DEFAULT_ANISO       "16"
 #define PS3_DEFAULT_LOD_BIAS    "0"
 #define PS3_DEFAULT_AA          "smaa"
+
+namespace bakugan {
+inline constexpr wchar_t FRAME_GEN_ENV[] = L"" PS3_ENV_FRAME_GEN;
+inline constexpr wchar_t FRAME_GEN_OFF[] = L"off";
+inline constexpr wchar_t FRAME_GEN_FSR3[] = L"fsr3";
+}

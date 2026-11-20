@@ -21,6 +21,7 @@ static int failures = 0;
 int main() {
     using namespace player;
     auto c = defaults();
+    CHECK(c.frame_gen == L"off");
     CHECK(c.gamepad[CROSS].kind == BindingKind::Button && c.gamepad[CROSS].code == SDL_GAMEPAD_BUTTON_SOUTH);
     Binding b;
     CHECK(!parse_binding(L"key:999", b));
@@ -34,6 +35,7 @@ int main() {
     c.output = L"1440p";
     c.cap = L"60";
     c.aa_mode = L"off";
+    c.frame_gen = L"fsr3";
     c.sharpness = 1.2f;
     c.aniso = 4;
     c.deadzone = 0.22f;
@@ -48,6 +50,13 @@ int main() {
     CHECK(load(loaded, path.wstring(), &error));
     CHECK(loaded.language == c.language && loaded.output == c.output && loaded.cap == c.cap);
     CHECK(loaded.aa_mode == L"off" && std::abs(loaded.sharpness - 1.2f) < 0.001f && loaded.aniso == 4);
+    CHECK(loaded.frame_gen == L"fsr3");
+    wchar_t ini_frame_gen[16];
+    CHECK(GetPrivateProfileStringW(L"Graphics", L"frame_gen", L"", ini_frame_gen, 16, path.c_str()) &&
+          std::wstring(ini_frame_gen) == L"fsr3");
+    CHECK(WritePrivateProfileStringW(L"Graphics", L"frame_gen", L"off", path.c_str()));
+    CHECK(load(loaded, path.wstring(), &error) && loaded.frame_gen == L"off");
+    CHECK(WritePrivateProfileStringW(L"Graphics", L"frame_gen", L"invalid", path.c_str()));
     CHECK(std::abs(loaded.deadzone - c.deadzone) < 0.001f && loaded.motion == c.motion);
     CHECK(loaded.keyboard[CROSS].code == 'B' && loaded.gamepad[CROSS].code == SDL_GAMEPAD_BUTTON_WEST);
     CHECK(loaded.device_guid == c.device_guid && loaded.device_serial == c.device_serial);
@@ -57,6 +66,7 @@ int main() {
     CHECK(WritePrivateProfileStringW(L"Keyboard", L"14", L"key:9999", path.c_str()));
     CHECK(load(loaded, path.wstring(), &error));
     CHECK(loaded.sharpness == 0.6f && loaded.output == L"720p" && loaded.aa_mode == L"smaa");
+    CHECK(loaded.frame_gen == L"off");
     CHECK(loaded.keyboard[CROSS].code == 'X');
 
     // Aliases for aa_mode, fsr_sharpness, and anisotropic in player.ini
@@ -75,6 +85,12 @@ int main() {
     c.language = L"auto";
     SetEnvironmentVariableW(L"PAD_AUTOPRESS", L"1");
     SetEnvironmentVariableW(L"PS3_LANG", L"de");
+    SetEnvironmentVariableW(L"PS3_FRAME_GEN", L"off");
+    CHECK(resolve_frame_gen(c) == L"off");
+    SetEnvironmentVariableW(L"PS3_FRAME_GEN", L"invalid");
+    CHECK(resolve_frame_gen(c) == L"fsr3");
+    SetEnvironmentVariableW(L"PS3_FRAME_GEN", nullptr);
+    CHECK(resolve_frame_gen(c) == L"fsr3");
     apply_environment(c, path.wstring());
     wchar_t env[128];
     CHECK(!GetEnvironmentVariableW(L"PAD_AUTOPRESS", env, 128));
@@ -166,6 +182,7 @@ int main() {
     Config legacy_cfg;
     CHECK(load(legacy_cfg, legacy_path.wstring(), &error));
     CHECK(legacy_cfg.sixaxis_profile == SixaxisProfile::Standard);
+    CHECK(legacy_cfg.frame_gen == L"off");
     CHECK(std::abs(legacy_cfg.deadzone - 0.22f) < 0.001f);
     CHECK(std::abs(legacy_cfg.sixaxis_smoothing - 0.45f) < 0.001f);
     std::filesystem::remove(legacy_path);

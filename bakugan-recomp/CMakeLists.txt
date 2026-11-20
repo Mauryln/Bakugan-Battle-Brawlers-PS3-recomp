@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.20)
+cmake_minimum_required(VERSION 3.23)
 project(BakuganRecomp
     VERSION 0.1.0
     LANGUAGES C CXX
@@ -258,6 +258,8 @@ set_target_properties(${PROJECT_NAME} PROPERTIES LINKER_LANGUAGE CXX)
 # anything a POSIX linker can find; the D3D12 backend's own imports come in
 # through the #pragma comment(lib) in libs/video/rsx_d3d12_backend.c.
 if(WIN32)
+    add_subdirectory(third_party/FidelityFX)
+    target_link_libraries(${PROJECT_NAME} PRIVATE bakugan_fidelityfx)
     target_sources(${PROJECT_NAME} PRIVATE video_decoder.cpp movie_audio.cpp movie_video.cpp sail_video.cpp output_upscale.cpp)
     file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/shaders/fsr1")
     configure_file(output_upscale.hlsl "${CMAKE_CURRENT_BINARY_DIR}/shaders/fsr1/present.hlsl" COPYONLY)
@@ -286,7 +288,8 @@ if(WIN32)
         target_sources(BakuganLauncher PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/app.rc")
     endif()
     target_include_directories(BakuganLauncher PRIVATE "${BAKUGAN_SDL3_ROOT}/include")
-    target_link_libraries(BakuganLauncher PRIVATE user32 comdlg32 gdi32 gdiplus comctl32 "${BAKUGAN_SDL3_LIBRARY}")
+    target_link_libraries(BakuganLauncher PRIVATE
+        user32 comdlg32 gdi32 gdiplus comctl32 "${BAKUGAN_SDL3_LIBRARY}" bakugan_fidelityfx)
     bakugan_copy_sdl3(BakuganLauncher)
     install(TARGETS BakuganLauncher RUNTIME DESTINATION bin)
     install(FILES "${BAKUGAN_SDL3_ROOT}/lib/x64/SDL3.dll" DESTINATION bin)

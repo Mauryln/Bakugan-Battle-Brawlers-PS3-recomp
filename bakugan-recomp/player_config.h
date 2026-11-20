@@ -2,6 +2,7 @@
 #include <array>
 #include <string>
 #include <cstdint>
+#include "graphics_config.h"
 
 namespace player {
 constexpr int ACTION_COUNT = 25;
@@ -43,6 +44,7 @@ enum class SixaxisProfile { Smooth, Standard, Fast, Custom };
 struct Config {
     std::wstring output = L"1080p", cap = L"30", window = L"borderless";
     std::wstring fsr = L"auto", aa_mode = L"smaa", language = L"auto", ui_language = L"auto";
+    std::wstring frame_gen = bakugan::FRAME_GEN_OFF;
     float sharpness = 0.6f, mouse_sensitivity = 0.5f, deadzone = 0.15f;
     float gyro_sensitivity = 1.0f, gyro_deadzone = 0.05f;
     float sixaxis_curve = 0.50f, sixaxis_smoothing = 0.45f;
@@ -65,5 +67,6 @@ bool save(const Config &config, const std::wstring &path, std::wstring *error = 
 std::wstring binding_name(Binding binding, bool english = false);
 std::wstring binding_text(Binding binding);
 bool parse_binding(const std::wstring &text, Binding &binding);
+std::wstring resolve_frame_gen(const Config &config);
 void apply_environment(const Config &config, const std::wstring &path);
 } // namespace player
