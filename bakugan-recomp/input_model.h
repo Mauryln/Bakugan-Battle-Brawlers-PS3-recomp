@@ -129,11 +129,12 @@ inline void step_sixaxis(SixaxisState &s, float raw_tilt_x, float raw_tilt_y, fl
 
         float sign_x = cfg.gyro_invert_x ? 1.0f : -1.0f;
         float sign_y = cfg.gyro_invert_y ? -1.0f : 1.0f;
+        float steer_rate = raw_yaw + raw_roll;
         s.gyro[0] = ema_step(s.gyro[0], raw_pitch * sign_y * sens, dt_sec, tau * 0.5f, 2.0f);
-        s.gyro[1] = ema_step(s.gyro[1], raw_yaw, dt_sec, tau * 0.5f, 2.0f);
+        s.gyro[1] = ema_step(s.gyro[1], steer_rate, dt_sec, tau * 0.5f, 2.0f);
         s.gyro[2] = ema_step(s.gyro[2], raw_roll * sens, dt_sec, tau * 0.5f, 2.0f);
 
-        gyro_tilt_x = std::clamp((raw_yaw * sign_x * sens) / 1.40f, -1.0f, 1.0f);
+        gyro_tilt_x = std::clamp((steer_rate * sign_x * sens) / 1.40f, -1.0f, 1.0f);
         gyro_tilt_y = std::clamp((raw_pitch * sign_y * sens) / 1.40f, -1.0f, 1.0f);
     } else {
         s.accel_seeded = false;

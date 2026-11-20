@@ -216,7 +216,14 @@ int main() {
         step_sixaxis(sensors_state, 0.0f, 0.0f, 0.0f, true,
                      std::array<float, 3>{0.f, 9.80665f, 0.f},
                      std::array<float, 3>{0.f, -2.0f, 0.f}, mode_cfg, 0.020f, stx, sty, out_a, out_g);
-    CHECK(stx > 0.90f); // physical gyro drives tilt_x (+right)
+    CHECK(stx > 0.90f); // physical yaw drives tilt_x (+right)
+    SixaxisState roll_state;
+    float rtx = 0.f, rty = 0.f;
+    for (int i = 0; i < 20; ++i)
+        step_sixaxis(roll_state, 0.0f, 0.0f, 0.0f, true,
+                     std::array<float, 3>{0.f, 9.80665f, 0.f},
+                     std::array<float, 3>{0.f, 0.f, -2.0f}, mode_cfg, 0.020f, rtx, rty, out_a, out_g);
+    CHECK(rtx > 0.90f); // steering-wheel roll (g[2]) also drives tilt_x (+right)
     mode_cfg.motion = MotionMode::RightStick;
     SixaxisState stick_only_state;
     for (int i = 0; i < 20; ++i)

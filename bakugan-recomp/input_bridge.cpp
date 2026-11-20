@@ -312,7 +312,10 @@ unsigned __stdcall run(void *) {
                 next_ports[next_idx].device_id = ordered[i]->id;
                 next_ports[next_idx].report = sample_gamepad(ordered[i], foreground, now, dt_sec, next_ports[next_idx]);
                 if (!state.empty()) state += " | ";
-                state += "P" + std::to_string(next_idx + 1) + ": " + ordered[i]->name;
+                state += "P" + std::to_string(next_idx + 1) + ": " + ordered[i]->name +
+                         " (gyro=" + std::to_string(ordered[i]->gyro ? 1 : 0) +
+                         " accel=" + std::to_string(ordered[i]->accel ? 1 : 0) +
+                         " sensors=" + std::to_string(ordered[i]->sensors_enabled ? 1 : 0) + ")";
                 ++next_idx;
             }
             if (allow_keyboard && next_idx < MAX_PORTS) {
