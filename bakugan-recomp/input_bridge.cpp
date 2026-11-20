@@ -13,6 +13,7 @@
 namespace {
 // Exported by the toolkit's cellGcmSys.c; the port links against it.
 extern "C" unsigned cellGcm_flip_request_count(void);
+extern "C" bool bakugan_savedata_overlay_active();
 SRWLOCK lock = SRWLOCK_INIT;
 HANDLE worker = nullptr, stop_event = nullptr;
 player::Config config;
@@ -98,50 +99,102 @@ static void tick_mouse_script(VirtualMouse &vm) {
         vm.cur++;
 }
 
+void release_cursor_clip(bool &cursor_clipped) {
+    if (cursor_clipped) {
+        ClipCursor(nullptr);
+        cursor_clipped = false;
+    }
+}
+
 void update_mouse(HWND hwnd, std::array<float, player::ACTION_COUNT> &v,
                   HWND &previous_window, POINT &previous_cursor,
+                  bool &cursor_clipped,
                   float &mouse_virt_x, float &mouse_virt_y,
-                  int mouse_buttons, const VirtualMouse &vm, float dt_sec) {
+                  float &mouse_look_x, float &mouse_look_y,
+                  int mouse_buttons, bool &out_in_client,
+                  const VirtualMouse &vm, float dt_sec) {
     int raw_dx = 0, raw_dy = 0;
+    float sens = (config.mouse_sensitivity > 0.01f ? config.mouse_sensitivity : 0.5f);
+
+    RECT client{};
+    POINT tl{0, 0}, br{0, 0};
+    bool have_rect = hwnd && GetClientRect(hwnd, &client) &&
+                     client.right > client.left && client.bottom > client.top;
+    RECT screen_rect{};
+    if (have_rect) {
+        tl = {client.left, client.top};
+        br = {client.right, client.bottom};
+        have_rect = ClientToScreen(hwnd, &tl) && ClientToScreen(hwnd, &br);
+        screen_rect = {tl.x, tl.y, br.x, br.y};
+    }
+
+    POINT cursor{};
+    bool cursor_ok = GetCursorPos(&cursor) != FALSE;
+    bool in_client = have_rect && cursor_ok && PtInRect(&screen_rect, cursor);
+    out_in_client = in_client;
+
     if (vm.active) {
+        release_cursor_clip(cursor_clipped);
         raw_dx = vm.segs[vm.cur].dx;
         raw_dy = vm.segs[vm.cur].dy;
         previous_window = nullptr;
     } else {
-        POINT cursor{};
-        const bool cursor_ok = GetCursorPos(&cursor);
-        POINT client_cursor = cursor;
-        RECT client;
-        if (!cursor_ok || !ScreenToClient(hwnd, &client_cursor) || !GetClientRect(hwnd, &client) ||
-            !PtInRect(&client, client_cursor)) {
+        bool overlay_open = bakugan_savedata_overlay_active();
+        bool alt_held = (GetAsyncKeyState(VK_MENU) & 0x8000) != 0;
+        bool is_borderless = have_rect && ((GetWindowLongPtrW(hwnd, GWL_STYLE) & WS_CAPTION) == 0);
+
+        if (!have_rect || !cursor_ok || overlay_open || alt_held) {
+            release_cursor_clip(cursor_clipped);
             previous_window = nullptr;
-            player::step_mouse_virtual_stick(mouse_virt_x, mouse_virt_y, 0, 0, config.mouse_sensitivity, dt_sec);
+            player::step_mouse_virtual_stick(mouse_virt_x, mouse_virt_y, 0, 0, sens, dt_sec);
+            player::step_mouse_virtual_stick(mouse_look_x, mouse_look_y, 0, 0, sens, dt_sec);
             return;
         }
-        // Start a new sample when the pointer enters or focus changes.
+
+        // Borderless windows do not constrain the OS cursor across multi-monitor setups;
+        // clip and recenter inside the client rect while gameplay has focus.
+        if (is_borderless) {
+            if (ClipCursor(&screen_rect))
+                cursor_clipped = true;
+            in_client = true;
+            out_in_client = true;
+        } else {
+            release_cursor_clip(cursor_clipped);
+            if (!in_client) {
+                previous_window = nullptr;
+                player::step_mouse_virtual_stick(mouse_virt_x, mouse_virt_y, 0, 0, sens, dt_sec);
+                player::step_mouse_virtual_stick(mouse_look_x, mouse_look_y, 0, 0, sens, dt_sec);
+                return;
+            }
+        }
+
         if (previous_window == hwnd) {
             raw_dx = cursor.x - previous_cursor.x;
             raw_dy = cursor.y - previous_cursor.y;
         }
+
+        POINT center{(screen_rect.left + screen_rect.right) / 2,
+                     (screen_rect.top + screen_rect.bottom) / 2};
+        if ((cursor.x != center.x || cursor.y != center.y) && SetCursorPos(center.x, center.y)) {
+            previous_cursor = center;
+        } else {
+            previous_cursor = cursor;
+        }
         previous_window = hwnd;
-        previous_cursor = cursor;
     }
 
-    float sens = (config.mouse_sensitivity > 0.01f ? config.mouse_sensitivity : 0.5f);
     bool held = config.mouse_look && (mouse_buttons & 2);
-
     if (held) {
-        // Right click held: mouse look / camera aim (drives Left stick)
-        float dt_scale = std::clamp(0.008f / std::clamp(dt_sec, 0.001f, 0.05f), 0.5f, 1.5f);
-        float x = std::clamp((float)raw_dx * dt_scale * sens / 30.f, -1.f, 1.f);
-        float y = std::clamp((float)raw_dy * dt_scale * sens / 30.f, -1.f, 1.f);
-        v[player::L_LEFT] = std::max(v[player::L_LEFT], std::max(0.f, -x));
-        v[player::L_RIGHT] = std::max(v[player::L_RIGHT], std::max(0.f, x));
-        v[player::L_UP] = std::max(v[player::L_UP], std::max(0.f, -y));
-        v[player::L_DOWN] = std::max(v[player::L_DOWN], std::max(0.f, y));
+        // Right click held: mouse look / camera aim (drives Left stick smoothly across 250 Hz ticks)
+        player::step_mouse_virtual_stick(mouse_look_x, mouse_look_y, raw_dx, raw_dy, sens * 1.4f, dt_sec);
+        v[player::L_LEFT] = std::max(v[player::L_LEFT], std::max(0.f, -mouse_look_x));
+        v[player::L_RIGHT] = std::max(v[player::L_RIGHT], std::max(0.f, mouse_look_x));
+        v[player::L_UP] = std::max(v[player::L_UP], std::max(0.f, -mouse_look_y));
+        v[player::L_DOWN] = std::max(v[player::L_DOWN], std::max(0.f, mouse_look_y));
         player::step_mouse_virtual_stick(mouse_virt_x, mouse_virt_y, 0, 0, sens, dt_sec);
     } else {
         player::step_mouse_virtual_stick(mouse_virt_x, mouse_virt_y, raw_dx, raw_dy, sens, dt_sec);
+        player::step_mouse_virtual_stick(mouse_look_x, mouse_look_y, 0, 0, sens, dt_sec);
     }
 }
 ps3_host_pad_report neutral_report() {
@@ -199,8 +252,10 @@ ps3_host_pad_report sample_gamepad(player::Device *device, bool foreground, ULON
         gp_values, tilt_x, tilt_y, config.motion, real, filt_a, filt_g, now, state.pulse));
 }
 ps3_host_pad_report sample_keyboard(bool foreground, HWND hwnd, POINT &previous_cursor,
-                                    HWND &previous_mouse_window, float &mouse_virt_x,
-                                    float &mouse_virt_y, player::SixaxisState &kb_sixaxis,
+                                    HWND &previous_mouse_window, bool &cursor_clipped,
+                                    float &mouse_virt_x, float &mouse_virt_y,
+                                    float &mouse_look_x, float &mouse_look_y,
+                                    player::SixaxisState &kb_sixaxis,
                                     const VirtualMouse &vm, ULONGLONG now, float dt_sec,
                                     player::MotionPulse &pulse) {
     std::array<float, player::ACTION_COUNT> kb_values{};
@@ -211,14 +266,19 @@ ps3_host_pad_report sample_keyboard(bool foreground, HWND hwnd, POINT &previous_
                             ((GetAsyncKeyState(VK_RBUTTON) & 0x8000) ? 2 : 0) |
                             ((GetAsyncKeyState(VK_MBUTTON) & 0x8000) ? 4 : 0);
         if (vm.active) mouse_buttons = vm.segs[vm.cur].buttons;
-        if (config.mouse_left_cross && (mouse_buttons & 1))
+        bool in_client = false;
+        update_mouse(hwnd, kb_values, previous_mouse_window, previous_cursor, cursor_clipped,
+                     mouse_virt_x, mouse_virt_y, mouse_look_x, mouse_look_y,
+                     mouse_buttons, in_client, vm, dt_sec);
+        if (config.mouse_left_cross && (mouse_buttons & 1) && (vm.active || in_client))
             kb_values[player::CROSS] = 1.0f;
-        update_mouse(hwnd, kb_values, previous_mouse_window, previous_cursor,
-                     mouse_virt_x, mouse_virt_y, mouse_buttons, vm, dt_sec);
     } else {
+        release_cursor_clip(cursor_clipped);
         previous_mouse_window = nullptr;
         mouse_virt_x = 0.0f;
         mouse_virt_y = 0.0f;
+        mouse_look_x = 0.0f;
+        mouse_look_y = 0.0f;
         kb_sixaxis = {};
         pulse = {};
     }
@@ -246,18 +306,22 @@ ps3_host_pad_report sample_keyboard(bool foreground, HWND hwnd, POINT &previous_
     return result;
 }
 unsigned __stdcall run(void *) {
+    SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     player::MotionPulse kb_pulse;
     player::SixaxisState kb_sixaxis;
     HWND previous_mouse_window = nullptr;
     POINT previous_cursor{};
+    bool cursor_clipped = false;
     float mouse_virt_x = 0.0f;
     float mouse_virt_y = 0.0f;
+    float mouse_look_x = 0.0f;
+    float mouse_look_y = 0.0f;
     ULONGLONG refresh = 0;
     ULONGLONG script_poll = 0;
     auto prev_tick = std::chrono::steady_clock::now();
     VirtualMouse vm;
     std::string prior;
-    while (WaitForSingleObject(stop_event, 8) == WAIT_TIMEOUT) {
+    while (WaitForSingleObject(stop_event, 4) == WAIT_TIMEOUT) {
         auto tick_now = std::chrono::steady_clock::now();
         float dt_sec = std::clamp(
             std::chrono::duration<float>(tick_now - prev_tick).count(), 0.001f, 0.05f);
@@ -292,13 +356,16 @@ unsigned __stdcall run(void *) {
         }
         HWND hwnd = nullptr;
         bool foreground = focused(hwnd);
+        if (!allow_keyboard || !foreground)
+            release_cursor_clip(cursor_clipped);
         std::array<PortState, MAX_PORTS> next_ports{};
         int next_idx = 0;
         std::string state;
         // VirtualMouse scripts always drive port 0 alongside whatever controller is there.
         if (vm.active && allow_keyboard) {
             ps3_host_pad_report kb = sample_keyboard(foreground, hwnd, previous_cursor,
-                previous_mouse_window, mouse_virt_x, mouse_virt_y, kb_sixaxis, vm, now, dt_sec, kb_pulse);
+                previous_mouse_window, cursor_clipped, mouse_virt_x, mouse_virt_y,
+                mouse_look_x, mouse_look_y, kb_sixaxis, vm, now, dt_sec, kb_pulse);
             next_ports[0].connected = true;
             next_ports[0].report = kb;
             next_idx = 1;
@@ -322,7 +389,8 @@ unsigned __stdcall run(void *) {
                 next_ports[next_idx].connected = true;
                 next_ports[next_idx].is_gamepad = false;
                 next_ports[next_idx].report = sample_keyboard(foreground, hwnd, previous_cursor,
-                    previous_mouse_window, mouse_virt_x, mouse_virt_y, kb_sixaxis, vm, now, dt_sec, kb_pulse);
+                    previous_mouse_window, cursor_clipped, mouse_virt_x, mouse_virt_y,
+                    mouse_look_x, mouse_look_y, kb_sixaxis, vm, now, dt_sec, kb_pulse);
                 if (!state.empty()) state += " | ";
                 state += "P" + std::to_string(next_idx + 1) + ": keyboard/mouse";
                 ++next_idx;
@@ -341,6 +409,7 @@ unsigned __stdcall run(void *) {
             prior = state;
         }
     }
+    release_cursor_clip(cursor_clipped);
     pads.close(false);
     return 0;
 }

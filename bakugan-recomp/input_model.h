@@ -89,6 +89,11 @@ inline float ema_step(float current, float target, float dt_sec, float tau_sec, 
 struct SixaxisState {
     float tilt_x = 0.0f;
     float tilt_y = 0.0f;
+    float roll_angle = 0.0f;
+    float pitch_angle = 0.0f;
+    float rest_pitch = 0.0f;
+    float yaw_angle = 0.0f;
+    float steady_sec = 0.0f;
     std::array<float, 3> accel{0.0f, 9.80665f, 0.0f};
     std::array<float, 3> gyro{0.0f, 0.0f, 0.0f};
     bool accel_seeded = false;
@@ -98,51 +103,119 @@ inline void step_sixaxis(SixaxisState &s, float raw_tilt_x, float raw_tilt_y, fl
                          const std::array<float, 3> &raw_gyro, const Config &cfg, float dt_sec,
                          float &out_tilt_x, float &out_tilt_y, std::array<float, 3> &out_accel,
                          std::array<float, 3> &out_gyro) {
-    float tau = std::clamp(cfg.sixaxis_smoothing, 0.0f, 1.0f) * 0.065f;
+    float tau = std::clamp(cfg.sixaxis_smoothing, 0.0f, 1.0f) * 0.022f;
     float sens = std::clamp(cfg.gyro_sensitivity, 0.1f, 5.0f);
     float gyro_tilt_x = 0.0f, gyro_tilt_y = 0.0f;
     bool real_active = has_real && cfg.motion != MotionMode::RightStick && finite_motion(raw_accel, raw_gyro);
 
     if (real_active) {
+        // SDL gamepad gravity angles: tilt right (+roll) yields accel[0] < 0 and gyro[2] < 0;
+        // tilt nose down/forward (-pitch) yields accel[2] > 0 and gyro[0] < 0.
+        float accel_roll = std::atan2(-raw_accel[0], std::max(0.5f, std::hypot(raw_accel[1], raw_accel[2])));
+        float accel_pitch = -std::atan2(raw_accel[2], std::max(0.5f, std::hypot(raw_accel[0], raw_accel[1])));
+
         if (!s.accel_seeded) {
             s.accel = raw_accel;
+            s.roll_angle = accel_roll;
+            s.pitch_angle = accel_pitch;
+            s.rest_pitch = std::clamp(accel_pitch, -0.60f, 0.60f);
+            s.yaw_angle = 0.0f;
+            s.steady_sec = 0.0f;
             s.accel_seeded = true;
         } else {
             for (int i = 0; i < 3; ++i)
-                s.accel[i] = ema_step(s.accel[i], raw_accel[i], dt_sec, tau * 0.6f, 1.5f);
+                s.accel[i] = ema_step(s.accel[i], raw_accel[i], dt_sec, tau * 0.6f, 2.5f);
         }
-        float raw_pitch = raw_gyro[0], raw_yaw = raw_gyro[1], raw_roll = raw_gyro[2];
-        float speed = std::hypot(raw_yaw, raw_pitch);
+
+        float dz_pitch = raw_gyro[0], dz_yaw = raw_gyro[1], dz_roll = raw_gyro[2];
+        float speed = std::hypot(dz_yaw, dz_pitch);
         float gz_dz = std::max(0.0f, cfg.gyro_deadzone);
         if (speed <= gz_dz || speed < 1e-6f) {
-            raw_yaw = 0.0f;
-            raw_pitch = 0.0f;
+            dz_yaw = 0.0f;
+            dz_pitch = 0.0f;
         } else {
             float scale = (speed - gz_dz) / speed;
-            raw_yaw *= scale;
-            raw_pitch *= scale;
+            dz_yaw *= scale;
+            dz_pitch *= scale;
         }
-        if (std::abs(raw_roll) <= gz_dz)
-            raw_roll = 0.0f;
+        if (std::abs(dz_roll) <= gz_dz)
+            dz_roll = 0.0f;
         else
-            raw_roll -= std::copysign(gz_dz, raw_roll);
+            dz_roll -= std::copysign(gz_dz, dz_roll);
 
-        float sign_x = cfg.gyro_invert_x ? 1.0f : -1.0f;
+        if (dt_sec > 0.0f) {
+            float accel_mag = std::hypot(raw_accel[0], std::hypot(raw_accel[1], raw_accel[2]));
+            float g_err = std::abs(accel_mag - 9.80665f) / 9.80665f;
+            float grav_weight = (accel_mag > 2.0f) ? std::clamp(1.0f - g_err * 1.5f, 0.05f, 1.0f) : 0.0f;
+            constexpr float kTauCf = 0.25f;
+            float alpha_cf = kTauCf / (kTauCf + dt_sec * grav_weight);
+
+            s.roll_angle = std::clamp(
+                alpha_cf * (s.roll_angle + (-raw_gyro[2]) * dt_sec) + (1.0f - alpha_cf) * accel_roll,
+                -1.5f, 1.5f);
+            s.pitch_angle = std::clamp(
+                alpha_cf * (s.pitch_angle + raw_gyro[0] * dt_sec) + (1.0f - alpha_cf) * accel_pitch,
+                -1.5f, 1.5f);
+
+            // Track resting hand pitch only when controller is steady and horizontally level.
+            bool steady_level = (std::abs(raw_gyro[0]) <= gz_dz + 0.02f) &&
+                                (std::abs(raw_gyro[1]) <= gz_dz + 0.02f) &&
+                                (std::abs(raw_gyro[2]) <= gz_dz + 0.02f) &&
+                                (std::abs(s.roll_angle) < 0.12f);
+            if (steady_level) {
+                s.steady_sec += dt_sec;
+                if (s.steady_sec > 0.6f)
+                    s.rest_pitch = ema_step(s.rest_pitch, std::clamp(s.pitch_angle, -0.60f, 0.60f), dt_sec, 3.0f);
+            } else {
+                s.steady_sec = 0.0f;
+            }
+
+            constexpr float kTauYawDecay = 0.26f;
+            s.yaw_angle = std::clamp(
+                s.yaw_angle * std::exp(-dt_sec / kTauYawDecay) + (-dz_yaw) * dt_sec,
+                -1.2f, 1.2f);
+        }
+
+        float sign_x = cfg.gyro_invert_x ? -1.0f : 1.0f;
         float sign_y = cfg.gyro_invert_y ? -1.0f : 1.0f;
-        float steer_rate = raw_yaw + raw_roll;
-        s.gyro[0] = ema_step(s.gyro[0], raw_pitch * sign_y * sens, dt_sec, tau * 0.5f, 2.0f);
-        s.gyro[1] = ema_step(s.gyro[1], steer_rate, dt_sec, tau * 0.5f, 2.0f);
-        s.gyro[2] = ema_step(s.gyro[2], raw_roll * sens, dt_sec, tau * 0.5f, 2.0f);
+        float steer_rate = (-dz_yaw - dz_roll) * sign_x;
+        s.gyro[0] = ema_step(s.gyro[0], dz_pitch * sign_y * sens, dt_sec, tau * 0.5f, 4.0f);
+        s.gyro[1] = ema_step(s.gyro[1], steer_rate * sens, dt_sec, tau * 0.5f, 4.0f);
+        s.gyro[2] = ema_step(s.gyro[2], dz_roll * sens, dt_sec, tau * 0.5f, 4.0f);
 
-        gyro_tilt_x = std::clamp((steer_rate * sign_x * sens) / 1.40f, -1.0f, 1.0f);
-        gyro_tilt_y = std::clamp((raw_pitch * sign_y * sens) / 1.40f, -1.0f, 1.0f);
+        // Fuse gravity-referenced tilt angles with rate feedforward so holds stay locked and flicks snap.
+        constexpr float kFullTiltRad = 0.48f;
+        constexpr float kRollRateFF = 0.075f;
+        constexpr float kYawRateFF = 0.13f;
+        constexpr float kPitchRateFF = 0.085f;
+        float x_ang = (s.roll_angle + (-dz_roll) * kRollRateFF) + (s.yaw_angle + (-dz_yaw) * kYawRateFF);
+        float y_ang = (s.pitch_angle - s.rest_pitch) + dz_pitch * kPitchRateFF;
+
+        gyro_tilt_x = std::clamp((x_ang * sign_x * sens) / kFullTiltRad, -1.0f, 1.0f);
+        gyro_tilt_y = std::clamp((y_ang * sign_y * sens) / kFullTiltRad, -1.0f, 1.0f);
+
+        constexpr float kGyroTiltMicroDz = 0.035f;
+        float gr = std::hypot(gyro_tilt_x, gyro_tilt_y);
+        if (gr <= kGyroTiltMicroDz || gr < 1e-6f) {
+            gyro_tilt_x = 0.0f;
+            gyro_tilt_y = 0.0f;
+        } else {
+            float gscale = std::min(1.0f, (gr - kGyroTiltMicroDz) / (1.0f - kGyroTiltMicroDz)) / gr;
+            gyro_tilt_x *= gscale;
+            gyro_tilt_y *= gscale;
+        }
     } else {
         s.accel_seeded = false;
-        s.accel[0] = ema_step(s.accel[0], 0.0f, dt_sec, tau * 0.6f, 1.5f);
-        s.accel[1] = ema_step(s.accel[1], 9.80665f, dt_sec, tau * 0.6f, 1.5f);
-        s.accel[2] = ema_step(s.accel[2], 0.0f, dt_sec, tau * 0.6f, 1.5f);
+        s.roll_angle = 0.0f;
+        s.pitch_angle = 0.0f;
+        s.rest_pitch = 0.0f;
+        s.yaw_angle = 0.0f;
+        s.steady_sec = 0.0f;
+        s.accel[0] = ema_step(s.accel[0], 0.0f, dt_sec, tau * 0.6f, 2.0f);
+        s.accel[1] = ema_step(s.accel[1], 9.80665f, dt_sec, tau * 0.6f, 2.0f);
+        s.accel[2] = ema_step(s.accel[2], 0.0f, dt_sec, tau * 0.6f, 2.0f);
         for (int i = 0; i < 3; ++i)
-            s.gyro[i] = ema_step(s.gyro[i], 0.0f, dt_sec, tau * 0.5f, 2.0f);
+            s.gyro[i] = ema_step(s.gyro[i], 0.0f, dt_sec, tau * 0.5f, 3.0f);
     }
 
     float stick_x = (cfg.motion == MotionMode::Sensors && real_active) ? 0.0f : raw_tilt_x;
@@ -150,16 +223,17 @@ inline void step_sixaxis(SixaxisState &s, float raw_tilt_x, float raw_tilt_y, fl
     float combined_x = std::clamp(stick_x + gyro_tilt_x, -1.0f, 1.0f);
     float combined_y = std::clamp(stick_y + gyro_tilt_y, -1.0f, 1.0f);
     float target_x = 0.0f, target_y = 0.0f;
-    shape_sixaxis_2d(combined_x, combined_y, tilt_deadzone, cfg.sixaxis_curve, target_x, target_y);
-    s.tilt_x = ema_step(s.tilt_x, target_x, dt_sec, tau, 2.5f);
-    s.tilt_y = ema_step(s.tilt_y, target_y, dt_sec, tau, 2.5f);
+    shape_sixaxis_2d(combined_x, combined_y, tilt_deadzone, cfg.sixaxis_curve * 0.40f, target_x, target_y);
+    s.tilt_x = ema_step(s.tilt_x, target_x, dt_sec, tau, 5.0f);
+    s.tilt_y = ema_step(s.tilt_y, target_y, dt_sec, tau, 5.0f);
     out_tilt_x = std::clamp(s.tilt_x, -1.0f, 1.0f);
     out_tilt_y = std::clamp(s.tilt_y, -1.0f, 1.0f);
     out_accel = s.accel;
     out_gyro = s.gyro;
 }
-// Integrate mouse pixel deltas into a leaky virtual stick so turns hold smoothly
-// across mouse sweeps, counter-steering responds immediately, and short ticks cannot spike.
+// Integrate mouse pixel deltas into a leaky virtual stick: captures 1px slow sweeps,
+// turns and counter-steers crisply, holds steady across sweeps, and caps abrupt forward
+// flicks so mouse pushes accelerate smoothly without triggering Sixaxis jump spikes.
 inline void step_mouse_virtual_stick(float &virt_x, float &virt_y, int raw_dx, int raw_dy,
                                      float sensitivity, float dt_sec) {
     if (!std::isfinite(virt_x)) virt_x = 0.0f;
@@ -167,22 +241,26 @@ inline void step_mouse_virtual_stick(float &virt_x, float &virt_y, int raw_dx, i
     if (!std::isfinite(dt_sec) || dt_sec <= 0.0f) return;
 
     float sens = std::clamp(sensitivity, 0.05f, 2.0f);
-    float pix = std::hypot((float)raw_dx, (float)raw_dy);
-    constexpr float kDeadzonePx = 1.2f;
-    bool moving = pix > kDeadzonePx;
-    float decay = std::exp(-dt_sec / (moving ? 0.45f : 0.22f));
+    bool moving = (raw_dx != 0 || raw_dy != 0);
+    float decay = std::exp(-dt_sec / (moving ? 0.60f : 0.16f));
     virt_x *= decay;
     virt_y *= decay;
 
     if (moving) {
-        float active = (pix - kDeadzonePx) / pix;
-        float dx = (float)raw_dx * active;
-        float dy = (float)raw_dy * active;
-        float gain = sens * 0.0085f;
-        float gx = (dx * virt_x < 0.0f) ? gain * 2.0f : gain;
-        float gy = (dy * virt_y < 0.0f) ? gain * 2.0f : gain;
+        float dx = (float)raw_dx;
+        float dy = (float)raw_dy;
+        float gain_x = sens * 0.0125f;
+        float gain_y = sens * 0.0110f;
+        float gx = (dx * virt_x < 0.0f) ? gain_x * 2.8f : gain_x;
+        float gy = (dy * virt_y < 0.0f) ? gain_y * 2.5f : gain_y;
         virt_x = std::clamp(virt_x + dx * gx, -1.0f, 1.0f);
-        virt_y = std::clamp(virt_y + dy * gy, -1.0f, 1.0f);
+
+        float delta_y = dy * gy;
+        if (delta_y < 0.0f) {
+            float max_fwd = 3.8f * dt_sec;
+            delta_y = std::max(delta_y, -max_fwd);
+        }
+        virt_y = std::clamp(virt_y + delta_y, -1.0f, 1.0f);
     }
 
     if (!moving && std::abs(virt_x) < 0.002f) virt_x = 0.0f;

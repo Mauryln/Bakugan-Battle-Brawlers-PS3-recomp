@@ -972,6 +972,10 @@ int pick_slot(int is_save, const CellSaveDataSlotInfo* slots, int count, int foc
 
 } // namespace
 
+extern "C" bool bakugan_savedata_overlay_active() {
+    return __atomic_load_n(&g.active, __ATOMIC_RELAXED) != 0;
+}
+
 void bakugan_savedata_overlay_install(const char* vfs_root)
 {
     const char* off = getenv("PS3_SAVEDATA_UI");

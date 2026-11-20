@@ -30,6 +30,18 @@ bool Gamepads::init(std::string &error) {
     refresh();
     return true;
 }
+static bool enable_device_sensors(Device &d) {
+    if (!d.gyro && !d.accel)
+        return false;
+    bool accel = !d.accel || SDL_GamepadSensorEnabled(d.handle, SDL_SENSOR_ACCEL) ||
+                 SDL_SetGamepadSensorEnabled(d.handle, SDL_SENSOR_ACCEL, true);
+    bool gyro = !d.gyro || SDL_GamepadSensorEnabled(d.handle, SDL_SENSOR_GYRO) ||
+                SDL_SetGamepadSensorEnabled(d.handle, SDL_SENSOR_GYRO, true);
+    if (!((d.accel && accel) || (d.gyro && gyro)))
+        return false;
+    d.sensors_enabled = accel && gyro;
+    return true;
+}
 void Gamepads::refresh() {
     if (!initialized)
         return;
@@ -61,6 +73,7 @@ void Gamepads::refresh() {
         d.guid = guid;
         d.gyro = SDL_GamepadHasSensor(handle, SDL_SENSOR_GYRO);
         d.accel = SDL_GamepadHasSensor(handle, SDL_SENSOR_ACCEL);
+        enable_device_sensors(d);
         items.push_back(d);
     }
     SDL_free(ids);
@@ -78,15 +91,8 @@ bool Gamepads::motion(Device *d, std::array<float, 3> &a, std::array<float, 3> &
     g = {0.0f, 0.0f, 0.0f};
     if (!d || (!d->gyro && !d->accel))
         return false;
-    if (!d->sensors_enabled) {
-        bool accel = !d->accel || SDL_GamepadSensorEnabled(d->handle, SDL_SENSOR_ACCEL) ||
-                     SDL_SetGamepadSensorEnabled(d->handle, SDL_SENSOR_ACCEL, true);
-        bool gyro = !d->gyro || SDL_GamepadSensorEnabled(d->handle, SDL_SENSOR_GYRO) ||
-                    SDL_SetGamepadSensorEnabled(d->handle, SDL_SENSOR_GYRO, true);
-        if (!((d->accel && accel) || (d->gyro && gyro)))
-            return false;
-        d->sensors_enabled = accel && gyro;
-    }
+    if (!d->sensors_enabled && !enable_device_sensors(*d))
+        return false;
     bool got_a = d->accel && SDL_GetGamepadSensorData(d->handle, SDL_SENSOR_ACCEL, a.data(), 3);
     bool got_g = d->gyro && SDL_GetGamepadSensorData(d->handle, SDL_SENSOR_GYRO, g.data(), 3);
     if (!got_a)

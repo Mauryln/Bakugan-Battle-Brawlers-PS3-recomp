@@ -241,6 +241,36 @@ int main() {
                      std::array<float, 3>{0.f, 9.80665f, 0.f},
                      std::array<float, 3>{0.f, 0.f, -2.0f}, mode_cfg, 0.020f, rtx, rty, out_a, out_g);
     CHECK(rtx > 0.90f); // steering-wheel roll (g[2]) also drives tilt_x (+right)
+    auto roll_rep = make_report_with_tilt(std::array<float, ACTION_COUNT>{}, rtx, rty,
+                                          MotionMode::Sensors, true, out_a, out_g, 2500, pulse);
+    CHECK(roll_rep.sensors[0] > 600 && roll_rep.sensors[3] > 512); // SENSOR_X and SENSOR_G agree on right steer
+
+    // Gravity-referenced roll holds steady tilt angle even after gyro rate drops to 0
+    SixaxisState hold_state;
+    float htx = 0.f, hty = 0.f;
+    const float tilt25 = 25.0f * (3.14159265f / 180.0f);
+    std::array<float, 3> held_accel{-9.80665f * std::sin(tilt25), 9.80665f * std::cos(tilt25), 0.0f};
+    for (int i = 0; i < 30; ++i)
+        step_sixaxis(hold_state, 0.0f, 0.0f, 0.0f, true, held_accel,
+                     std::array<float, 3>{0.f, 0.f, 0.f}, mode_cfg, 0.010f, htx, hty, out_a, out_g);
+    CHECK(htx > 0.70f); // holding 25 deg right roll maintains steady steering
+
+    // Ergonomic tilted hand posture calibrates neutral pitch, then further forward tilt drives up (-y)
+    SixaxisState pose_state;
+    float ptx = 0.f, pty = 0.f;
+    const float rest20 = 20.0f * (3.14159265f / 180.0f);
+    std::array<float, 3> rest_accel{0.0f, 9.80665f * std::cos(rest20), 9.80665f * std::sin(rest20)};
+    for (int i = 0; i < 40; ++i)
+        step_sixaxis(pose_state, 0.0f, 0.0f, 0.0f, true, rest_accel,
+                     std::array<float, 3>{0.f, 0.f, 0.f}, mode_cfg, 0.025f, ptx, pty, out_a, out_g);
+    CHECK(std::abs(pty) < 0.05f);
+    const float fwd35 = 35.0f * (3.14159265f / 180.0f);
+    std::array<float, 3> fwd_accel{0.0f, 9.80665f * std::cos(fwd35), 9.80665f * std::sin(fwd35)};
+    for (int i = 0; i < 40; ++i)
+        step_sixaxis(pose_state, 0.0f, 0.0f, 0.0f, true, fwd_accel,
+                     std::array<float, 3>{-0.5f, 0.f, 0.f}, mode_cfg, 0.010f, ptx, pty, out_a, out_g);
+    CHECK(pty < -0.45f);
+
     mode_cfg.motion = MotionMode::RightStick;
     SixaxisState stick_only_state;
     for (int i = 0; i < 20; ++i)
@@ -249,19 +279,26 @@ int main() {
                      std::array<float, 3>{0.f, -2.0f, 0.f}, mode_cfg, 0.020f, stx, sty, out_a, out_g);
     CHECK(stx == 0.0f && sty == 0.0f); // RightStick mode ignores physical gyro
 
-    // Mouse leaky virtual stick: ignores 1px jitter, no 1/dt spike on short ticks, smooth return to 0
+    // Mouse leaky virtual stick: captures 1px sweeps, caps forward flicks to avoid jump spikes,
+    // turns/counter-steers crisply, and returns smoothly to 0
     float mvx = 0.f, mvy = 0.f;
-    step_mouse_virtual_stick(mvx, mvy, 1, 0, 0.5f, 0.008f);
+    step_mouse_virtual_stick(mvx, mvy, 0, 0, 0.5f, 0.008f);
     CHECK(mvx == 0.0f && mvy == 0.0f);
+    step_mouse_virtual_stick(mvx, mvy, 1, 0, 0.5f, 0.008f);
+    CHECK(mvx > 0.0f && mvx < 0.02f && mvy == 0.0f);
+    mvx = 0.f;
     step_mouse_virtual_stick(mvx, mvy, 0, -6, 0.5f, 0.001f);
-    CHECK(mvy < 0.0f && mvy > -0.05f); // short tick does not spike to jump threshold
+    CHECK(mvy < 0.0f && mvy > -0.05f); // short tick / abrupt forward flick does not spike to jump threshold
+    step_mouse_virtual_stick(mvx, mvy, 0, -200, 0.5f, 0.008f);
+    CHECK(mvy > -0.05f); // large forward flick is slew-limited so it will not jump
+    mvy = 0.f;
     for (int i = 0; i < 15; ++i)
         step_mouse_virtual_stick(mvx, mvy, 12, 0, 0.5f, 0.008f);
-    CHECK(mvx > 0.40f && mvx <= 1.0f);
+    CHECK(mvx > 0.65f && mvx <= 1.0f);
     float peak_x = mvx;
     step_mouse_virtual_stick(mvx, mvy, -12, 0, 0.5f, 0.008f); // counter-steer cuts turn faster
-    CHECK(mvx < peak_x - 0.05f);
-    for (int i = 0; i < 200; ++i)
+    CHECK(mvx < peak_x - 0.10f);
+    for (int i = 0; i < 160; ++i)
         step_mouse_virtual_stick(mvx, mvy, 0, 0, 0.5f, 0.010f);
     CHECK(mvx == 0.0f && mvy == 0.0f);
     Gamepads devices;
