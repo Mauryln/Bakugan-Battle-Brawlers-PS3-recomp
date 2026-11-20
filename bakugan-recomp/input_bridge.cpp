@@ -6,6 +6,7 @@
 #include "gamepad_devices.h"
 #include "input_model.h"
 #include <array>
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <vector>
@@ -20,10 +21,10 @@ constexpr int MAX_PORTS = 7; // matches CELL_PAD_MAX_PORT_NUM
 struct PortState {
     bool connected = false;
     bool is_gamepad = false;
+    SDL_JoystickID device_id = 0;
     ps3_host_pad_report report{};
     player::MotionPulse pulse{};
-    float filtered_gyro_x = 0.0f;
-    float filtered_gyro_y = 0.0f;
+    player::SixaxisState sixaxis{};
 };
 std::array<PortState, MAX_PORTS> ports{};
 bool installed = false;
@@ -99,8 +100,8 @@ static void tick_mouse_script(VirtualMouse &vm) {
 
 void update_mouse(HWND hwnd, std::array<float, player::ACTION_COUNT> &v,
                   HWND &previous_window, POINT &previous_cursor,
-                  float &sixaxis_x, float &sixaxis_y,
-                  int mouse_buttons, const VirtualMouse &vm) {
+                  float &mouse_virt_x, float &mouse_virt_y,
+                  int mouse_buttons, const VirtualMouse &vm, float dt_sec) {
     int raw_dx = 0, raw_dy = 0;
     if (vm.active) {
         raw_dx = vm.segs[vm.cur].dx;
@@ -114,10 +115,7 @@ void update_mouse(HWND hwnd, std::array<float, player::ACTION_COUNT> &v,
         if (!cursor_ok || !ScreenToClient(hwnd, &client_cursor) || !GetClientRect(hwnd, &client) ||
             !PtInRect(&client, client_cursor)) {
             previous_window = nullptr;
-            sixaxis_x *= 0.75f;
-            sixaxis_y *= 0.75f;
-            if (std::abs(sixaxis_x) < 0.005f) sixaxis_x = 0.0f;
-            if (std::abs(sixaxis_y) < 0.005f) sixaxis_y = 0.0f;
+            player::step_mouse_virtual_stick(mouse_virt_x, mouse_virt_y, 0, 0, config.mouse_sensitivity, dt_sec);
             return;
         }
         // Start a new sample when the pointer enters or focus changes.
@@ -129,58 +127,22 @@ void update_mouse(HWND hwnd, std::array<float, player::ACTION_COUNT> &v,
         previous_cursor = cursor;
     }
 
-    bool held = config.mouse_look && (mouse_buttons & 2);
     float sens = (config.mouse_sensitivity > 0.01f ? config.mouse_sensitivity : 0.5f);
+    bool held = config.mouse_look && (mouse_buttons & 2);
 
     if (held) {
         // Right click held: mouse look / camera aim (drives Left stick)
-        float x = std::clamp(raw_dx * sens / 30.f, -1.f, 1.f);
-        float y = std::clamp(raw_dy * sens / 30.f, -1.f, 1.f);
+        float dt_scale = std::clamp(0.008f / std::clamp(dt_sec, 0.001f, 0.05f), 0.5f, 1.5f);
+        float x = std::clamp((float)raw_dx * dt_scale * sens / 30.f, -1.f, 1.f);
+        float y = std::clamp((float)raw_dy * dt_scale * sens / 30.f, -1.f, 1.f);
         v[player::L_LEFT] = std::max(v[player::L_LEFT], std::max(0.f, -x));
         v[player::L_RIGHT] = std::max(v[player::L_RIGHT], std::max(0.f, x));
         v[player::L_UP] = std::max(v[player::L_UP], std::max(0.f, -y));
         v[player::L_DOWN] = std::max(v[player::L_DOWN], std::max(0.f, y));
-
-        sixaxis_x *= 0.80f;
-        sixaxis_y *= 0.80f;
+        player::step_mouse_virtual_stick(mouse_virt_x, mouse_virt_y, 0, 0, sens, dt_sec);
     } else {
-        // Free mouse movement: simulate Sixaxis roll and pitch
-        if (std::abs(raw_dx) <= 1) raw_dx = 0;
-        if (std::abs(raw_dy) <= 1) raw_dy = 0;
-
-        float target_x = std::clamp((raw_dx * sens) / 25.0f, -1.0f, 1.0f);
-        float target_y = std::clamp((-raw_dy * sens) / 25.0f, -1.0f, 1.0f); // Mouse up = tilt forward/up
-
-        constexpr float kAttack = 0.50f;
-        constexpr float kDecay = 0.80f;
-
-        if (std::abs(target_x) > 0.01f)
-            sixaxis_x = sixaxis_x * (1.0f - kAttack) + target_x * kAttack;
-        else
-            sixaxis_x *= kDecay;
-
-        if (std::abs(target_y) > 0.01f)
-            sixaxis_y = sixaxis_y * (1.0f - kAttack) + target_y * kAttack;
-        else
-            sixaxis_y *= kDecay;
-
-        if (std::abs(sixaxis_x) < 0.005f) sixaxis_x = 0.0f;
-        if (std::abs(sixaxis_y) < 0.005f) sixaxis_y = 0.0f;
-
-        sixaxis_x = std::clamp(sixaxis_x, -1.0f, 1.0f);
-        sixaxis_y = std::clamp(sixaxis_y, -1.0f, 1.0f);
+        player::step_mouse_virtual_stick(mouse_virt_x, mouse_virt_y, raw_dx, raw_dy, sens, dt_sec);
     }
-
-    // Apply mouse Sixaxis deflection to right-stick virtual channels
-    if (sixaxis_x > 0.0f)
-        v[player::R_RIGHT] = std::max(v[player::R_RIGHT], sixaxis_x);
-    else if (sixaxis_x < 0.0f)
-        v[player::R_LEFT] = std::max(v[player::R_LEFT], -sixaxis_x);
-
-    if (sixaxis_y > 0.0f)
-        v[player::R_UP] = std::max(v[player::R_UP], sixaxis_y);
-    else if (sixaxis_y < 0.0f)
-        v[player::R_DOWN] = std::max(v[player::R_DOWN], -sixaxis_y);
 }
 ps3_host_pad_report neutral_report() {
     ps3_host_pad_report r{};
@@ -206,59 +168,41 @@ ps3_host_pad_report to_host_report(const player::Report &r) {
     return out;
 }
 ps3_host_pad_report sample_gamepad(player::Device *device, bool foreground, ULONGLONG now,
-                                   PortState &state) {
+                                   float dt_sec, PortState &state) {
     std::array<float, player::ACTION_COUNT> gp_values{};
-    std::array<float, 3> a{}, g{};
+    std::array<float, 3> a{0.0f, 9.80665f, 0.0f}, g{};
     SDL_Gamepad *pad = device ? device->handle : nullptr;
     bool real = foreground && pad && config.motion != player::MotionMode::RightStick &&
                 pads.motion(device, a, g);
     if (foreground && pad) {
         player::read_gamepad_actions(config, pad, gp_values);
-        if (real) {
-            float raw_yaw = g[1];
-            float raw_pitch = g[0];
-            float speed = std::sqrt(raw_yaw * raw_yaw + raw_pitch * raw_pitch);
-            float gz = config.gyro_deadzone > 0.001f ? config.gyro_deadzone : 0.05f;
-            if (speed < gz) {
-                raw_yaw = 0.0f;
-                raw_pitch = 0.0f;
-            } else {
-                float factor = (speed - gz) / speed;
-                raw_yaw *= factor;
-                raw_pitch *= factor;
-            }
-            constexpr float kAlpha = 0.35f;
-            state.filtered_gyro_x = state.filtered_gyro_x * kAlpha + raw_yaw * (1.0f - kAlpha);
-            state.filtered_gyro_y = state.filtered_gyro_y * kAlpha + raw_pitch * (1.0f - kAlpha);
-            float sens = config.gyro_sensitivity > 0.01f ? config.gyro_sensitivity : 1.0f;
-            float sign_x = config.gyro_invert_x ? 1.0f : -1.0f;
-            float sign_y = config.gyro_invert_y ? -1.0f : 1.0f;
-            float gyro_deflection_x = std::clamp((state.filtered_gyro_x * sign_x * sens) / 2.0f, -1.0f, 1.0f);
-            float gyro_deflection_y = std::clamp((state.filtered_gyro_y * sign_y * sens) / 2.0f, -1.0f, 1.0f);
-
-            float phys_rx = gp_values[player::R_RIGHT] - gp_values[player::R_LEFT];
-            float phys_ry = gp_values[player::R_DOWN] - gp_values[player::R_UP];
-            float total_rx = std::clamp(phys_rx + gyro_deflection_x, -1.0f, 1.0f);
-            float total_ry = std::clamp(phys_ry + gyro_deflection_y, -1.0f, 1.0f);
-            gp_values[player::R_LEFT] = std::max(0.0f, -total_rx);
-            gp_values[player::R_RIGHT] = std::max(0.0f, total_rx);
-            gp_values[player::R_UP] = std::max(0.0f, -total_ry);
-            gp_values[player::R_DOWN] = std::max(0.0f, total_ry);
-        } else {
-            state.filtered_gyro_x = 0.0f;
-            state.filtered_gyro_y = 0.0f;
-        }
     } else {
         state.pulse = {};
-        state.filtered_gyro_x = 0.0f;
-        state.filtered_gyro_y = 0.0f;
+        state.sixaxis = {};
     }
-    return to_host_report(player::make_report(gp_values, config.motion, real, a, g, now, state.pulse));
+    float raw_tilt_x = gp_values[player::R_RIGHT] - gp_values[player::R_LEFT];
+    float raw_tilt_y = gp_values[player::R_DOWN] - gp_values[player::R_UP];
+    float tilt_x = 0.0f, tilt_y = 0.0f;
+    std::array<float, 3> filt_a{0.0f, 9.80665f, 0.0f}, filt_g{};
+    if (foreground && pad) {
+        player::step_sixaxis(state.sixaxis, raw_tilt_x, raw_tilt_y, 0.0f, real, a, g,
+                             config, dt_sec, tilt_x, tilt_y, filt_a, filt_g);
+        if (real) {
+            // Bakugan steers from right-stick / full-range tilt, so mirror smoothed gyro+stick into rx/ry.
+            gp_values[player::R_LEFT] = std::max(0.0f, -tilt_x);
+            gp_values[player::R_RIGHT] = std::max(0.0f, tilt_x);
+            gp_values[player::R_UP] = std::max(0.0f, -tilt_y);
+            gp_values[player::R_DOWN] = std::max(0.0f, tilt_y);
+        }
+    }
+    return to_host_report(player::make_report_with_tilt(
+        gp_values, tilt_x, tilt_y, config.motion, real, filt_a, filt_g, now, state.pulse));
 }
 ps3_host_pad_report sample_keyboard(bool foreground, HWND hwnd, POINT &previous_cursor,
-                                    HWND &previous_mouse_window, float &mouse_sixaxis_x,
-                                    float &mouse_sixaxis_y, const VirtualMouse &vm,
-                                    ULONGLONG now, player::MotionPulse &pulse) {
+                                    HWND &previous_mouse_window, float &mouse_virt_x,
+                                    float &mouse_virt_y, player::SixaxisState &kb_sixaxis,
+                                    const VirtualMouse &vm, ULONGLONG now, float dt_sec,
+                                    player::MotionPulse &pulse) {
     std::array<float, player::ACTION_COUNT> kb_values{};
     if (foreground) {
         for (int i = 0; i < player::ACTION_COUNT; ++i)
@@ -270,31 +214,54 @@ ps3_host_pad_report sample_keyboard(bool foreground, HWND hwnd, POINT &previous_
         if (config.mouse_left_cross && (mouse_buttons & 1))
             kb_values[player::CROSS] = 1.0f;
         update_mouse(hwnd, kb_values, previous_mouse_window, previous_cursor,
-                     mouse_sixaxis_x, mouse_sixaxis_y, mouse_buttons, vm);
+                     mouse_virt_x, mouse_virt_y, mouse_buttons, vm, dt_sec);
     } else {
         previous_mouse_window = nullptr;
-        mouse_sixaxis_x = 0.0f;
-        mouse_sixaxis_y = 0.0f;
+        mouse_virt_x = 0.0f;
+        mouse_virt_y = 0.0f;
+        kb_sixaxis = {};
         pulse = {};
     }
-    std::array<float, 3> a{}, g{};
+    float kb_tilt_x = kb_values[player::R_RIGHT] - kb_values[player::R_LEFT];
+    float kb_tilt_y = kb_values[player::R_DOWN] - kb_values[player::R_UP];
+    float raw_tilt_x = std::clamp(kb_tilt_x + mouse_virt_x, -1.0f, 1.0f);
+    float raw_tilt_y = std::clamp(kb_tilt_y + mouse_virt_y, -1.0f, 1.0f);
+    float tilt_x = 0.0f, tilt_y = 0.0f;
+    std::array<float, 3> a{0.0f, 9.80665f, 0.0f}, g{}, filt_a{0.0f, 9.80665f, 0.0f}, filt_g{};
+    if (foreground) {
+        player::step_sixaxis(kb_sixaxis, raw_tilt_x, raw_tilt_y, 0.0f, false, a, g,
+                             config, dt_sec, tilt_x, tilt_y, filt_a, filt_g);
+        kb_values[player::R_LEFT] = std::max(kb_values[player::R_LEFT], std::max(0.0f, -tilt_x));
+        kb_values[player::R_RIGHT] = std::max(kb_values[player::R_RIGHT], std::max(0.0f, tilt_x));
+        kb_values[player::R_UP] = std::max(kb_values[player::R_UP], std::max(0.0f, -tilt_y));
+        kb_values[player::R_DOWN] = std::max(kb_values[player::R_DOWN], std::max(0.0f, tilt_y));
+    }
+    player::MotionMode kb_mode = config.motion == player::MotionMode::Sensors
+                                     ? player::MotionMode::Auto
+                                     : config.motion;
     ps3_host_pad_report result = to_host_report(
-        player::make_report(kb_values, config.motion, false, a, g, now, pulse));
+        player::make_report_with_tilt(kb_values, tilt_x, tilt_y, kb_mode, false, filt_a, filt_g, now, pulse));
     if (foreground && vm.active)
         result.buttons |= (uint16_t)vm.segs[vm.cur].pad;
     return result;
 }
 unsigned __stdcall run(void *) {
     player::MotionPulse kb_pulse;
+    player::SixaxisState kb_sixaxis;
     HWND previous_mouse_window = nullptr;
     POINT previous_cursor{};
-    float mouse_sixaxis_x = 0.0f;
-    float mouse_sixaxis_y = 0.0f;
+    float mouse_virt_x = 0.0f;
+    float mouse_virt_y = 0.0f;
     ULONGLONG refresh = 0;
     ULONGLONG script_poll = 0;
+    auto prev_tick = std::chrono::steady_clock::now();
     VirtualMouse vm;
     std::string prior;
     while (WaitForSingleObject(stop_event, 8) == WAIT_TIMEOUT) {
+        auto tick_now = std::chrono::steady_clock::now();
+        float dt_sec = std::clamp(
+            std::chrono::duration<float>(tick_now - prev_tick).count(), 0.001f, 0.05f);
+        prev_tick = tick_now;
         ULONGLONG now = GetTickCount64();
         if (now >= refresh) {
             pads.refresh();
@@ -331,18 +298,19 @@ unsigned __stdcall run(void *) {
         // VirtualMouse scripts always drive port 0 alongside whatever controller is there.
         if (vm.active && allow_keyboard) {
             ps3_host_pad_report kb = sample_keyboard(foreground, hwnd, previous_cursor,
-                previous_mouse_window, mouse_sixaxis_x, mouse_sixaxis_y, vm, now, kb_pulse);
+                previous_mouse_window, mouse_virt_x, mouse_virt_y, kb_sixaxis, vm, now, dt_sec, kb_pulse);
             next_ports[0].connected = true;
             next_ports[0].report = kb;
             next_idx = 1;
             state = "P1: keyboard/mouse (script)";
         } else {
             for (size_t i = 0; i < ordered.size() && next_idx < MAX_PORTS; ++i) {
-                if (ports[next_idx].is_gamepad)
+                if (ports[next_idx].is_gamepad && ports[next_idx].device_id == ordered[i]->id)
                     next_ports[next_idx] = ports[next_idx];
                 next_ports[next_idx].connected = true;
                 next_ports[next_idx].is_gamepad = true;
-                next_ports[next_idx].report = sample_gamepad(ordered[i], foreground, now, next_ports[next_idx]);
+                next_ports[next_idx].device_id = ordered[i]->id;
+                next_ports[next_idx].report = sample_gamepad(ordered[i], foreground, now, dt_sec, next_ports[next_idx]);
                 if (!state.empty()) state += " | ";
                 state += "P" + std::to_string(next_idx + 1) + ": " + ordered[i]->name;
                 ++next_idx;
@@ -351,7 +319,7 @@ unsigned __stdcall run(void *) {
                 next_ports[next_idx].connected = true;
                 next_ports[next_idx].is_gamepad = false;
                 next_ports[next_idx].report = sample_keyboard(foreground, hwnd, previous_cursor,
-                    previous_mouse_window, mouse_sixaxis_x, mouse_sixaxis_y, vm, now, kb_pulse);
+                    previous_mouse_window, mouse_virt_x, mouse_virt_y, kb_sixaxis, vm, now, dt_sec, kb_pulse);
                 if (!state.empty()) state += " | ";
                 state += "P" + std::to_string(next_idx + 1) + ": keyboard/mouse";
                 ++next_idx;

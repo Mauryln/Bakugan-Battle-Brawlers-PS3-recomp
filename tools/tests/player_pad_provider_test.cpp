@@ -32,6 +32,7 @@ int main() {
     for (auto key : {"PAD_RECORD", "PAD_REPLAY", "PAD_FILE", "PAD_AUTOPRESS", "PAD_SCRIPT", "PAD_STICK",
                      "PAD_SWEEP", "YDKJ_INJECT_PAD"})
         _putenv_s(key, "");
+    _putenv_s("PAD_NO_KEYBOARD", "1");
     ps3_pad_set_host_provider(provide, nullptr);
     if (cellPadInit(7) != CELL_OK)
         return 1;
@@ -102,6 +103,25 @@ int main() {
     if (cellPadGetData(3, (CellPadData *)0x100) != CELL_OK)
         return 9;
     ok = ok && ps3_bswap32((u32)data->len) == 0;
+
+    // Boundary check: 10-bit sensor extremes (0, 399, 512, 1023) and neutral fallback when sensors_valid=0
+    snapshots[0].sensors[0] = 0;
+    snapshots[0].sensors[1] = 1023;
+    snapshots[0].sensors[2] = 512;
+    snapshots[0].sensors[3] = 399;
+    snapshots[0].sensors_valid = 1;
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    if (cellPadGetData(0, (CellPadData *)0x100) != CELL_OK)
+        return 10;
+    ok = ok && word(CELL_PAD_BTN_OFFSET_SENSOR_X) == 0 && word(CELL_PAD_BTN_OFFSET_SENSOR_Y) == 1023 &&
+         word(CELL_PAD_BTN_OFFSET_SENSOR_Z) == 512 && word(CELL_PAD_BTN_OFFSET_SENSOR_G) == 399;
+
+    snapshots[0].sensors_valid = 0;
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    if (cellPadGetData(0, (CellPadData *)0x100) != CELL_OK)
+        return 11;
+    ok = ok && word(CELL_PAD_BTN_OFFSET_SENSOR_X) == 512 && word(CELL_PAD_BTN_OFFSET_SENSOR_Y) == 399 &&
+         word(CELL_PAD_BTN_OFFSET_SENSOR_Z) == 512 && word(CELL_PAD_BTN_OFFSET_SENSOR_G) == 512;
     cellPadEnd();
     std::printf("cellPad multi-port provider / GetInfo / GetData / Sixaxis: %s\n",
                 ok ? "PASS" : "FAIL");

@@ -74,6 +74,8 @@ Device *Gamepads::selected(const Config &c) {
     return nullptr; // A different controller must not silently receive this mapping.
 }
 bool Gamepads::motion(Device *d, std::array<float, 3> &a, std::array<float, 3> &g) {
+    a = {0.0f, 9.80665f, 0.0f};
+    g = {0.0f, 0.0f, 0.0f};
     if (!d || (!d->gyro && !d->accel))
         return false;
     if (!d->sensors_enabled) {
@@ -85,7 +87,11 @@ bool Gamepads::motion(Device *d, std::array<float, 3> &a, std::array<float, 3> &
     }
     bool got_a = d->accel && SDL_GetGamepadSensorData(d->handle, SDL_SENSOR_ACCEL, a.data(), 3);
     bool got_g = d->gyro && SDL_GetGamepadSensorData(d->handle, SDL_SENSOR_GYRO, g.data(), 3);
-    return got_g || got_a;
+    if (!got_a)
+        a = {0.0f, 9.80665f, 0.0f};
+    if (!got_g)
+        g = {0.0f, 0.0f, 0.0f};
+    return (got_g || got_a) && finite_motion(a, g);
 }
 void Gamepads::close(bool quit_subsystem) {
     for (auto &d : items)

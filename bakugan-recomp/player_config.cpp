@@ -104,12 +104,43 @@ Config defaults() {
     c.gamepad[R_LEFT] = {BindingKind::AxisNegative, SDL_GAMEPAD_AXIS_RIGHTX};
     return c;
 }
+void apply_sixaxis_profile(Config &c, SixaxisProfile profile) {
+    c.sixaxis_profile = profile;
+    switch (profile) {
+    case SixaxisProfile::Smooth:
+        c.deadzone = 0.18f;
+        c.gyro_sensitivity = 0.85f;
+        c.gyro_deadzone = 0.07f;
+        c.sixaxis_curve = 0.80f;
+        c.sixaxis_smoothing = 0.75f;
+        break;
+    case SixaxisProfile::Standard:
+        c.deadzone = 0.15f;
+        c.gyro_sensitivity = 1.00f;
+        c.gyro_deadzone = 0.05f;
+        c.sixaxis_curve = 0.50f;
+        c.sixaxis_smoothing = 0.45f;
+        break;
+    case SixaxisProfile::Fast:
+        c.deadzone = 0.10f;
+        c.gyro_sensitivity = 1.40f;
+        c.gyro_deadzone = 0.03f;
+        c.sixaxis_curve = 0.15f;
+        c.sixaxis_smoothing = 0.15f;
+        break;
+    case SixaxisProfile::Custom:
+        break;
+    }
+}
 bool has_input_overrides(const Config& c) {
     const Config base = defaults();
     auto equal_binding = [](const Binding& a, const Binding& b) {
         return a.kind == b.kind && a.code == b.code;
     };
     return c.input != base.input || c.motion != base.motion ||
+           c.sixaxis_profile != base.sixaxis_profile ||
+           c.sixaxis_curve != base.sixaxis_curve ||
+           c.sixaxis_smoothing != base.sixaxis_smoothing ||
            !c.device_guid.empty() || !c.device_serial.empty() ||
            c.mouse_look != base.mouse_look || c.mouse_left_cross != base.mouse_left_cross ||
            c.mouse_sensitivity != base.mouse_sensitivity || c.deadzone != base.deadzone ||
@@ -195,12 +226,15 @@ bool load(Config &c, const std::wstring &path, std::wstring *error) {
     c.aniso = (a == 1 || a == 2 || a == 4 || a == 8 || a == 16) ? a : 16;
     c.input = (InputMode)(int)number(get(L"Input", L"Mode", L"0", path), 0, 0, 2);
     c.motion = (MotionMode)(int)number(get(L"Input", L"Motion", L"0", path), 0, 0, 2);
+    c.sixaxis_profile = (SixaxisProfile)(int)number(get(L"Input", L"SixaxisProfile", L"1", path), 1, 0, 3);
     c.deadzone = number(get(L"Input", L"Deadzone", L"0.15", path), 0.15f, 0.02f, 0.5f);
     c.mouse_sensitivity = number(get(L"Input", L"MouseSensitivity", L"0.5", path), 0.5f, 0.05f, 2);
     c.mouse_look = get(L"Input", L"MouseLook", L"1", path) != L"0";
     c.mouse_left_cross = get(L"Input", L"MouseLeftCross", L"1", path) != L"0";
     c.gyro_sensitivity = number(get(L"Input", L"GyroSensitivity", L"1.0", path), 1.0f, 0.1f, 5.0f);
     c.gyro_deadzone = number(get(L"Input", L"GyroDeadzone", L"0.05", path), 0.05f, 0.0f, 0.5f);
+    c.sixaxis_curve = number(get(L"Input", L"SixaxisCurve", L"0.50", path), 0.50f, 0.0f, 1.0f);
+    c.sixaxis_smoothing = number(get(L"Input", L"SixaxisSmoothing", L"0.45", path), 0.45f, 0.0f, 1.0f);
     c.gyro_invert_x = get(L"Input", L"GyroInvertX", L"0", path) != L"0";
     c.gyro_invert_y = get(L"Input", L"GyroInvertY", L"0", path) != L"0";
     auto guid = get(L"Input", L"GUID", L"", path);
@@ -256,6 +290,7 @@ bool save(const Config &c, const std::wstring &path, std::wstring *error) {
     put(L"Graphics", L"Anisotropy", std::to_wstring(c.aniso));
     put(L"Input", L"Mode", std::to_wstring((int)c.input));
     put(L"Input", L"Motion", std::to_wstring((int)c.motion));
+    put(L"Input", L"SixaxisProfile", std::to_wstring((int)c.sixaxis_profile));
     put(L"Input", L"GUID", std::wstring(c.device_guid.begin(), c.device_guid.end()));
     put(L"Input", L"Serial", std::wstring(c.device_serial.begin(), c.device_serial.end()));
     put(L"Input", L"Deadzone", std::to_wstring(c.deadzone));
@@ -264,6 +299,8 @@ bool save(const Config &c, const std::wstring &path, std::wstring *error) {
     put(L"Input", L"MouseLeftCross", c.mouse_left_cross ? L"1" : L"0");
     put(L"Input", L"GyroSensitivity", std::to_wstring(c.gyro_sensitivity));
     put(L"Input", L"GyroDeadzone", std::to_wstring(c.gyro_deadzone));
+    put(L"Input", L"SixaxisCurve", std::to_wstring(c.sixaxis_curve));
+    put(L"Input", L"SixaxisSmoothing", std::to_wstring(c.sixaxis_smoothing));
     put(L"Input", L"GyroInvertX", c.gyro_invert_x ? L"1" : L"0");
     put(L"Input", L"GyroInvertY", c.gyro_invert_y ? L"1" : L"0");
     for (int i = 0; i < ACTION_COUNT; ++i) {

@@ -39,19 +39,23 @@ struct Binding {
 };
 enum class InputMode { Auto, KeyboardMouse, Gamepad };
 enum class MotionMode { Auto, Sensors, RightStick };
+enum class SixaxisProfile { Smooth, Standard, Fast, Custom };
 struct Config {
     std::wstring output = L"1080p", cap = L"30", window = L"borderless";
     std::wstring fsr = L"auto", language = L"auto", ui_language = L"auto";
     float sharpness = 0.6f, mouse_sensitivity = 0.5f, deadzone = 0.15f;
     float gyro_sensitivity = 1.0f, gyro_deadzone = 0.05f;
+    float sixaxis_curve = 0.50f, sixaxis_smoothing = 0.45f;
     bool gyro_invert_x = false, gyro_invert_y = false;
     int aniso = 16;
     InputMode input = InputMode::Auto;
     MotionMode motion = MotionMode::Auto;
+    SixaxisProfile sixaxis_profile = SixaxisProfile::Standard;
     std::string device_guid, device_serial;
     std::array<Binding, ACTION_COUNT> keyboard{}, gamepad{};
     bool mouse_look = true, mouse_left_cross = true;
 };
+void apply_sixaxis_profile(Config &config, SixaxisProfile profile);
 const wchar_t *action_name(int action, bool english = false);
 Config defaults();
 bool has_input_overrides(const Config& config);

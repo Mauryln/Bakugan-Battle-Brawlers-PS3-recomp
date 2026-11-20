@@ -34,7 +34,10 @@ enum {
     ID_SAVE,
     ID_PLAY,
     ID_UI_LANG,
-    ID_GAMEPAD_CANVAS
+    ID_GAMEPAD_CANVAS,
+    ID_SIXAXIS_PROFILE,
+    ID_MOTION_MODE,
+    ID_SIXAXIS_SMOOTH
 };
 constexpr UINT WM_APP_REBUILD = WM_APP + 1;
 constexpr int WIDTH = 1000, HEIGHT = 800;
@@ -186,7 +189,9 @@ void refresh_devices(bool force = false) {
     Device *device = pads.selected(config);
     std::wstring info = S(L"Sin mando (Stick R / I J K L)",
                           L"No pad (Right stick / I J K L)");
-    if (device) {
+    if (config.motion == MotionMode::RightStick) {
+        info = S(L"Modo stick R (Giroscopio desact.)", L"Right stick only (Gyro off)");
+    } else if (device) {
         std::array<float, 3> a{}, g{};
         bool real = pads.motion(device, a, g);
         info = real ? S(L"Giroscopio + Stick R activos", L"Gyroscope + Right stick active")
@@ -207,13 +212,22 @@ void read_controls() {
     config.language = languages[index(ID_LANG, 8)];
     config.ui_language = ui_languages[index(ID_UI_LANG, 3)];
     config.input = InputMode::Auto;
-    config.motion = MotionMode::Auto;
+    config.motion = (MotionMode)index(ID_MOTION_MODE, 3);
+    config.sixaxis_profile = (SixaxisProfile)index(ID_SIXAXIS_PROFILE, 4);
     config.gyro_sensitivity = position(ID_GYRO_SENS) / 100.f;
     config.deadzone = position(ID_DEADZONE) / 100.f;
+    config.sixaxis_smoothing = position(ID_SIXAXIS_SMOOTH) / 100.f;
     config.mouse_sensitivity = position(ID_SENSITIVITY) / 100.f;
     config.mouse_look = checked(ID_MOUSE_LOOK);
     config.mouse_left_cross = checked(ID_MOUSE_CROSS);
     read_device();
+}
+
+void sync_sixaxis_sliders() {
+    SendMessageW(GetDlgItem(window, ID_DEADZONE), TBM_SETPOS, TRUE, (int)std::lround(config.deadzone * 100.f));
+    SendMessageW(GetDlgItem(window, ID_GYRO_SENS), TBM_SETPOS, TRUE, (int)std::lround(config.gyro_sensitivity * 100.f));
+    SendMessageW(GetDlgItem(window, ID_SIXAXIS_SMOOTH), TBM_SETPOS, TRUE,
+                 (int)std::lround(config.sixaxis_smoothing * 100.f));
 }
 
 void fill_controls() {
@@ -225,9 +239,10 @@ void fill_controls() {
     for (int n = config.aniso; n > 1; n /= 2)
         ++a;
     choose(ID_ANISO, a);
-    SendMessageW(GetDlgItem(window, ID_DEADZONE), TBM_SETPOS, TRUE, (int)(config.deadzone * 100));
-    SendMessageW(GetDlgItem(window, ID_GYRO_SENS), TBM_SETPOS, TRUE, (int)(config.gyro_sensitivity * 100));
-    SendMessageW(GetDlgItem(window, ID_SENSITIVITY), TBM_SETPOS, TRUE, (int)(config.mouse_sensitivity * 100));
+    choose(ID_SIXAXIS_PROFILE, (int)config.sixaxis_profile);
+    choose(ID_MOTION_MODE, (int)config.motion);
+    sync_sixaxis_sliders();
+    SendMessageW(GetDlgItem(window, ID_SENSITIVITY), TBM_SETPOS, TRUE, (int)std::lround(config.mouse_sensitivity * 100.f));
     check(ID_MOUSE_LOOK, config.mouse_look);
     check(ID_MOUSE_CROSS, config.mouse_left_cross);
     update_bindings();
@@ -846,10 +861,24 @@ void create_controls() {
     label(S(L"Sensibilidad del ratón", L"Mouse sensitivity"), 32, 488, 270);
     slider(ID_SENSITIVITY, 28, 510, 274, 5, 200, 50);
 
+    label(S(L"Perfil Sixaxis", L"Sixaxis profile"), 32, 552, 115);
+    combo(ID_SIXAXIS_PROFILE, 152, 548, 148,
+          {S(L"Suave / Preciso", L"Smooth / Precise"),
+           S(L"Estándar (Rec.)", L"Standard (Rec.)"),
+           S(L"Rápido / Sensible", L"Fast / Responsive"),
+           S(L"Personalizado", L"Custom")});
+    label(S(L"Modo Sixaxis", L"Sixaxis mode"), 32, 586, 115);
+    combo(ID_MOTION_MODE, 152, 582, 148,
+          {S(L"Híbrido (Auto)", L"Hybrid (Auto)"),
+           S(L"Solo sensores", L"Sensors only"),
+           S(L"Solo stick R", L"Right stick only")});
+    label(S(L"Suavizado Sixaxis", L"Sixaxis smoothing"), 32, 616, 270);
+    slider(ID_SIXAXIS_SMOOTH, 28, 638, 274, 0, 100, 45);
+
     add(L"STATIC",
         S(L"Pantalla principal asignada automáticamente.",
           L"Primary display selected automatically."),
-        0, 32, 560, 268, 38);
+        0, 32, 672, 268, 24);
 
     // Panel derecho: Idioma y controles interactivos
     add(L"BUTTON", S(L"Idioma y controles interactivos", L"Language and interactive controls"), 0, 332, 146, 652, 558, BS_GROUPBOX);
@@ -952,11 +981,29 @@ LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         poll_capture();
         return 0;
     }
+    case WM_HSCROLL: {
+        HWND slider_hwnd = (HWND)lp;
+        if (slider_hwnd == GetDlgItem(window, ID_GYRO_SENS) ||
+            slider_hwnd == GetDlgItem(window, ID_DEADZONE) ||
+            slider_hwnd == GetDlgItem(window, ID_SIXAXIS_SMOOTH)) {
+            choose(ID_SIXAXIS_PROFILE, (int)SixaxisProfile::Custom);
+        }
+        return 0;
+    }
     case WM_COMMAND: {
         int id = LOWORD(wp);
         if (id == ID_MAP_MODE && HIWORD(wp) == CBN_SELCHANGE)
             update_bindings();
-        else if (id == ID_DEVICE && HIWORD(wp) == CBN_SELCHANGE) {
+        else if (id == ID_SIXAXIS_PROFILE && HIWORD(wp) == CBN_SELCHANGE) {
+            int p = std::clamp(selected(ID_SIXAXIS_PROFILE), 0, 3);
+            if (p < (int)SixaxisProfile::Custom) {
+                apply_sixaxis_profile(config, (SixaxisProfile)p);
+                sync_sixaxis_sliders();
+            }
+        } else if (id == ID_MOTION_MODE && HIWORD(wp) == CBN_SELCHANGE) {
+            config.motion = (MotionMode)std::clamp(selected(ID_MOTION_MODE), 0, 2);
+            refresh_devices();
+        } else if (id == ID_DEVICE && HIWORD(wp) == CBN_SELCHANGE) {
             read_device();
             refresh_devices();
             update_bindings();
