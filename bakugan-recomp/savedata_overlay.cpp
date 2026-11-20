@@ -23,6 +23,7 @@
 #include <d3dcompiler.h>
 #include <xinput.h>
 #include <gdiplus.h>
+#include "savedata_gdi_cache.h"
 
 #include <algorithm>
 #include <cstddef>
@@ -90,6 +91,7 @@ struct OverlayState {
     Image* backdrop;
     Image* disc_icon;
     Image* icons[kMaxSlots];
+    bakugan::SavedataGdiCache gdi_cache;
 
     UINT width, height;     /* last output size */
     std::wstring vfs_root;
@@ -176,17 +178,10 @@ void draw_text(Graphics& gr, const std::wstring& text, const RectF& box, float p
                bool wrap = false)
 {
     if (text.empty()) return;
-    FontFamily trebuchet(L"Trebuchet MS");
-    FontFamily arial(L"Arial");
-    FontFamily* family = trebuchet.IsAvailable() ? &trebuchet : &arial;
-    Font font(family, px, bold ? FontStyleBold : FontStyleRegular, UnitPixel);
-    StringFormat fmt;
-    fmt.SetAlignment(align);
-    fmt.SetLineAlignment(StringAlignmentNear);
-    fmt.SetTrimming(StringTrimmingEllipsisCharacter);
-    if (!wrap) fmt.SetFormatFlags(StringFormatFlagsNoWrap | StringFormatFlagsLineLimit);
-    SolidBrush brush(color);
-    gr.DrawString(text.c_str(), static_cast<INT>(text.size()), &font, box, &fmt, &brush);
+    Font* font = g.gdi_cache.get_font(px, bold);
+    StringFormat* fmt = g.gdi_cache.get_format(align, wrap);
+    SolidBrush* brush = g.gdi_cache.get_brush(color);
+    gr.DrawString(text.c_str(), static_cast<INT>(text.size()), font, box, fmt, brush);
 }
 
 void draw_button(Graphics& gr, const RectF& r, const wchar_t* label, Color fill,
@@ -199,8 +194,7 @@ void draw_button(Graphics& gr, const RectF& r, const wchar_t* label, Color fill,
     path.AddArc(r.GetRight() - d, r.GetBottom() - d, d, d, 0, 90);
     path.AddArc(r.X, r.GetBottom() - d, d, d, 90, 90);
     path.CloseFigure();
-    SolidBrush brush(fill);
-    gr.FillPath(&brush, &path);
+    gr.FillPath(g.gdi_cache.get_brush(fill), &path);
     Pen edge(Color(200, 255, 235, 170), 1.5f);
     gr.DrawPath(&edge, &path);
     draw_text(gr, label, r, px, true, text, StringAlignmentCenter);
@@ -209,8 +203,7 @@ void draw_button(Graphics& gr, const RectF& r, const wchar_t* label, Color fill,
 void draw_icon(Graphics& gr, Image* img, const RectF& box, bool border)
 {
     if (border) {
-        SolidBrush back(rgba(255, 4, 8, 18));
-        gr.FillRectangle(&back, box);
+        gr.FillRectangle(g.gdi_cache.get_brush(rgba(255, 4, 8, 18)), box);
     }
     if (img && img->GetLastStatus() == Ok) {
         /* Keep the 16:9 art centered without distorting it. */
@@ -232,6 +225,7 @@ void draw_icon(Graphics& gr, Image* img, const RectF& box, bool border)
 
 void render_canvas(UINT width, UINT height)
 {
+    if (!g.gdiplus_ready) return;
     if (!g.canvas || g.canvas->GetWidth() != width || g.canvas->GetHeight() != height) {
         delete g.canvas;
         g.canvas = new Bitmap(width, height, PixelFormat32bppPARGB);
@@ -251,29 +245,26 @@ void render_canvas(UINT width, UINT height)
     if (g.backdrop && g.backdrop->GetLastStatus() == Ok) {
         gr.DrawImage(g.backdrop, RectF(0, 0, static_cast<float>(width),
                                        static_cast<float>(height)));
-        SolidBrush dim(rgba(168, 2, 6, 16));
-        gr.FillRectangle(&dim, 0.0f, 0.0f, static_cast<float>(width),
-                         static_cast<float>(height));
+        gr.FillRectangle(g.gdi_cache.get_brush(rgba(168, 2, 6, 16)),
+                         0.0f, 0.0f, static_cast<float>(width), static_cast<float>(height));
     } else {
-        SolidBrush back(rgba(255, 3, 8, 20));
-        gr.FillRectangle(&back, 0.0f, 0.0f, static_cast<float>(width),
-                         static_cast<float>(height));
+        gr.FillRectangle(g.gdi_cache.get_brush(rgba(255, 3, 8, 20)),
+                         0.0f, 0.0f, static_cast<float>(width), static_cast<float>(height));
     }
 
     /* Panel and its double frame. */
-    SolidBrush panel(rgba(228, 6, 12, 26));
-    gr.FillRectangle(&panel, l.px, l.py, l.pw, l.ph);
+    gr.FillRectangle(g.gdi_cache.get_brush(rgba(228, 6, 12, 26)), l.px, l.py, l.pw, l.ph);
     Pen gold(rgba(255, 214, 178, 74), 3 * s);
     gr.DrawRectangle(&gold, l.px, l.py, l.pw, l.ph);
     Pen inner(rgba(90, 255, 245, 220), 1 * s);
     gr.DrawRectangle(&inner, l.px + 7 * s, l.py + 7 * s, l.pw - 14 * s, l.ph - 14 * s);
 
     const float accent = 18 * s;
-    SolidBrush red(rgba(255, 176, 32, 32));
-    gr.FillRectangle(&red, l.px, l.py, accent, accent);
-    gr.FillRectangle(&red, l.px + l.pw - accent, l.py, accent, accent);
-    gr.FillRectangle(&red, l.px, l.py + l.ph - accent, accent, accent);
-    gr.FillRectangle(&red, l.px + l.pw - accent, l.py + l.ph - accent, accent, accent);
+    SolidBrush* red = g.gdi_cache.get_brush(rgba(255, 176, 32, 32));
+    gr.FillRectangle(red, l.px, l.py, accent, accent);
+    gr.FillRectangle(red, l.px + l.pw - accent, l.py, accent, accent);
+    gr.FillRectangle(red, l.px, l.py + l.ph - accent, accent, accent);
+    gr.FillRectangle(red, l.px + l.pw - accent, l.py + l.ph - accent, accent, accent);
 
     /* Header: the disc's save icon doubles as the game mark. */
     draw_icon(gr, g.disc_icon, RectF(l.px + 28 * s, l.py + 26 * s, 160 * s, 90 * s), true);
@@ -300,11 +291,12 @@ void render_canvas(UINT width, UINT height)
         const bool selected = idx == g.sel;
         RectF box(l.lx, l.ly + row * l.row_h, l.lw, l.row_h - 10 * s);
 
-        SolidBrush fill(selected ? rgba(230, 122, 20, 26) : rgba(170, 8, 16, 32));
-        gr.FillRectangle(&fill, box);
+        SolidBrush* fill = g.gdi_cache.get_brush(
+            selected ? rgba(230, 122, 20, 26) : rgba(170, 8, 16, 32));
+        gr.FillRectangle(fill, box);
         if (selected) {
-            SolidBrush bar(rgba(255, 214, 178, 74));
-            gr.FillRectangle(&bar, box.X, box.Y, 5 * s, box.Height);
+            gr.FillRectangle(g.gdi_cache.get_brush(rgba(255, 214, 178, 74)),
+                             box.X, box.Y, 5 * s, box.Height);
             Pen sel_pen(rgba(255, 214, 178, 74), 2 * s);
             gr.DrawRectangle(&sel_pen, box);
         }
@@ -338,8 +330,7 @@ void render_canvas(UINT width, UINT height)
     if (g.count > 0 && g.sel >= 0 && g.sel < g.count) {
         const CellSaveDataSlotInfo& slot = g.slots[g.sel];
         RectF preview(l.preview_x, l.preview_y, l.preview_w, l.preview_h);
-        SolidBrush pfill(rgba(200, 4, 9, 20));
-        gr.FillRectangle(&pfill, preview);
+        gr.FillRectangle(g.gdi_cache.get_brush(rgba(200, 4, 9, 20)), preview);
         Pen pp(rgba(120, 214, 178, 74), 1.5f * s);
         gr.DrawRectangle(&pp, preview);
         draw_icon(gr, g.icons[g.sel] ? g.icons[g.sel] : g.disc_icon,
@@ -902,6 +893,7 @@ void overlay_shutdown(void*)
 {
     g.ready = 0;
     if (g.done) SetEvent(g.done);
+    g.gdi_cache.clear();
     for (int i = 0; i < kMaxSlots; i++) {
         if (g.icons[i]) { delete g.icons[i]; g.icons[i] = nullptr; }
     }

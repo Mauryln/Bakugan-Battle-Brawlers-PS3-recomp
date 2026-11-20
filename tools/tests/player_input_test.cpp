@@ -2,6 +2,7 @@
 #define NOMINMAX
 #include <windows.h>
 #include "fps_cap.h"
+#include "savedata_gdi_cache.h"
 #include "player_config.h"
 #include "gamepad_devices.h"
 #include "input_model.h"
@@ -291,6 +292,50 @@ int main() {
         double next_stall = 10.0;
         CHECK(bakugan::fps_cap_step(10.5, interval, true, &next_stall) == 0.0);
         CHECK(std::abs(next_stall - 10.5) < 1e-9);
+    }
+
+    // SavedataGdiCache: lazy reuse, bounded capacity, and clean teardown before GdiplusShutdown
+    {
+        for (int cycle = 0; cycle < 2; ++cycle) {
+            Gdiplus::GdiplusStartupInput gdi_in;
+            ULONG_PTR gdi_token = 0;
+            CHECK(Gdiplus::GdiplusStartup(&gdi_token, &gdi_in, nullptr) == Gdiplus::Ok);
+            bakugan::SavedataGdiCache cache;
+            auto* fam1 = cache.get_family();
+            auto* fam2 = cache.get_family();
+            CHECK(fam1 != nullptr && fam1 == fam2);
+
+            auto* f_near = cache.get_format(Gdiplus::StringAlignmentNear, false);
+            auto* f_center = cache.get_format(Gdiplus::StringAlignmentCenter, false);
+            auto* f_near_wrap = cache.get_format(Gdiplus::StringAlignmentNear, true);
+            auto* f_center_wrap = cache.get_format(Gdiplus::StringAlignmentCenter, true);
+            CHECK(f_near != nullptr && f_center != nullptr && f_near_wrap != nullptr && f_center_wrap != nullptr);
+            CHECK(f_near != f_center && f_near != f_near_wrap && f_center != f_center_wrap);
+            CHECK(cache.get_format(Gdiplus::StringAlignmentCenter, true) == f_center_wrap);
+
+            auto* font1 = cache.get_font(22.0f, true);
+            auto* font2 = cache.get_font(22.0f, true);
+            auto* font3 = cache.get_font(22.0f, false);
+            CHECK(font1 != nullptr && font1 == font2 && font1 != font3);
+
+            auto* br1 = cache.get_brush(Gdiplus::Color(255, 214, 178, 74));
+            auto* br2 = cache.get_brush(Gdiplus::Color(255, 214, 178, 74));
+            auto* br3 = cache.get_brush(Gdiplus::Color(230, 122, 20, 26));
+            CHECK(br1 != nullptr && br1 == br2 && br1 != br3);
+
+            for (int i = 0; i < 40; ++i) {
+                cache.get_font(12.0f + static_cast<float>(i), (i & 1) != 0);
+                cache.get_brush(Gdiplus::Color(255, static_cast<BYTE>(i), 10, 20));
+            }
+            CHECK(cache.fonts.size() == bakugan::SavedataGdiCache::kMaxFonts);
+            CHECK(cache.brushes.size() == bakugan::SavedataGdiCache::kMaxBrushes);
+
+            cache.clear();
+            CHECK(cache.family == nullptr);
+            CHECK(cache.fonts.empty() && cache.brushes.empty());
+            for (auto* fmt : cache.formats) CHECK(fmt == nullptr);
+            Gdiplus::GdiplusShutdown(gdi_token);
+        }
     }
 
     std::printf("Player config / input model: %s (%d failures)\n", failures ? "FAIL" : "PASS", failures);

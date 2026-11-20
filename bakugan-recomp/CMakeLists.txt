@@ -295,7 +295,7 @@ if(WIN32)
     add_executable(PlayerInputTest EXCLUDE_FROM_ALL
         ../tools/tests/player_input_test.cpp player_config.cpp gamepad_devices.cpp)
     target_include_directories(PlayerInputTest PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}" "${BAKUGAN_SDL3_ROOT}/include")
-    target_link_libraries(PlayerInputTest PRIVATE user32 "${BAKUGAN_SDL3_LIBRARY}")
+    target_link_libraries(PlayerInputTest PRIVATE user32 gdiplus "${BAKUGAN_SDL3_LIBRARY}")
     bakugan_copy_sdl3(PlayerInputTest)
     add_executable(PlayerPadProviderTest EXCLUDE_FROM_ALL
         ../tools/tests/player_pad_provider_test.cpp "${PS3RECOMP_DIR}/libs/input/cellPad.c")
