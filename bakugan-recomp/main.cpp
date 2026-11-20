@@ -131,6 +131,7 @@ unsigned cellGcm_flip_request_count(void);
  * path anywhere else -- the same selection runtime/host/host_posix.c and the
  * toolkit's boot harness make. All three expose the same three entry points,
  * so the frame clock below is backend-agnostic. */
+#include "fps_cap.h"
 #if defined(_WIN32)
 #include "output_upscale.h"
 #include "scene_state.h"
@@ -262,6 +263,7 @@ static double s_qpc_freq2 = 0.0;
 static void fps_cap_wait(void)
 {
     static int cap = -1;
+    static int vsync_on = -1;
     static double next = 0.0;
     if (cap < 0) {
         const char* e = getenv("PS3_FPS_CAP");
@@ -277,24 +279,25 @@ static void fps_cap_wait(void)
             cap = e ? atoi(e) : 0;
         }
         if (cap < 0 || cap > 240) cap = 0;
+#ifdef _WIN32
+        vsync_on = getenv("PS3_NOVSYNC") == NULL ? 1 : 0;
+#else
+        vsync_on = 0;
+#endif
     }
     if (cap <= 0) return;
     if (s_qpc_freq2 == 0.0) { LARGE_INTEGER f; QueryPerformanceFrequency(&f); s_qpc_freq2 = (double)f.QuadPart; }
     LARGE_INTEGER c; QueryPerformanceCounter(&c);
     const double now = (double)c.QuadPart / s_qpc_freq2;
-    const double interval = 1.0 / cap;
-    if (next == 0.0) next = now;
-    next += interval;
-    if (next > now) {
-        const double remaining = next - now;
-        if (remaining > 0.001) Sleep((DWORD)(remaining * 1000.0));
+    const double remaining = bakugan::fps_cap_step(now, 1.0 / cap, vsync_on != 0, &next);
+    if (remaining > 0.0) {
+        const double target = now + remaining;
+        if (remaining > 0.002) Sleep((DWORD)((remaining - 0.001) * 1000.0));
         for (;;) {
             QueryPerformanceCounter(&c);
-            if ((double)c.QuadPart / s_qpc_freq2 >= next) break;
+            if ((double)c.QuadPart / s_qpc_freq2 >= target) break;
             Sleep(0);
         }
-    } else if (now - next > interval) {
-        next = now;   /* a long stall is not replayed as a burst of frames */
     }
 }
 

@@ -1,6 +1,7 @@
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
+#include "fps_cap.h"
 #include "player_config.h"
 #include "gamepad_devices.h"
 #include "input_model.h"
@@ -257,6 +258,41 @@ int main() {
     }
     devices.close(true);
     std::filesystem::remove(path);
+
+    // fps_cap_step: VSync active subtracts ~1.5 ms wake margin without accelerating next; VSync off uses exact interval
+    {
+        constexpr double interval = 1.0 / 30.0;
+        double next_on = 0.0;
+        const double wait_on = bakugan::fps_cap_step(10.0, interval, true, &next_on);
+        CHECK(std::abs(wait_on - (interval - 0.0015)) < 1e-9);
+        CHECK(std::abs(next_on - (10.0 + interval)) < 1e-9);
+
+        double next_off = 0.0;
+        const double wait_off = bakugan::fps_cap_step(10.0, interval, false, &next_off);
+        CHECK(std::abs(wait_off - interval) < 1e-9);
+        CHECK(std::abs(next_off - (10.0 + interval)) < 1e-9);
+
+        // Simulate 5 frames on a 144 Hz vblank grid with 0.8 ms post-wait work before Present(1, 0):
+        // margin allows 5,5,5,5,4 = 24 vblanks over 5 frames (exact 30.00 FPS vs 28.80 FPS without margin).
+        constexpr double vblank = 1.0 / 144.0;
+        double now = 100.0;
+        double next = 0.0;
+        int total_vblanks = 0;
+        for (int f = 0; f < 5; ++f) {
+            const double w = bakugan::fps_cap_step(now, interval, true, &next);
+            const double present_arrival = now + w + 0.0008;
+            const int vb = static_cast<int>(std::ceil((present_arrival - 100.0) / vblank - 1e-9));
+            total_vblanks += (vb - total_vblanks);
+            now = 100.0 + total_vblanks * vblank;
+        }
+        CHECK(total_vblanks == 24);
+
+        // Long stall resets burst debt
+        double next_stall = 10.0;
+        CHECK(bakugan::fps_cap_step(10.5, interval, true, &next_stall) == 0.0);
+        CHECK(std::abs(next_stall - 10.5) < 1e-9);
+    }
+
     std::printf("Player config / input model: %s (%d failures)\n", failures ? "FAIL" : "PASS", failures);
     return failures ? 1 : 0;
 }
