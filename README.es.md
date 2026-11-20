@@ -65,7 +65,7 @@ El juego es **completamente jugable de principio a fin**: modo historia, tutoria
   3. **Giroscopio Físico**: Soporte 1:1 de sensores de movimiento nativos en DualShock 4 y DualSense mediante SDL3.
 - **Launcher Moderno y Bilingüe**: Incluye configurador visual de mando interactivo, ajustes gráficos, selección de idioma (Español e Inglés) y cierre automático al iniciar el juego para ahorrar recursos del equipo.
 - **Instalador Automatizado Bilingüe**: Detecta el idioma de Windows (Español o Inglés), valida tu copia del disco europeo (`BLES00758`) y descifra automáticamente el `EBOOT.BIN` mediante utilidades portables de RPCS3.
-- **Contenedor de Shaders Precargado (`fp_v3.cache`)**: Evita tirones de compilación de shaders al entrar a las arenas de combate.
+- **Cachés Locales Persistentes de Shaders (`fp_v4_*.cache` / `vs_v1_*.cache`)**: Guarda en `%LOCALAPPDATA%\BakuganRecomp\shadercache` los shaders DXBC de fragmento y vértice compilados tras la primera entrada a cada arena, evitando tirones en ejecuciones posteriores.
 - **Guardado Robusto**: Guardado multi-slot persistente almacenado en `%LOCALAPPDATA%\BakuganRecomp`.
 
 ---

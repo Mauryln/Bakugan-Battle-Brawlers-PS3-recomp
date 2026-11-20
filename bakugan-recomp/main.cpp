@@ -1074,8 +1074,10 @@ int main(int argc, char** argv)
     g_ps3_guest_caller = harness_guest_caller;
     if (bakugan_output_configure() != 0) return 1;
     CreateThread(NULL, 4u * 1024 * 1024, frame_clock, NULL, 0, NULL);
-    CreateThread(NULL, 256u * 1024, debug_dump_tex, NULL, 0, NULL);
-    CreateThread(NULL, 256u * 1024, debug_watch_tex, NULL, 0, NULL);
+    if (getenv("BAKUGAN_DUMP_TEX"))
+        CreateThread(NULL, 256u * 1024, debug_dump_tex, NULL, 0, NULL);
+    if (getenv("BAKUGAN_WATCH_TEX"))
+        CreateThread(NULL, 256u * 1024, debug_watch_tex, NULL, 0, NULL);
 
     printf("\n[boot] dispatching entry OPD 0x%08X (stack top 0x%08X)\n\n",
            entry, STACK_TOP);

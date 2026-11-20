@@ -1,0 +1,1010 @@
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -2880,28 +2880,45 @@
+     return hash;
+ }
+ 
+-#define FP_CACHE_FILE s_fp_cache_path
+-#define FP_CACHE_VERSION 4
+-#define FP_CACHE_MAX_RECORD (1u << 20)
+-#define FP_CACHE_MAX_FILE (1u << 26)
+-#define FP_CACHE_HDR 16u
++#define SHADER_CACHE_MAX_RECORD (1u << 20)
++#define SHADER_CACHE_MAX_FILE   (1u << 26)
++#define SHADER_CACHE_HDR        16u
+ #include <io.h>
+ 
+-static wchar_t s_fp_cache_path[MAX_PATH];
+-static struct { u8* data; u32 size; int ready; } s_fpcache;
+-typedef struct fp_cache_write {
++typedef struct DiskShaderWrite {
+     wchar_t path[MAX_PATH];
++    const char* tag;
+     u32 size;
+     u8 data[];
+-} fp_cache_write;
+-static struct {
++} DiskShaderWrite;
++
++typedef struct {
++    u64 hash;
++    u32 data_off; /* byte offset of payload inside data[]; 0 = empty slot */
++    u32 size;
++} DiskShaderHtSlot;
++
++typedef struct {
++    const char* tag;
++    const wchar_t* prefix;
++    int version;
++    wchar_t path[MAX_PATH];
++    u8* data;
++    u32 size;
++    int ready;
+     CRITICAL_SECTION lock;
+     HANDLE wake, idle;
+-    fp_cache_write* pending;
++    DiskShaderWrite* pending;
+     int started;
+-} s_fp_writer;
+-
+-static u32 fp_cache_checksum(u64 key, const void* data, u32 size)
++    DiskShaderHtSlot* ht;
++    u32 ht_cap;
++    u32 ht_count;
++} DiskShaderCache;
++
++static DiskShaderCache s_fp_disk_cache = {"FP", L"fp", 4};
++static DiskShaderCache s_vs_disk_cache = {"VS", L"vs", 1};
++
++static u32 shader_cache_checksum(u64 key, const void* data, u32 size)
+ {
+     const u8* bytes = data;
+     u32 hash = 2166136261u;
+@@ -2911,15 +2928,45 @@
+     return hash;
+ }
+ 
+-static DWORD WINAPI fp_cache_writer(void* unused)
+-{
+-    (void)unused;
++static void shader_cache_ht_insert(DiskShaderCache* c, u64 hash, u32 data_off, u32 size)
++{
++    if (!data_off) return;
++    if ((c->ht_count + 1u) * 4u > c->ht_cap * 3u) {
++        u32 new_cap = c->ht_cap ? c->ht_cap * 2u : 512u;
++        DiskShaderHtSlot* grown = (DiskShaderHtSlot*)calloc(new_cap, sizeof(*grown));
++        if (!grown) return;
++        u32 mask = new_cap - 1u;
++        for (u32 i = 0; i < c->ht_cap; i++) {
++            if (!c->ht[i].data_off) continue;
++            u32 idx = (u32)(c->ht[i].hash ^ (c->ht[i].hash >> 32)) & mask;
++            while (grown[idx].data_off) idx = (idx + 1u) & mask;
++            grown[idx] = c->ht[i];
++        }
++        free(c->ht);
++        c->ht = grown;
++        c->ht_cap = new_cap;
++    }
++    u32 mask = c->ht_cap - 1u;
++    u32 idx = (u32)(hash ^ (hash >> 32)) & mask;
++    while (c->ht[idx].data_off) {
++        if (c->ht[idx].hash == hash) return;
++        idx = (idx + 1u) & mask;
++    }
++    c->ht[idx].hash = hash;
++    c->ht[idx].data_off = data_off;
++    c->ht[idx].size = size;
++    c->ht_count++;
++}
++
++static DWORD WINAPI shader_cache_writer(void* param)
++{
++    DiskShaderCache* c = (DiskShaderCache*)param;
+     for (;;) {
+-        WaitForSingleObject(s_fp_writer.wake, INFINITE);
+-        EnterCriticalSection(&s_fp_writer.lock);
+-        fp_cache_write* job = s_fp_writer.pending;
+-        s_fp_writer.pending = NULL;
+-        LeaveCriticalSection(&s_fp_writer.lock);
++        WaitForSingleObject(c->wake, INFINITE);
++        EnterCriticalSection(&c->lock);
++        DiskShaderWrite* job = c->pending;
++        c->pending = NULL;
++        LeaveCriticalSection(&c->lock);
+         if (!job) continue;
+         wchar_t temporary[MAX_PATH + 40];
+         swprintf(temporary, MAX_PATH + 40, L"%ls.tmp.%lu", job->path,
+@@ -2934,98 +2981,121 @@
+         }
+         if (!ok || !MoveFileExW(temporary, job->path,
+                 MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+-            fprintf(stderr, "[FP] local cache write failed (err=%lu)\n",
+-                    (unsigned long)GetLastError());
++            fprintf(stderr, "[%s] local cache write failed (err=%lu)\n",
++                    job->tag, (unsigned long)GetLastError());
+             DeleteFileW(temporary);
+         }
+         free(job);
+-        EnterCriticalSection(&s_fp_writer.lock);
+-        if (!s_fp_writer.pending) SetEvent(s_fp_writer.idle);
+-        LeaveCriticalSection(&s_fp_writer.lock);
+-    }
+-}
+-
+-static void fp_cache_flush(void)
+-{
+-    if (s_fp_writer.started &&
+-        WaitForSingleObject(s_fp_writer.idle, 5000) != WAIT_OBJECT_0)
+-        fprintf(stderr, "[FP] local cache flush timed out; previous file retained\n");
++        EnterCriticalSection(&c->lock);
++        if (!c->pending) SetEvent(c->idle);
++        LeaveCriticalSection(&c->lock);
++    }
++}
++
++static void shader_cache_flush(DiskShaderCache* c)
++{
++    if (c->started &&
++        WaitForSingleObject(c->idle, 5000) != WAIT_OBJECT_0)
++        fprintf(stderr, "[%s] local cache flush timed out; previous file retained\n", c->tag);
++}
++
++static void shader_cache_shutdown(DiskShaderCache* c)
++{
++    shader_cache_flush(c);
++    free(c->data); c->data = NULL; c->size = 0;
++    free(c->ht);   c->ht = NULL;   c->ht_cap = 0; c->ht_count = 0;
++    c->ready = 0;
+ }
+ 
+ void rsx_d3d12_backend_flush_shader_cache(void)
+ {
+-    fp_cache_flush();
+-    vs_cache_flush();
+-}
+-
+-static void fp_cache_save(void)
+-{
+-    if (!s_fp_cache_path[0]) return;
+-    if (!s_fp_writer.started) {
+-        InitializeCriticalSection(&s_fp_writer.lock);
+-        s_fp_writer.wake = CreateEventW(NULL, FALSE, FALSE, NULL);
+-        s_fp_writer.idle = CreateEventW(NULL, TRUE, TRUE, NULL);
+-        HANDLE thread = s_fp_writer.wake && s_fp_writer.idle
+-            ? CreateThread(NULL, 0, fp_cache_writer, NULL, 0, NULL) : NULL;
++    shader_cache_flush(&s_fp_disk_cache);
++    shader_cache_flush(&s_vs_disk_cache);
++}
++
++static void shader_cache_save(DiskShaderCache* c)
++{
++    if (!c->path[0]) return;
++    if (!c->started) {
++        InitializeCriticalSection(&c->lock);
++        c->wake = CreateEventW(NULL, FALSE, FALSE, NULL);
++        c->idle = CreateEventW(NULL, TRUE, TRUE, NULL);
++        HANDLE thread = c->wake && c->idle
++            ? CreateThread(NULL, 0, shader_cache_writer, c, 0, NULL) : NULL;
+         if (!thread) {
+-            if (s_fp_writer.wake) CloseHandle(s_fp_writer.wake);
+-            if (s_fp_writer.idle) CloseHandle(s_fp_writer.idle);
+-            DeleteCriticalSection(&s_fp_writer.lock);
+-            s_fp_cache_path[0] = 0;
++            if (c->wake) CloseHandle(c->wake);
++            if (c->idle) CloseHandle(c->idle);
++            DeleteCriticalSection(&c->lock);
++            c->path[0] = 0;
+             return;
+         }
+         CloseHandle(thread);
+-        s_fp_writer.started = 1;
++        c->started = 1;
+     }
+     /* The writer owns an immutable snapshot; render never waits for file I/O. */
+-    fp_cache_write* job = malloc(sizeof(*job) + s_fpcache.size);
++    DiskShaderWrite* job = malloc(sizeof(*job) + c->size);
+     if (!job) return;
+-    wcscpy_s(job->path, MAX_PATH, s_fp_cache_path);
+-    job->size = s_fpcache.size;
+-    if (job->size) memcpy(job->data, s_fpcache.data, job->size);
+-    EnterCriticalSection(&s_fp_writer.lock);
+-    free(s_fp_writer.pending);
+-    s_fp_writer.pending = job;
+-    ResetEvent(s_fp_writer.idle);
+-    SetEvent(s_fp_writer.wake);
+-    LeaveCriticalSection(&s_fp_writer.lock);
+-}
+-
+-static int fp_cache_add(u64 hash, const void* code, u32 size)
+-{
+-    if (size < 4 || size > FP_CACHE_MAX_RECORD || memcmp(code, "DXBC", 4) ||
+-        s_fpcache.size > FP_CACHE_MAX_FILE - FP_CACHE_HDR - size) return 0;
+-    u32 need = s_fpcache.size + FP_CACHE_HDR + size;
+-    u8* grown = realloc(s_fpcache.data, need);
++    wcscpy_s(job->path, MAX_PATH, c->path);
++    job->tag = c->tag;
++    job->size = c->size;
++    if (job->size) memcpy(job->data, c->data, job->size);
++    EnterCriticalSection(&c->lock);
++    free(c->pending);
++    c->pending = job;
++    ResetEvent(c->idle);
++    SetEvent(c->wake);
++    LeaveCriticalSection(&c->lock);
++}
++
++static int shader_cache_add(DiskShaderCache* c, u64 hash, const void* code, u32 size)
++{
++    if (size < 4 || size > SHADER_CACHE_MAX_RECORD || memcmp(code, "DXBC", 4) ||
++        c->size > SHADER_CACHE_MAX_FILE - SHADER_CACHE_HDR - size) return 0;
++    u32 payload_off = c->size + SHADER_CACHE_HDR;
++    u32 need = payload_off + size;
++    u8* grown = realloc(c->data, need);
+     if (!grown) return 0;
+-    s_fpcache.data = grown;
+-    u32 checksum = fp_cache_checksum(hash, code, size);
+-    memcpy(grown + s_fpcache.size, &hash, 8);
+-    memcpy(grown + s_fpcache.size + 8, &size, 4);
+-    memcpy(grown + s_fpcache.size + 12, &checksum, 4);
+-    memcpy(grown + s_fpcache.size + FP_CACHE_HDR, code, size);
+-    s_fpcache.size = need;
++    c->data = grown;
++    u32 checksum = shader_cache_checksum(hash, code, size);
++    memcpy(grown + c->size, &hash, 8);
++    memcpy(grown + c->size + 8, &size, 4);
++    memcpy(grown + c->size + 12, &checksum, 4);
++    memcpy(grown + payload_off, code, size);
++    c->size = need;
++    shader_cache_ht_insert(c, hash, payload_off, size);
+     return 1;
+ }
+ 
+-static const void* fp_cache_find(u64 hash, u32* size)
+-{
+-    for (u32 off = 0; off + FP_CACHE_HDR <= s_fpcache.size;) {
++static const void* shader_cache_find(const DiskShaderCache* c, u64 hash, u32* size)
++{
++    if (c->ht_cap && c->data) {
++        u32 mask = c->ht_cap - 1u;
++        u32 idx = (u32)(hash ^ (hash >> 32)) & mask;
++        while (c->ht[idx].data_off) {
++            if (c->ht[idx].hash == hash) {
++                *size = c->ht[idx].size;
++                return c->data + c->ht[idx].data_off;
++            }
++            idx = (idx + 1u) & mask;
++        }
++        return NULL;
++    }
++    for (u32 off = 0; off + SHADER_CACHE_HDR <= c->size;) {
+         u64 rec_hash; u32 rec_size;
+-        memcpy(&rec_hash, s_fpcache.data + off, 8);
+-        memcpy(&rec_size, s_fpcache.data + off + 8, 4);
+-        if (rec_hash == hash) { *size = rec_size; return s_fpcache.data + off + FP_CACHE_HDR; }
+-        off += FP_CACHE_HDR + rec_size;
++        memcpy(&rec_hash, c->data + off, 8);
++        memcpy(&rec_size, c->data + off + 8, 4);
++        if (rec_hash == hash) { *size = rec_size; return c->data + off + SHADER_CACHE_HDR; }
++        off += SHADER_CACHE_HDR + rec_size;
+     }
+     return NULL;
+ }
+ 
+-static void fp_cache_load(void)
+-{
+-    if (s_fpcache.ready) return;
++static void shader_cache_load(DiskShaderCache* c)
++{
++    if (c->ready) return;
+     if (!s_fp_cache_identity[0]) return;
+-    s_fpcache.ready = 1;
+-    s_fp_cache_path[0] = 0;
++    c->ready = 1;
++    c->path[0] = 0;
+     wchar_t base[MAX_PATH], directory[MAX_PATH];
+     DWORD custom = GetEnvironmentVariableW(L"PS3_SHADERCACHE", directory, MAX_PATH);
+     if (custom > 0 && custom < MAX_PATH) {
+@@ -3038,246 +3108,73 @@
+         if (swprintf(directory, MAX_PATH, L"%ls\\BakuganRecomp\\shadercache", base) < 0) return;
+         if (!CreateDirectoryW(directory, NULL) && GetLastError() != ERROR_ALREADY_EXISTS) return;
+     }
+-    if (swprintf(s_fp_cache_path, MAX_PATH, L"%ls\\fp_v%d_%ls.cache", directory,
+-                 FP_CACHE_VERSION, s_fp_cache_identity) < 0) {
+-        s_fp_cache_path[0] = 0;
++    if (swprintf(c->path, MAX_PATH, L"%ls\\%ls_v%d_%ls.cache", directory,
++                 c->prefix, c->version, s_fp_cache_identity) < 0) {
++        c->path[0] = 0;
+         return;
+     }
+-    printf("[FP] local shader cache: %ls\n", s_fp_cache_path);
+-    FILE* file = _wfopen(s_fp_cache_path, L"rb");
++    printf("[%s] local shader cache: %ls\n", c->tag, c->path);
++    FILE* file = _wfopen(c->path, L"rb");
+     if (!file) return;
+     int truncated = 0;
+     fseek(file, 0, SEEK_END); long size = ftell(file); fseek(file, 0, SEEK_SET);
+-    if (size > 0 && size <= (long)FP_CACHE_MAX_FILE) {
++    if (size > 0 && size <= (long)SHADER_CACHE_MAX_FILE) {
+         u8* data = malloc((size_t)size);
+         if (data && fread(data, 1, (size_t)size, file) == (size_t)size) {
+             u32 good = 0, records = 0;
+-            while (good + FP_CACHE_HDR <= (u32)size) {
++            while (good + SHADER_CACHE_HDR <= (u32)size) {
+                 u32 length, checksum;
+                 u64 key;
+                 memcpy(&key, data + good, 8);
+                 memcpy(&length, data + good + 8, 4);
+                 memcpy(&checksum, data + good + 12, 4);
+-                if (length < 4 || length > FP_CACHE_MAX_RECORD ||
+-                    length > (u32)size - good - FP_CACHE_HDR ||
+-                    memcmp(data + good + FP_CACHE_HDR, "DXBC", 4) ||
+-                    checksum != fp_cache_checksum(key, data + good + FP_CACHE_HDR, length)) break;
+-                good += FP_CACHE_HDR + length;
++                if (length < 4 || length > SHADER_CACHE_MAX_RECORD ||
++                    length > (u32)size - good - SHADER_CACHE_HDR ||
++                    memcmp(data + good + SHADER_CACHE_HDR, "DXBC", 4) ||
++                    checksum != shader_cache_checksum(key, data + good + SHADER_CACHE_HDR, length)) break;
++                shader_cache_ht_insert(c, key, good + SHADER_CACHE_HDR, length);
++                good += SHADER_CACHE_HDR + length;
+                 records++;
+             }
+-            s_fpcache.data = data;
+-            s_fpcache.size = good;
++            c->data = data;
++            c->size = good;
+             truncated = good != (u32)size;
+-            printf("[FP] local shader cache: %u records, %u/%ld bytes%s\n",
+-                   records, good, size, truncated ? " (invalid tail rejected)" : "");
++            printf("[%s] local shader cache: %u records, %u/%ld bytes%s\n",
++                   c->tag, records, good, size, truncated ? " (invalid tail rejected)" : "");
+         } else free(data);
+     }
+     fclose(file);
+-    if (truncated) fp_cache_save();
++    if (truncated) shader_cache_save(c);
+ }
+ 
+ static const void* fp_cache_get(u64 hash, u32* size)
+ {
+-    fp_cache_load();
+-    return fp_cache_find(hash, size);
++    shader_cache_load(&s_fp_disk_cache);
++    return shader_cache_find(&s_fp_disk_cache, hash, size);
+ }
+ 
+ static void fp_cache_put(u64 hash, const void* code, u32 size)
+ {
+-    fp_cache_load();
++    shader_cache_load(&s_fp_disk_cache);
+     u32 previous;
+-    if (!fp_cache_find(hash, &previous) && fp_cache_add(hash, code, size)) fp_cache_save();
+-}
+-
+-#define VS_CACHE_FILE s_vs_cache_path
+-#define VS_CACHE_VERSION 1
+-#define VS_CACHE_MAX_RECORD (1u << 20)
+-#define VS_CACHE_MAX_FILE (1u << 26)
+-#define VS_CACHE_HDR 16u
+-
+-static wchar_t s_vs_cache_path[MAX_PATH];
+-static struct { u8* data; u32 size; int ready; } s_vscache;
+-typedef struct vs_cache_write {
+-    wchar_t path[MAX_PATH];
+-    u32 size;
+-    u8 data[];
+-} vs_cache_write;
+-static struct {
+-    CRITICAL_SECTION lock;
+-    HANDLE wake, idle;
+-    vs_cache_write* pending;
+-    int started;
+-} s_vs_writer;
+-
+-static DWORD WINAPI vs_cache_writer(void* unused)
+-{
+-    (void)unused;
+-    for (;;) {
+-        WaitForSingleObject(s_vs_writer.wake, INFINITE);
+-        EnterCriticalSection(&s_vs_writer.lock);
+-        vs_cache_write* job = s_vs_writer.pending;
+-        s_vs_writer.pending = NULL;
+-        LeaveCriticalSection(&s_vs_writer.lock);
+-        if (!job) continue;
+-        wchar_t temporary[MAX_PATH + 40];
+-        swprintf(temporary, MAX_PATH + 40, L"%ls.tmp.%lu", job->path,
+-                 (unsigned long)GetCurrentProcessId());
+-        FILE* file = _wfopen(temporary, L"wb");
+-        int ok = 0;
+-        if (file) {
+-            ok = fwrite(job->data, 1, job->size, file) == job->size;
+-            ok &= fflush(file) == 0;
+-            ok &= _commit(_fileno(file)) == 0;
+-            ok &= fclose(file) == 0;
+-        }
+-        if (!ok || !MoveFileExW(temporary, job->path,
+-                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+-            fprintf(stderr, "[VS] local cache write failed (err=%lu)\n",
+-                    (unsigned long)GetLastError());
+-            DeleteFileW(temporary);
+-        }
+-        free(job);
+-        EnterCriticalSection(&s_vs_writer.lock);
+-        if (!s_vs_writer.pending) SetEvent(s_vs_writer.idle);
+-        LeaveCriticalSection(&s_vs_writer.lock);
+-    }
+-}
+-
+-static void vs_cache_flush(void)
+-{
+-    if (s_vs_writer.started &&
+-        WaitForSingleObject(s_vs_writer.idle, 5000) != WAIT_OBJECT_0)
+-        fprintf(stderr, "[VS] local cache flush timed out; previous file retained\n");
+-}
+-
+-static void vs_cache_save(void)
+-{
+-    if (!s_vs_cache_path[0]) return;
+-    if (!s_vs_writer.started) {
+-        InitializeCriticalSection(&s_vs_writer.lock);
+-        s_vs_writer.wake = CreateEventW(NULL, FALSE, FALSE, NULL);
+-        s_vs_writer.idle = CreateEventW(NULL, TRUE, TRUE, NULL);
+-        HANDLE thread = s_vs_writer.wake && s_vs_writer.idle
+-            ? CreateThread(NULL, 0, vs_cache_writer, NULL, 0, NULL) : NULL;
+-        if (!thread) {
+-            if (s_vs_writer.wake) CloseHandle(s_vs_writer.wake);
+-            if (s_vs_writer.idle) CloseHandle(s_vs_writer.idle);
+-            DeleteCriticalSection(&s_vs_writer.lock);
+-            s_vs_cache_path[0] = 0;
+-            return;
+-        }
+-        CloseHandle(thread);
+-        s_vs_writer.started = 1;
+-    }
+-    vs_cache_write* job = malloc(sizeof(*job) + s_vscache.size);
+-    if (!job) return;
+-    wcscpy_s(job->path, MAX_PATH, s_vs_cache_path);
+-    job->size = s_vscache.size;
+-    if (job->size) memcpy(job->data, s_vscache.data, job->size);
+-    EnterCriticalSection(&s_vs_writer.lock);
+-    free(s_vs_writer.pending);
+-    s_vs_writer.pending = job;
+-    ResetEvent(s_vs_writer.idle);
+-    SetEvent(s_vs_writer.wake);
+-    LeaveCriticalSection(&s_vs_writer.lock);
+-}
+-
+-static int vs_cache_add(u64 hash, const void* code, u32 size)
+-{
+-    if (size < 4 || size > VS_CACHE_MAX_RECORD || memcmp(code, "DXBC", 4) ||
+-        s_vscache.size > VS_CACHE_MAX_FILE - VS_CACHE_HDR - size) return 0;
+-    u32 need = s_vscache.size + VS_CACHE_HDR + size;
+-    u8* grown = realloc(s_vscache.data, need);
+-    if (!grown) return 0;
+-    s_vscache.data = grown;
+-    u32 checksum = fp_cache_checksum(hash, code, size);
+-    memcpy(grown + s_vscache.size, &hash, 8);
+-    memcpy(grown + s_vscache.size + 8, &size, 4);
+-    memcpy(grown + s_vscache.size + 12, &checksum, 4);
+-    memcpy(grown + s_vscache.size + VS_CACHE_HDR, code, size);
+-    s_vscache.size = need;
+-    return 1;
+-}
+-
+-static const void* vs_cache_find(u64 hash, u32* size)
+-{
+-    for (u32 off = 0; off + VS_CACHE_HDR <= s_vscache.size;) {
+-        u64 rec_hash; u32 rec_size;
+-        memcpy(&rec_hash, s_vscache.data + off, 8);
+-        memcpy(&rec_size, s_vscache.data + off + 8, 4);
+-        if (rec_hash == hash) { *size = rec_size; return s_vscache.data + off + VS_CACHE_HDR; }
+-        off += VS_CACHE_HDR + rec_size;
+-    }
+-    return NULL;
+-}
+-
+-static void vs_cache_load(void)
+-{
+-    if (s_vscache.ready) return;
+-    if (!s_fp_cache_identity[0]) return;
+-    s_vscache.ready = 1;
+-    s_vs_cache_path[0] = 0;
+-    wchar_t base[MAX_PATH], directory[MAX_PATH];
+-    DWORD custom = GetEnvironmentVariableW(L"PS3_SHADERCACHE", directory, MAX_PATH);
+-    if (custom > 0 && custom < MAX_PATH) {
+-        CreateDirectoryW(directory, NULL);
+-    } else {
+-        DWORD count = GetEnvironmentVariableW(L"LOCALAPPDATA", base, MAX_PATH);
+-        if (!count || count >= MAX_PATH) return;
+-        if (swprintf(directory, MAX_PATH, L"%ls\\BakuganRecomp", base) < 0) return;
+-        if (!CreateDirectoryW(directory, NULL) && GetLastError() != ERROR_ALREADY_EXISTS) return;
+-        if (swprintf(directory, MAX_PATH, L"%ls\\BakuganRecomp\\shadercache", base) < 0) return;
+-        if (!CreateDirectoryW(directory, NULL) && GetLastError() != ERROR_ALREADY_EXISTS) return;
+-    }
+-    if (swprintf(s_vs_cache_path, MAX_PATH, L"%ls\\vs_v%d_%ls.cache", directory,
+-                 VS_CACHE_VERSION, s_fp_cache_identity) < 0) {
+-        s_vs_cache_path[0] = 0;
+-        return;
+-    }
+-    printf("[VS] local shader cache: %ls\n", s_vs_cache_path);
+-    FILE* file = _wfopen(s_vs_cache_path, L"rb");
+-    if (!file) return;
+-    int truncated = 0;
+-    fseek(file, 0, SEEK_END); long size = ftell(file); fseek(file, 0, SEEK_SET);
+-    if (size > 0 && size <= (long)VS_CACHE_MAX_FILE) {
+-        u8* data = malloc((size_t)size);
+-        if (data && fread(data, 1, (size_t)size, file) == (size_t)size) {
+-            u32 good = 0, records = 0;
+-            while (good + VS_CACHE_HDR <= (u32)size) {
+-                u32 length, checksum;
+-                u64 key;
+-                memcpy(&key, data + good, 8);
+-                memcpy(&length, data + good + 8, 4);
+-                memcpy(&checksum, data + good + 12, 4);
+-                if (length < 4 || length > VS_CACHE_MAX_RECORD ||
+-                    length > (u32)size - good - VS_CACHE_HDR ||
+-                    memcmp(data + good + VS_CACHE_HDR, "DXBC", 4) ||
+-                    checksum != fp_cache_checksum(key, data + good + VS_CACHE_HDR, length)) break;
+-                good += VS_CACHE_HDR + length;
+-                records++;
+-            }
+-            s_vscache.data = data;
+-            s_vscache.size = good;
+-            truncated = good != (u32)size;
+-            printf("[VS] local shader cache: %u records, %u/%ld bytes%s\n",
+-                   records, good, size, truncated ? " (invalid tail rejected)" : "");
+-        } else free(data);
+-    }
+-    fclose(file);
+-    if (truncated) vs_cache_save();
++    if (!shader_cache_find(&s_fp_disk_cache, hash, &previous) &&
++        shader_cache_add(&s_fp_disk_cache, hash, code, size))
++        shader_cache_save(&s_fp_disk_cache);
+ }
+ 
+ static const void* vs_cache_get(u64 hash, u32* size)
+ {
+-    vs_cache_load();
+-    return vs_cache_find(hash, size);
++    shader_cache_load(&s_vs_disk_cache);
++    return shader_cache_find(&s_vs_disk_cache, hash, size);
+ }
+ 
+ static void vs_cache_put(u64 hash, const void* code, u32 size)
+ {
+-    vs_cache_load();
++    shader_cache_load(&s_vs_disk_cache);
+     u32 previous;
+-    if (!vs_cache_find(hash, &previous) && vs_cache_add(hash, code, size)) vs_cache_save();
++    if (!shader_cache_find(&s_vs_disk_cache, hash, &previous) &&
++        shader_cache_add(&s_vs_disk_cache, hash, code, size))
++        shader_cache_save(&s_vs_disk_cache);
+ }
+ 
+ static void rsx_polygon_offset(const rsx_state* st, int* bias, float* slope)
+@@ -3328,6 +3225,79 @@
+     return 0;
+ }
+ 
++#define VP_FP_HT_CAP 1024u
++typedef struct { u64 key_hash; u16 slot_plus1; } VPFPHtSlot;
++static VPFPHtSlot s_vp_fp_ht[VP_FP_HT_CAP];
++static int s_vp_fp_evict = 0;
++
++static u64 hash_mix64(u64 h, u64 v)
++{
++    h ^= v;
++    h *= 1099511628211ull;
++    return h ^ (h >> 30);
++}
++
++static u64 vp_fp_key_hash(int vs_idx, u32 vs_hash, u32 vp_gen, u32 blend, int nrt,
++                          u32 rtfmt, int exp32, u32 uhash, u32 cmask, u32 cull,
++                          u32 cube_mask, u32 depth_key, u32 packed_depth_units,
++                          u32 alpha_ctl, int depth_bias, float slope_bias,
++                          const rsx_fp_shadow_desc* shadow)
++{
++    u32 sb_bits = 0;
++    if (slope_bias != 0.0f) memcpy(&sb_bits, &slope_bias, sizeof(sb_bits));
++    u64 h = 14695981039346656037ull;
++    h = hash_mix64(h, (u64)uhash);
++    h = hash_mix64(h, ((u64)(u32)vs_idx << 32) | (u64)vs_hash);
++    h = hash_mix64(h, ((u64)vp_gen << 32) | (u64)blend);
++    h = hash_mix64(h, ((u64)(u32)nrt << 32) | (u64)rtfmt);
++    h = hash_mix64(h, ((u64)(u32)exp32 << 32) | (u64)cmask);
++    h = hash_mix64(h, ((u64)cull << 32) | (u64)cube_mask);
++    h = hash_mix64(h, ((u64)depth_key << 32) | (u64)packed_depth_units);
++    h = hash_mix64(h, ((u64)alpha_ctl << 32) | (u64)(u32)depth_bias);
++    h = hash_mix64(h, (u64)sb_bits);
++    const u32* sw = (const u32*)shadow;
++    for (size_t i = 0; i < sizeof(rsx_fp_shadow_desc) * RSX_MAX_TEXTURES / sizeof(u32); i++)
++        h = hash_mix64(h, (u64)sw[i]);
++    return h;
++}
++
++static int vp_fp_entry_matches(const VPFPEntry* e, int vs_idx, u32 vs_hash, u32 vp_gen,
++                               u32 blend, int nrt, DXGI_FORMAT rtfmt, int exp32, u32 uhash,
++                               u32 cmask, u32 cull, u32 cube_mask, u32 depth_key,
++                               u32 packed_depth_units, u32 alpha_ctl, int depth_bias,
++                               float slope_bias, const rsx_fp_shadow_desc* shadow)
++{
++    return e->ucode_hash == uhash && e->vs_idx == vs_idx && e->vs_hash == vs_hash &&
++           e->gen == vp_gen && e->blend == blend && e->nrt == nrt &&
++           e->rtfmt == (u32)rtfmt && e->exp32 == exp32 && e->cmask == cmask &&
++           e->cull == cull && e->cube_mask == cube_mask && e->depth_key == depth_key &&
++           e->packed_depth_units == packed_depth_units && e->alpha_ctl == alpha_ctl &&
++           e->depth_bias == depth_bias && e->slope_bias == slope_bias &&
++           !memcmp(e->shadow, shadow, sizeof(e->shadow));
++}
++
++static void vp_fp_ht_insert(u64 key_hash, int slot)
++{
++    u32 mask = VP_FP_HT_CAP - 1u;
++    u32 idx = (u32)(key_hash ^ (key_hash >> 32)) & mask;
++    while (s_vp_fp_ht[idx].slot_plus1) idx = (idx + 1u) & mask;
++    s_vp_fp_ht[idx].key_hash = key_hash;
++    s_vp_fp_ht[idx].slot_plus1 = (u16)(slot + 1);
++}
++
++static void vp_fp_ht_rebuild(void)
++{
++    memset(s_vp_fp_ht, 0, sizeof s_vp_fp_ht);
++    for (int i = 0; i < s_d3d.vp_fp_n; i++) {
++        const VPFPEntry* e = &s_d3d.vp_fp[i];
++        u64 h = vp_fp_key_hash(e->vs_idx, e->vs_hash, e->gen, e->blend, e->nrt,
++                               e->rtfmt, e->exp32, e->ucode_hash, e->cmask, e->cull,
++                               e->cube_mask, e->depth_key, e->packed_depth_units,
++                               e->alpha_ctl, e->depth_bias, e->slope_bias, e->shadow);
++        vp_fp_ht_insert(h, i);
++    }
++}
++
+ static ID3D12PipelineState* vp_get_fp_pso(int vs_idx, u32 fp_addr, u32 blend, int nrt,
+                                           DXGI_FORMAT rtfmt, int exp32, u32 cmask, u32 cull,
+                                           u32 cube_mask, u32 depth_key, u32 alpha_ctl,
+@@ -3424,45 +3394,45 @@
+     s_perf_pso_calls++;
+     /* Keyed on the code, not on where it lives. The compiled shader reads its
+      * inline constants from the draw's own fp_addr (fp_k[], refilled per draw),
+-     * so a program's pipeline is the same wherever the title puts it. God of
+-     * War HD uploads its fragment programs into a ring every frame: keyed on the
+-     * address, every draw of every frame missed and went through a full
+-     * decompile + D3DCompile (179 draws -> seconds per frame on its menu). */
+-    for (int i = 0; i < s_d3d.vp_fp_n; i++)
+-        if (s_d3d.vp_fp[i].ucode_hash != uhash) continue;   /* cheap reject first */
+-        else if (s_d3d.vp_fp[i].vs_idx == vs_idx &&
+-            s_d3d.vp_fp[i].vs_hash == vs_hash && s_d3d.vp_fp[i].gen == s_d3d.vp_gen &&
+-            s_d3d.vp_fp[i].blend == blend && s_d3d.vp_fp[i].nrt == nrt &&
+-            s_d3d.vp_fp[i].rtfmt == (u32)rtfmt && s_d3d.vp_fp[i].exp32 == exp32 &&
+-            s_d3d.vp_fp[i].ucode_hash == uhash && s_d3d.vp_fp[i].cmask == cmask &&
+-            s_d3d.vp_fp[i].cull == cull &&
+-            s_d3d.vp_fp[i].cube_mask == cube_mask &&
+-            s_d3d.vp_fp[i].depth_key == depth_key &&
+-            s_d3d.vp_fp[i].packed_depth_units == packed_depth_units &&
+-            s_d3d.vp_fp[i].alpha_ctl == alpha_ctl &&
+-            s_d3d.vp_fp[i].depth_bias == depth_bias &&
+-            s_d3d.vp_fp[i].slope_bias == slope_bias &&
+-            !memcmp(s_d3d.vp_fp[i].shadow, shadow, sizeof(s_d3d.vp_fp[i].shadow))) {
+-            s_last_pso.pso = s_d3d.vp_fp[i].pso;
+-            s_last_pso.gen = s_d3d.vp_gen;
+-            s_last_pso.page_gen = cur_page_gen;
+-            s_last_pso.vs_idx = vs_idx;
+-            s_last_pso.fp_addr = fp_addr;
+-            s_last_pso.blend = blend;
+-            s_last_pso.nrt = nrt;
+-            s_last_pso.rtfmt = rtfmt;
+-            s_last_pso.exp32 = exp32;
+-            s_last_pso.cmask = cmask;
+-            s_last_pso.cull = cull;
+-            s_last_pso.cube_mask = cube_mask;
+-            s_last_pso.depth_key = depth_key;
+-            s_last_pso.alpha_ctl = alpha_ctl;
+-            s_last_pso.packed_depth_units = packed_depth_units;
+-            s_last_pso.depth_bias = depth_bias;
+-            s_last_pso.slope_bias = slope_bias;
+-            memcpy(s_last_pso.shadow, shadow, sizeof(s_last_pso.shadow));
+-            return s_d3d.vp_fp[i].pso;
+-        }
++     * so a program's pipeline is the same wherever the title puts it. */
++    const u64 pso_hash = vp_fp_key_hash(
++        vs_idx, vs_hash, s_d3d.vp_gen, blend, nrt, (u32)rtfmt, exp32, uhash,
++        cmask, cull, cube_mask, depth_key, packed_depth_units, alpha_ctl,
++        depth_bias, slope_bias, shadow);
++    {
++        u32 mask = VP_FP_HT_CAP - 1u;
++        u32 idx = (u32)(pso_hash ^ (pso_hash >> 32)) & mask;
++        while (s_vp_fp_ht[idx].slot_plus1) {
++            if (s_vp_fp_ht[idx].key_hash == pso_hash) {
++                const VPFPEntry* e = &s_d3d.vp_fp[s_vp_fp_ht[idx].slot_plus1 - 1];
++                if (vp_fp_entry_matches(e, vs_idx, vs_hash, s_d3d.vp_gen, blend, nrt,
++                                        rtfmt, exp32, uhash, cmask, cull, cube_mask,
++                                        depth_key, packed_depth_units, alpha_ctl,
++                                        depth_bias, slope_bias, shadow)) {
++                    s_last_pso.pso = e->pso;
++                    s_last_pso.gen = s_d3d.vp_gen;
++                    s_last_pso.page_gen = cur_page_gen;
++                    s_last_pso.vs_idx = vs_idx;
++                    s_last_pso.fp_addr = fp_addr;
++                    s_last_pso.blend = blend;
++                    s_last_pso.nrt = nrt;
++                    s_last_pso.rtfmt = rtfmt;
++                    s_last_pso.exp32 = exp32;
++                    s_last_pso.cmask = cmask;
++                    s_last_pso.cull = cull;
++                    s_last_pso.cube_mask = cube_mask;
++                    s_last_pso.depth_key = depth_key;
++                    s_last_pso.alpha_ctl = alpha_ctl;
++                    s_last_pso.packed_depth_units = packed_depth_units;
++                    s_last_pso.depth_bias = depth_bias;
++                    s_last_pso.slope_bias = slope_bias;
++                    memcpy(s_last_pso.shadow, shadow, sizeof(s_last_pso.shadow));
++                    return e->pso;
++                }
++            }
++            idx = (idx + 1u) & mask;
++        }
++    }
+     s_perf_pso_miss++;      /* falls through to a full decompile + D3DCompile */
+     /* PSOMISSDBG=1: on a miss, name the key field that differs from an existing
+      * entry for the same program. "the cache misses" is not actionable; "it
+@@ -3841,31 +3811,38 @@
+     /* Cache failed descriptors too. Retrying the same invalid PSO for every
+      * draw recompiles the shader thousands of times and stalls whole frames.
+      * NULL retains the existing fallback; a changed key is still retried. */
+-    if (s_d3d.vp_fp_n >= VP_FP_CACHE) {
+-        if (s_d3d.vp_fp[0].pso) s_d3d.vp_fp[0].pso->lpVtbl->Release(s_d3d.vp_fp[0].pso);
+-        memmove(&s_d3d.vp_fp[0], &s_d3d.vp_fp[1], sizeof(VPFPEntry) * (VP_FP_CACHE - 1));
+-        s_d3d.vp_fp_n = VP_FP_CACHE - 1;
+-    }
+-    s_d3d.vp_fp[s_d3d.vp_fp_n].fp_addr = fp_addr;
+-    s_d3d.vp_fp[s_d3d.vp_fp_n].vs_idx  = vs_idx;
+-    s_d3d.vp_fp[s_d3d.vp_fp_n].vs_hash = vs_hash;
+-    s_d3d.vp_fp[s_d3d.vp_fp_n].gen     = s_d3d.vp_gen;
+-    s_d3d.vp_fp[s_d3d.vp_fp_n].blend   = blend;
+-    s_d3d.vp_fp[s_d3d.vp_fp_n].nrt     = nrt;
+-    s_d3d.vp_fp[s_d3d.vp_fp_n].rtfmt   = (u32)rtfmt;
+-    s_d3d.vp_fp[s_d3d.vp_fp_n].exp32   = exp32;
+-    s_d3d.vp_fp[s_d3d.vp_fp_n].ucode_hash = uhash;
+-    s_d3d.vp_fp[s_d3d.vp_fp_n].cmask   = cmask;
+-    s_d3d.vp_fp[s_d3d.vp_fp_n].cull    = cull;
+-    s_d3d.vp_fp[s_d3d.vp_fp_n].cube_mask = cube_mask;
+-    s_d3d.vp_fp[s_d3d.vp_fp_n].depth_key = depth_key;
+-    s_d3d.vp_fp[s_d3d.vp_fp_n].packed_depth_units = packed_depth_units;
+-    memcpy(s_d3d.vp_fp[s_d3d.vp_fp_n].shadow, shadow, sizeof(s_d3d.vp_fp[0].shadow));
+-    s_d3d.vp_fp[s_d3d.vp_fp_n].depth_bias = depth_bias;
+-    s_d3d.vp_fp[s_d3d.vp_fp_n].slope_bias = slope_bias;
+-    s_d3d.vp_fp[s_d3d.vp_fp_n].alpha_ctl = alpha_ctl;
+-    s_d3d.vp_fp[s_d3d.vp_fp_n].pso     = pso;
+-    s_d3d.vp_fp_n++;
++    int pso_slot;
++    int evicted = 0;
++    if (s_d3d.vp_fp_n < VP_FP_CACHE) {
++        pso_slot = s_d3d.vp_fp_n++;
++    } else {
++        pso_slot = s_vp_fp_evict;
++        s_vp_fp_evict = (s_vp_fp_evict + 1) % VP_FP_CACHE;
++        if (s_d3d.vp_fp[pso_slot].pso)
++            s_d3d.vp_fp[pso_slot].pso->lpVtbl->Release(s_d3d.vp_fp[pso_slot].pso);
++        evicted = 1;
++    }
++    s_d3d.vp_fp[pso_slot].fp_addr = fp_addr;
++    s_d3d.vp_fp[pso_slot].vs_idx  = vs_idx;
++    s_d3d.vp_fp[pso_slot].vs_hash = vs_hash;
++    s_d3d.vp_fp[pso_slot].gen     = s_d3d.vp_gen;
++    s_d3d.vp_fp[pso_slot].blend   = blend;
++    s_d3d.vp_fp[pso_slot].nrt     = nrt;
++    s_d3d.vp_fp[pso_slot].rtfmt   = (u32)rtfmt;
++    s_d3d.vp_fp[pso_slot].exp32   = exp32;
++    s_d3d.vp_fp[pso_slot].ucode_hash = uhash;
++    s_d3d.vp_fp[pso_slot].cmask   = cmask;
++    s_d3d.vp_fp[pso_slot].cull    = cull;
++    s_d3d.vp_fp[pso_slot].cube_mask = cube_mask;
++    s_d3d.vp_fp[pso_slot].depth_key = depth_key;
++    s_d3d.vp_fp[pso_slot].packed_depth_units = packed_depth_units;
++    memcpy(s_d3d.vp_fp[pso_slot].shadow, shadow, sizeof(s_d3d.vp_fp[0].shadow));
++    s_d3d.vp_fp[pso_slot].depth_bias = depth_bias;
++    s_d3d.vp_fp[pso_slot].slope_bias = slope_bias;
++    s_d3d.vp_fp[pso_slot].alpha_ctl = alpha_ctl;
++    s_d3d.vp_fp[pso_slot].pso     = pso;
++    if (evicted) vp_fp_ht_rebuild();
++    else vp_fp_ht_insert(pso_hash, pso_slot);
+     return pso;
+ }
+ 
+@@ -3977,6 +3954,48 @@
+                 source + face * face_stride + lv->offset,
+                 lv->w, lv->h, &lv->tl, argb_as_rgba);
+         }
++    }
++}
++
++#define VP_TEX_HT_CAP 2048u
++typedef struct { u64 key_hash; u16 slot_plus1; } VPTexHtSlot;
++static VPTexHtSlot s_vp_tex_ht[VP_TEX_HT_CAP];
++static int s_vp_tex_cursor = 0;
++
++static u64 vp_tex_key_hash(u32 key_off, u32 w, u32 h, u32 fmt, int cube,
++                           u32 level_count, u32 source_pitch)
++{
++    u64 hash = 14695981039346656037ull;
++    hash = hash_mix64(hash, ((u64)key_off << 32) | (u64)fmt);
++    hash = hash_mix64(hash, ((u64)w << 32) | (u64)h);
++    hash = hash_mix64(hash, ((u64)(u32)cube << 32) | (u64)level_count);
++    hash = hash_mix64(hash, (u64)source_pitch);
++    return hash;
++}
++
++static void vp_tex_ht_insert(u64 key_hash, int slot)
++{
++    u32 mask = VP_TEX_HT_CAP - 1u;
++    u32 idx = (u32)(key_hash ^ (key_hash >> 32)) & mask;
++    while (s_vp_tex_ht[idx].slot_plus1) {
++        if (s_vp_tex_ht[idx].slot_plus1 == (u16)(slot + 1)) {
++            s_vp_tex_ht[idx].key_hash = key_hash;
++            return;
++        }
++        idx = (idx + 1u) & mask;
++    }
++    s_vp_tex_ht[idx].key_hash = key_hash;
++    s_vp_tex_ht[idx].slot_plus1 = (u16)(slot + 1);
++}
++
++static void vp_tex_ht_rebuild(void)
++{
++    memset(s_vp_tex_ht, 0, sizeof s_vp_tex_ht);
++    for (int i = 0; i < VP_TEX_SLOTS; i++) {
++        const VPTexSlot* c = &s_d3d.vp_tex[i];
++        if (!c->res) continue;
++        vp_tex_ht_insert(
++            vp_tex_key_hash(c->key, c->w, c->h, c->fmt, c->cube, c->mips, c->pitch), i);
+     }
+ }
+ 
+@@ -4037,35 +4056,51 @@
+     u32 blkrow  = dxt ? tl.row_bytes : 0;
+     u32 blkrows = dxt ? tl.rows      : 0;
+     const u32 key_off = off;         /* lookup key: the offset as bound */
++    const u64 tex_kh = vp_tex_key_hash(key_off, w, h, fmt, cube, level_count, source_pitch);
+     /* Sparse checksum of a texture's source bytes -- enough to notice an
+      * animated surface changing, cheap enough to run on every bind. */
+     /* (portable helper tex_csum() -- see above; a statement-expression macro
+      * here was a GCC/Clang extension MSVC rejects.) */
+     #define TEX_CSUM(base, nbytes) tex_csum((base), (nbytes))
+     int slot = -1, freeslot = -1;
+-    for (int i = 0; i < VP_TEX_SLOTS; i++) {
+-        VPTexSlot* c = &s_d3d.vp_tex[i];
+-        if (c->res && c->key == key_off && c->w == w && c->h == h && c->fmt == fmt
+-            && c->cube == cube && c->mips == level_count && c->pitch == source_pitch) {
+-            if (c->used) return i;                /* already bound this frame */
+-            { static int nocache = -1;            /* TEX_NOCACHE=1: always re-upload */
+-              if (nocache < 0) { const char* e = getenv("TEX_NOCACHE");
+-                                 nocache = e ? atoi(e) : 0; }
+-              if (nocache) { slot = i; break; } }
+-            /* Held from an earlier frame: re-upload if any guest page holding
+-             * the source was written. The sparse checksum alone missed small
+-             * edits (a customized portrait changes a few texels, not 1 KB),
+-             * so a cached default portrait could survive the reload. Page
+-             * generations cover PPU stores, SPU DMA, file reads and decoders. */
+-            int changed = 0;
+-            for (u32 p = c->p0; p <= c->pn; p++)
+-                if (g_guest_page_gen[p & ((1u << 20) - 1u)] > c->gen) { changed = 1; break; }
+-            if (!changed && TEX_CSUM(vm_base + c->off, source_bytes) == c->csum) {
+-                c->used = 1; return i;
++    {
++        u32 mask = VP_TEX_HT_CAP - 1u;
++        u32 idx = (u32)(tex_kh ^ (tex_kh >> 32)) & mask;
++        while (s_vp_tex_ht[idx].slot_plus1) {
++            if (s_vp_tex_ht[idx].key_hash == tex_kh) {
++                int i = s_vp_tex_ht[idx].slot_plus1 - 1;
++                VPTexSlot* c = &s_d3d.vp_tex[i];
++                if (c->res && c->key == key_off && c->w == w && c->h == h && c->fmt == fmt
++                    && c->cube == cube && c->mips == level_count && c->pitch == source_pitch) {
++                    if (c->used) return i;                /* already bound this frame */
++                    { static int nocache = -1;            /* TEX_NOCACHE=1: always re-upload */
++                      if (nocache < 0) { const char* e = getenv("TEX_NOCACHE");
++                                         nocache = e ? atoi(e) : 0; }
++                      if (nocache) { slot = i; break; } }
++                    int changed = 0;
++                    for (u32 p = c->p0; p <= c->pn; p++)
++                        if (g_guest_page_gen[p & ((1u << 20) - 1u)] > c->gen) { changed = 1; break; }
++                    if (!changed && TEX_CSUM(vm_base + c->off, source_bytes) == c->csum) {
++                        c->used = 1; return i;
++                    }
++                    slot = i; break;                      /* stale: fall through and redo */
++                }
+             }
+-            slot = i; break;                      /* stale: fall through and redo */
+-        }
+-        if (!c->used && freeslot < 0) freeslot = i;
++            idx = (idx + 1u) & mask;
++        }
++    }
++    if (slot < 0) {
++        int unused_slot = -1;
++        for (int k = 0; k < VP_TEX_SLOTS; k++) {
++            int i = (s_vp_tex_cursor + k) % VP_TEX_SLOTS;
++            const VPTexSlot* c = &s_d3d.vp_tex[i];
++            if (!c->res) { freeslot = i; s_vp_tex_cursor = (i + 1) % VP_TEX_SLOTS; break; }
++            if (!c->used && unused_slot < 0) unused_slot = i;
++        }
++        if (freeslot < 0 && unused_slot >= 0) {
++            freeslot = unused_slot;
++            s_vp_tex_cursor = (unused_slot + 1) % VP_TEX_SLOTS;
++        }
+     }
+     /* TEX_OFF_BIAS=1: sample the image one whole level-0 BELOW the bound offset.
+      * Measured on the Rubber Ducky demo: at the bind offset every texture reads
+@@ -4171,6 +4206,10 @@
+                   start_delta, w * h * bpp, 10); } } }
+     if (slot < 0) slot = freeslot;
+     VPTexSlot* t = &s_d3d.vp_tex[slot];
++    const int had_res = (t->res != NULL);
++    const int key_changed = had_res &&
++        (t->key != key_off || t->w != w || t->h != h || t->fmt != fmt ||
++         t->cube != cube || t->mips != level_count || t->pitch != source_pitch);
+     /* The upload buffer's rows hold the DECODED image, so they are sized from
+      * dst_row_bytes -- w * bpp is the source row, which is narrower for any
+      * format rsx_texture_decode unpacks. */
+@@ -4195,7 +4234,7 @@
+      * crashes. */
+     if (t->res && (t->w != w || t->h != h || t->fmt != fmt ||
+                    t->cube != cube || t->mips != level_count)) {
+-        t->res->lpVtbl->Release(t->res); t->res = NULL;
++        t->res->lpVtbl->Release(t->res); t->res = NULL; t->res_id = 0;
+         if (t->up) { t->up->lpVtbl->Release(t->up); t->up = NULL; }
+     }
+     if (!t->res) {
+@@ -4203,8 +4242,10 @@
+         if (FAILED(s_d3d.device->lpVtbl->CreateCommittedResource(
+                 s_d3d.device, &hp, D3D12_HEAP_FLAG_NONE, &td,
+                 D3D12_RESOURCE_STATE_COPY_DEST, NULL,
+-                &IID_ID3D12Resource, (void**)&t->res)))
++                &IID_ID3D12Resource, (void**)&t->res))) {
++            if (had_res) vp_tex_ht_rebuild();
+             return -1;
++        }
+         D3D12_HEAP_PROPERTIES hu = {0}; hu.Type = D3D12_HEAP_TYPE_UPLOAD;
+         D3D12_RESOURCE_DESC bd = {0};
+         bd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+@@ -4215,7 +4256,9 @@
+                 s_d3d.device, &hu, D3D12_HEAP_FLAG_NONE, &bd,
+                 D3D12_RESOURCE_STATE_GENERIC_READ, NULL,
+                 &IID_ID3D12Resource, (void**)&t->up))) {
+-            t->res->lpVtbl->Release(t->res); t->res = NULL; t->res_id = 0; return -1;
++            t->res->lpVtbl->Release(t->res); t->res = NULL; t->res_id = 0;
++            if (had_res) vp_tex_ht_rebuild();
++            return -1;
+         }
+         t->res_id = ++s_next_srv_res_id;
+         fresh = 1;
+@@ -4555,6 +4598,8 @@
+     t->gen = upload_gen;
+     t->p0 = off >> 12;
+     t->pn = (off + source_bytes - 1u) >> 12;
++    if (key_changed) vp_tex_ht_rebuild();
++    else if (!had_res) vp_tex_ht_insert(tex_kh, slot);
+     #undef TEX_CSUM
+     return slot;
+ }
+@@ -9986,14 +10031,19 @@
+ 
+ void rsx_d3d12_backend_shutdown(void)
+ {
+-    fp_cache_flush();
+-    vs_cache_flush();
++    shader_cache_shutdown(&s_fp_disk_cache);
++    shader_cache_shutdown(&s_vs_disk_cache);
+     vp_pack_workers_shutdown();
+     s_depth_resolve_count = 0;
+     s_rt_alias_n = 0;
+     s_d3d.draw_count = 0;
+     memset(s_srv_slot_state, 0, sizeof s_srv_slot_state);
+     memset(s_off_rt_srv_state, 0, sizeof s_off_rt_srv_state);
++    memset(s_vp_fp_ht, 0, sizeof s_vp_fp_ht);
++    s_vp_fp_evict = 0;
++    s_d3d.vp_fp_n = 0;
++    memset(s_vp_tex_ht, 0, sizeof s_vp_tex_ht);
++    s_vp_tex_cursor = 0;
+     s_screen_copy_id = 0;
+     if (!s_d3d.initialized) return;
+ 

@@ -109,8 +109,9 @@ count with missing geometry is not a valid improvement. For vertex-path changes,
 - Keep `PS3_INTERNAL=720` (the default). The title's viewports, display buffer
   and final composite are 1280x720; a larger host raster leaves the image in a
   1280x720 corner, and faking `cellVideoOutGetResolution` makes it smaller.
-  Raise the output with `PS3_OUTPUT` + FSR1 instead. `RSX_PACK_WORKERS=4` is
-  slower here (p99 146 ms); leave it unset.
+  Raise the output with `PS3_OUTPUT` + FSR1 instead. `main.cpp` defaults
+  `RSX_PACK_WORKERS=2` (`0` disables parallel packing; avoid `RSX_PACK_WORKERS=4`,
+  which was slower here at p99 146 ms).
 - Texture quality defaults: aniso 16x (`PS3_ANISO=1` to compare), `PS3_LOD_BIAS`
   unset (negative values sharpen but shimmer), RCAS 0.6 at 1080p. Mips are
   already uploaded as `level_count` subresources; do not replace them with a

@@ -65,7 +65,7 @@ The game is **fully playable from start to finish**: story mode, tutorials, batt
   3. **Physical Gyroscope**: Native motion sensor support on DualShock 4, DualSense, and compatible gamepads via SDL3.
 - **Modernized Bilingual Launcher**: Includes an interactive graphical controller remapper, graphics presets, game language selection (English/Spanish), and automatic resource cleanup when the game starts.
 - **Automated Bilingual Installer**: Detects system language (Spanish/English), verifies your retail European disc dump (`BLES00758`), and automatically decrypts `EBOOT.BIN` via bundled portable RPCS3 tools.
-- **Pre-warmed Shader Container (`fp_v3.cache`)**: Eliminates shader compilation stuttering during battle arena entries.
+- **Persistent Local Shader Caches (`fp_v4_*.cache` / `vs_v1_*.cache`)**: Caches compiled fragment and vertex DXBC shaders in `%LOCALAPPDATA%\BakuganRecomp\shadercache` after first arena entry, avoiding compilation stuttering on subsequent runs.
 - **Robust Save System**: Native multi-slot save data stored in `%LOCALAPPDATA%\BakuganRecomp`.
 
 ---
