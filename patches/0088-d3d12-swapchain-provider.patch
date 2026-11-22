@@ -87,7 +87,7 @@ diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
      for (int i = 0; i < MAX_OFF_RTS; i++) {
          OffRT* r = &s_d3d.off_rt[i];
 @@ -6758,10 +6784,91 @@
-     }
+     s_depth_resolve_count = 0;
  }
  
 +static ID3D12Resource* create_hudless_target(u32 width, u32 height, D3D12_RESOURCE_FLAGS flags)
