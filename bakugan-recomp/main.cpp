@@ -1076,6 +1076,8 @@ int main(int argc, char** argv)
     ppu_recomp_register();   /* lifted function table -> address map */
     ps3_load_prx_modules();  /* this game's lifted system PRX, if it has any */
     ppu_hle_init();          /* firmware import NID -> HLE handlers */
+    extern void bakugan_install_pause_trace();
+    bakugan_install_pause_trace();
     ppu_sysprx_register();   /* boot-critical CRT */
     ppu_fs_register();       /* cellFs over the game directory */
     lv2_init_syscalls();     /* the lv2 syscall table */
