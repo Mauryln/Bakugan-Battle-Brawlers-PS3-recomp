@@ -1,13 +1,17 @@
 # Assemble the Windows release without removing previous packages.
-param([string]$BuildDir)
+param([string]$BuildDir, [switch]$Preview)
 
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
-$version = '1.2.0'
+$version = '1.3.5'
 $stamp = Get-Date -Format 'yyyyMMdd-HHmmssfff'
 $rel = Join-Path $root "diagnostics\release-$version-$stamp"
 & (Join-Path $PSScriptRoot 'build.ps1') -BuildDir $BuildDir -OutputDir $rel
 
+$controllerImage = Join-Path $rel 'payload\assets\launcher\Control.png'
+if (-not (Test-Path -LiteralPath $controllerImage -PathType Leaf)) {
+    throw "Falta la imagen del mando en el paquete: $controllerImage"
+}
 Copy-Item (Join-Path $PSScriptRoot 'README.txt') (Join-Path $rel 'README.txt') -Force
 Copy-Item (Join-Path $root "docs\RELEASE_$version.md") (Join-Path $rel 'RELEASE_NOTES.md') -Force
 
@@ -20,7 +24,8 @@ Set-Content -Path (Join-Path $rel 'SHA256SUMS.txt') -Value $hashes -Encoding ASC
 
 $dist = Join-Path $root 'dist'
 New-Item -ItemType Directory -Force -Path $dist | Out-Null
-$zip = Join-Path $dist "Bakugan-Battle-Brawlers-Recomp-$version-win64.zip"
+$suffix = if ($Preview) { '-preview' } else { '' }
+$zip = Join-Path $dist "Bakugan-Battle-Brawlers-Recomp-$version$suffix-win64.zip"
 Compress-Archive -Path (Join-Path $rel '*') -DestinationPath $zip -CompressionLevel Optimal -Force
 $zipHash = (Get-FileHash $zip -Algorithm SHA256).Hash
 Set-Content -Path "$zip.sha256" -Value "$zipHash  $(Split-Path -Leaf $zip)" -Encoding ASCII

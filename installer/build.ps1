@@ -14,7 +14,7 @@ if (-not (Test-Path $csc)) { throw 'No se encontró csc.exe (.NET Framework 4)' 
 
 $outDir = if ($OutputDir) { $OutputDir } else { Join-Path $root 'diagnostics\installer' }
 $payload = Join-Path $outDir 'payload'
-New-Item -ItemType Directory -Force -Path $payload, (Join-Path $payload 'shaders'), (Join-Path $payload 'licenses') | Out-Null
+New-Item -ItemType Directory -Force -Path $payload, (Join-Path $payload 'shaders'), (Join-Path $payload 'licenses'), (Join-Path $payload 'assets') | Out-Null
 
 $build = if ($BuildDir) { $BuildDir } else { Join-Path $root 'bakugan-recomp\build' }
 foreach ($name in @('BakuganLauncher.exe', 'BakuganRecomp.exe', 'SDL3.dll')) {
@@ -22,6 +22,11 @@ foreach ($name in @('BakuganLauncher.exe', 'BakuganRecomp.exe', 'SDL3.dll')) {
     if (-not (Test-Path $source)) { throw "Falta $source. Compila el port primero." }
     Copy-Item $source $payload -Force
 }
+$launcherAssets = Join-Path $build 'assets\launcher'
+if (-not (Test-Path -LiteralPath (Join-Path $launcherAssets 'Control.png') -PathType Leaf)) {
+    throw "Falta $launcherAssets\Control.png. Compila el launcher primero."
+}
+Copy-Item -LiteralPath $launcherAssets -Destination (Join-Path $payload 'assets') -Recurse -Force
 Copy-Item (Join-Path $build 'shaders\fsr1') (Join-Path $payload 'shaders') -Recurse -Force
 Copy-Item (Join-Path $build 'licenses') $payload -Recurse -Force
 Copy-Item (Join-Path $PSScriptRoot 'RPCS3_LICENSE.txt') (Join-Path $payload 'licenses\RPCS3.txt') -Force
@@ -46,18 +51,19 @@ No incluye firmware, juegos ni claves de este proyecto.
 
 $icon = Join-Path $root 'bakugan-recomp\assets\bakugan.ico'
 $source = Join-Path $PSScriptRoot 'Installer.cs'
+$metadata = Join-Path $PSScriptRoot 'ReleaseMetadata.cs'
 $extract = Join-Path $PSScriptRoot 'SelfExtract.cs'
 $rpcs3 = Join-Path $PSScriptRoot 'Rpcs3Decrypt.cs'
 $exe = Join-Path $outDir 'BakuganSetup.exe'
 & $csc /nologo /target:winexe /platform:x64 /optimize+ /langversion:5 /codepage:65001 `
     /win32icon:$icon /out:$exe /r:System.dll /r:System.Windows.Forms.dll /r:System.Drawing.dll `
-    $source $extract $rpcs3
+    $source $extract $rpcs3 $metadata
 if ($LASTEXITCODE -ne 0) { throw "csc falló con $LASTEXITCODE" }
 
 $uninstaller = Join-Path $payload 'Uninstall.exe'
 & $csc /nologo /target:winexe /platform:x64 /optimize+ /langversion:5 /codepage:65001 `
     /win32icon:$icon /out:$uninstaller /r:System.dll /r:System.Windows.Forms.dll /r:System.Drawing.dll `
-    (Join-Path $PSScriptRoot 'Uninstaller.cs')
+    (Join-Path $PSScriptRoot 'Uninstaller.cs') $metadata
 if ($LASTEXITCODE -ne 0) { throw "csc (Uninstall.exe) falló con $LASTEXITCODE" }
 Write-Host "Instalador: $exe"
 Write-Host "Payload:    $payload"

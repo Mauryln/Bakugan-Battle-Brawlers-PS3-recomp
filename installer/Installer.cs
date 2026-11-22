@@ -48,57 +48,10 @@ namespace BakuganInstaller
             var log = new StringBuilder();
             try
             {
-                if (string.IsNullOrEmpty(o.Iso) || !File.Exists(o.Iso))
-                    throw new Exception("ISO not found: " + o.Iso);
-                bool already;
-                string letter = Iso.Mount(o.Iso, out already);
-                try
-                {
-                    string root = letter + ":\\";
-                    string ud = Path.Combine(root, "PS3_GAME", "USRDIR");
-                    string elf = Path.Combine(ud, "EBOOT.elf");
-                    string bin = Path.Combine(ud, "EBOOT.BIN");
-                    if (!File.Exists(elf) && !File.Exists(bin))
-                        throw new Exception("PS3_GAME\\USRDIR\\EBOOT.BIN not found in ISO");
-                    log.AppendLine("ISO OK: " + root + " (elf=" + File.Exists(elf) + ", bin=" + File.Exists(bin) + ")");
-                    if (o.ExtractElf)
-                    {
-                        string target = string.IsNullOrEmpty(o.Out)
-                            ? Path.Combine(Path.GetDirectoryName(Application.ExecutablePath), "EBOOT.elf")
-                            : o.Out;
-                        string reason = "";
-                        bool ok = SelfExtract.TryExtract(bin, target, out reason);
-                        if (!ok)
-                        {
-                            string exeDir = Path.GetDirectoryName(Application.ExecutablePath);
-                            string rpcs3Elf = null, rpcs3Reason = "";
-                            ok = Rpcs3Decrypt.TryDecrypt(bin, Path.Combine(exeDir, ".decrypt"),
-                                Path.Combine(exeDir, "payload", "rpcs3"), out rpcs3Elf, out rpcs3Reason);
-                            if (ok)
-                            {
-                                File.Copy(rpcs3Elf, target, true);
-                                reason = "RPCS3 --decrypt";
-                            }
-                            else
-                            {
-                                reason = reason + " " + rpcs3Reason;
-                            }
-                        }
-                        if (!ok)
-                            throw new Exception("Could not extract EBOOT.elf: " + reason);
-                        log.AppendLine("ELF extracted: " + target + " (" + reason + ")");
-                    }
-                    else if (!o.CheckIso)
-                    {
-                        if (string.IsNullOrEmpty(o.Dir))
-                            throw new Exception("Install folder is empty");
-                        Installer.Run(o, log, null);
-                    }
-                }
-                finally
-                {
-                    Iso.Unmount(o.Iso, already);
-                }
+                if (o.CheckIso || o.ExtractElf)
+                    InspectIso(o, log);
+                else
+                    Installer.Run(o, log, null);
                 File.WriteAllText(Path.Combine(Path.GetDirectoryName(Application.ExecutablePath), "installer.log"), log.ToString());
                 return 0;
             }
@@ -109,6 +62,56 @@ namespace BakuganInstaller
                 return 1;
             }
         }
+
+        private static void InspectIso(Options o, StringBuilder log)
+        {
+            if (string.IsNullOrEmpty(o.Iso) || !File.Exists(o.Iso))
+                throw new Exception("ISO not found: " + o.Iso);
+            bool already;
+            string letter = Iso.Mount(o.Iso, out already);
+            try
+            {
+                string root = letter + ":\\";
+                string ud = Path.Combine(root, "PS3_GAME", "USRDIR");
+                string elf = Path.Combine(ud, "EBOOT.elf");
+                string bin = Path.Combine(ud, "EBOOT.BIN");
+                if (!File.Exists(elf) && !File.Exists(bin))
+                    throw new Exception("PS3_GAME\\USRDIR\\EBOOT.BIN not found in ISO");
+                log.AppendLine("ISO OK: " + root + " (elf=" + File.Exists(elf) + ", bin=" + File.Exists(bin) + ")");
+                if (o.ExtractElf)
+                {
+                    string target = string.IsNullOrEmpty(o.Out)
+                        ? Path.Combine(Path.GetDirectoryName(Application.ExecutablePath), "EBOOT.elf")
+                        : o.Out;
+                    string reason = "";
+                    bool ok = SelfExtract.TryExtract(bin, target, out reason);
+                    if (!ok)
+                    {
+                        string exeDir = Path.GetDirectoryName(Application.ExecutablePath);
+                        string rpcs3Elf = null, rpcs3Reason = "";
+                        ok = Rpcs3Decrypt.TryDecrypt(bin, Path.Combine(exeDir, ".decrypt"),
+                            Path.Combine(exeDir, "payload", "rpcs3"), out rpcs3Elf, out rpcs3Reason);
+                        if (ok)
+                        {
+                            File.Copy(rpcs3Elf, target, true);
+                            reason = "RPCS3 --decrypt";
+                        }
+                        else
+                        {
+                            reason = reason + " " + rpcs3Reason;
+                        }
+                    }
+                    if (!ok)
+                        throw new Exception("Could not extract EBOOT.elf: " + reason);
+                    log.AppendLine("ELF extracted: " + target + " (" + reason + ")");
+                }
+            }
+            finally
+            {
+                Iso.Unmount(o.Iso, already);
+            }
+        }
+
     }
 
     internal sealed class Options
@@ -140,8 +143,7 @@ namespace BakuganInstaller
                 else if (a == "--check-iso") { o.CheckIso = true; o.Silent = true; }
             }
             if (string.IsNullOrEmpty(o.Dir))
-                o.Dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                                     "Programs", "BakuganRecomp");
+                o.Dir = Installer.DefaultInstallDirectory();
             if (string.IsNullOrEmpty(o.Eboot))
             {
                 string exeDir = Path.GetDirectoryName(Application.ExecutablePath);
@@ -213,7 +215,8 @@ namespace BakuganInstaller
 
     internal static class Installer
     {
-        private const string ReleaseVersion = "1.2.0";
+        private const string ReleaseVersion = ReleaseMetadata.Version;
+        private const string UninstallKey = @"Software\Microsoft\Windows\CurrentVersion\Uninstall\BakuganRecomp";
         private static long totalBytes;
         private static long copiedBytes;
         private static Action<int, string> report;
@@ -239,6 +242,32 @@ namespace BakuganInstaller
             {
                 return false;
             }
+        }
+
+        public static bool CanReuseGame(string dir)
+        {
+            if (string.IsNullOrWhiteSpace(dir)) return false;
+            string game = Path.Combine(dir, "game", "PS3_GAME");
+            return File.Exists(Path.Combine(dir, "BakuganLauncher.exe")) &&
+                   File.Exists(Path.Combine(game, "PARAM.SFO")) &&
+                   IsValidElf(Path.Combine(game, "USRDIR", "EBOOT.elf"));
+        }
+
+        public static string DefaultInstallDirectory()
+        {
+            try
+            {
+                using (RegistryKey key = Registry.CurrentUser.OpenSubKey(UninstallKey))
+                {
+                    string installed = key == null ? null : key.GetValue("InstallLocation") as string;
+                    string reason;
+                    if (!IsUnsafeInstallDirectory(installed, out reason) && CanReuseGame(installed))
+                        return installed;
+                }
+            }
+            catch { /* A stale registration must not block opening the installer. */ }
+            return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                                "Programs", "BakuganRecomp");
         }
 
         public static bool IsUnsafeInstallDirectory(string dir, out string reason)
@@ -287,6 +316,50 @@ namespace BakuganInstaller
 
         public static void Run(Options o, StringBuilder log, Action<int, string> progress)
         {
+            InstallFiles(o, log, progress);
+            Status(98, Loc.T("Creando accesos directos...", "Creating shortcuts..."));
+            string launcher = Path.Combine(o.Dir, "BakuganLauncher.exe");
+            string uninstaller = Path.Combine(o.Dir, "Uninstall.exe");
+            if (o.Desktop) Shortcut.Create(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory),
+                                           launcher, o.Dir, "Bakugan Battle Brawlers",
+                                           Loc.T("Bakugan: Battle Brawlers", "Bakugan: Battle Brawlers"));
+            string menuDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Programs),
+                                          "Bakugan Battle Brawlers");
+            if (o.StartMenu)
+            {
+                Shortcut.Create(menuDir, launcher, o.Dir, "Bakugan Battle Brawlers",
+                                Loc.T("Bakugan: Battle Brawlers", "Bakugan: Battle Brawlers"));
+                if (File.Exists(uninstaller))
+                    Shortcut.Create(menuDir, uninstaller, o.Dir,
+                                    Loc.T("Desinstalar Bakugan", "Uninstall Bakugan"),
+                                    Loc.T("Desinstalar Bakugan: Battle Brawlers", "Uninstall Bakugan: Battle Brawlers"));
+            }
+
+            try
+            {
+                using (RegistryKey k = Registry.CurrentUser.CreateSubKey(UninstallKey))
+                {
+                    if (k != null)
+                    {
+                        k.SetValue("DisplayName", "Bakugan: Battle Brawlers");
+                        k.SetValue("DisplayVersion", ReleaseVersion);
+                        k.SetValue("Publisher", "Bakugan Recomp Team");
+                        k.SetValue("InstallLocation", o.Dir);
+                        k.SetValue("DisplayIcon", launcher);
+                        k.SetValue("UninstallString", "\"" + uninstaller + "\"");
+                        k.SetValue("NoModify", 1, RegistryValueKind.DWord);
+                        k.SetValue("NoRepair", 1, RegistryValueKind.DWord);
+                    }
+                }
+            }
+            catch { /* a locked registry must not fail the installation */ }
+
+            Status(100, Loc.T("Instalación completada.", "Installation completed."));
+            log.AppendLine("desktop=" + o.Desktop + " startmenu=" + o.StartMenu);
+        }
+
+        internal static void InstallFiles(Options o, StringBuilder log, Action<int, string> progress)
+        {
             report = progress;
             string unsafeReason;
             if (IsUnsafeInstallDirectory(o.Dir, out unsafeReason))
@@ -304,6 +377,11 @@ namespace BakuganInstaller
                     "(Bakugan-Battle-Brawlers-Recomp-" + ReleaseVersion + "-win64.zip) into a folder before running BakuganSetup.exe."));
             }
 
+            bool reuseGame = string.IsNullOrWhiteSpace(o.Iso) && CanReuseGame(o.Dir);
+            if (!reuseGame && !File.Exists(o.Iso))
+                throw new Exception(Loc.T("Selecciona una ISO válida para instalar o reparar el juego.",
+                                          "Select a valid ISO to install or repair the game."));
+
             Directory.CreateDirectory(o.Dir);
             Status(0, Loc.T("Copiando archivos del programa...", "Copying application files..."));
             totalBytes = 0; copiedBytes = 0;
@@ -311,6 +389,12 @@ namespace BakuganInstaller
             CopyTree(payload, o.Dir, 0, 30);
             try { File.Delete(Path.Combine(o.Dir, "shadercache", "fp_v2.cache")); } catch { }
             log.AppendLine("payload copied to " + o.Dir);
+
+            if (reuseGame)
+            {
+                log.AppendLine("existing game data reused");
+                return;
+            }
 
             bool already;
             string letter = Iso.Mount(o.Iso, out already);
@@ -336,7 +420,8 @@ namespace BakuganInstaller
                 CopyTree(source, Path.Combine(gameDir, "PS3_GAME"), 30, 95);
 
                 string sfb = Path.Combine(letter + ":\\", "PS3_DISC.SFB");
-                if (File.Exists(sfb)) File.Copy(sfb, Path.Combine(gameDir, "PS3_DISC.SFB"), true);
+                if (File.Exists(sfb))
+                    CopyInstallFile(sfb, Path.Combine(gameDir, "PS3_DISC.SFB"), 95, 95);
 
                 /* Retail discs carry an encrypted EBOOT.BIN. The port boots the
                  * decrypted ELF, which is extracted automatically using RPCS3 or
@@ -346,11 +431,11 @@ namespace BakuganInstaller
                 string reason = "";
                 if (!IsValidElf(installedElf))
                 {
-                    try { if (File.Exists(installedElf)) File.Delete(installedElf); } catch { }
+                    MakeInstallFileWritable(installedElf);
                     bool extracted = false;
                     if (IsValidElf(sourceElf))
                     {
-                        File.Copy(sourceElf, installedElf, true);
+                        CopyInstallFile(sourceElf, installedElf, 95, 95);
                         extracted = true;
                         log.AppendLine("EBOOT.elf copied from decrypted ISO");
                     }
@@ -373,7 +458,7 @@ namespace BakuganInstaller
                                                                 out rpcs3Elf, out rpcs3Reason);
                             if (extracted && IsValidElf(rpcs3Elf))
                             {
-                                File.Copy(rpcs3Elf, installedElf, true);
+                                CopyInstallFile(rpcs3Elf, installedElf, 96, 96);
                                 try { Directory.Delete(workDir, true); } catch { }
                                 log.AppendLine("EBOOT.elf extracted with RPCS3: " + rpcs3Reason);
                             }
@@ -408,47 +493,6 @@ namespace BakuganInstaller
             {
                 Iso.Unmount(o.Iso, already);
             }
-
-            Status(98, Loc.T("Creando accesos directos...", "Creating shortcuts..."));
-            string launcher = Path.Combine(o.Dir, "BakuganLauncher.exe");
-            string uninstaller = Path.Combine(o.Dir, "Uninstall.exe");
-            if (o.Desktop) Shortcut.Create(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory),
-                                           launcher, o.Dir, "Bakugan Battle Brawlers",
-                                           Loc.T("Bakugan: Battle Brawlers", "Bakugan: Battle Brawlers"));
-            string menuDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Programs),
-                                          "Bakugan Battle Brawlers");
-            if (o.StartMenu)
-            {
-                Shortcut.Create(menuDir, launcher, o.Dir, "Bakugan Battle Brawlers",
-                                Loc.T("Bakugan: Battle Brawlers", "Bakugan: Battle Brawlers"));
-                if (File.Exists(uninstaller))
-                    Shortcut.Create(menuDir, uninstaller, o.Dir,
-                                    Loc.T("Desinstalar Bakugan", "Uninstall Bakugan"),
-                                    Loc.T("Desinstalar Bakugan: Battle Brawlers", "Uninstall Bakugan: Battle Brawlers"));
-            }
-
-            try
-            {
-                using (RegistryKey k = Registry.CurrentUser.CreateSubKey(
-                           @"Software\Microsoft\Windows\CurrentVersion\Uninstall\BakuganRecomp"))
-                {
-                    if (k != null)
-                    {
-                        k.SetValue("DisplayName", "Bakugan: Battle Brawlers");
-                        k.SetValue("DisplayVersion", ReleaseVersion);
-                        k.SetValue("Publisher", "Bakugan Recomp Team");
-                        k.SetValue("InstallLocation", o.Dir);
-                        k.SetValue("DisplayIcon", launcher);
-                        k.SetValue("UninstallString", "\"" + uninstaller + "\"");
-                        k.SetValue("NoModify", 1, RegistryValueKind.DWord);
-                        k.SetValue("NoRepair", 1, RegistryValueKind.DWord);
-                    }
-                }
-            }
-            catch { /* a locked registry must not fail the installation */ }
-
-            Status(100, Loc.T("Instalación completada.", "Installation completed."));
-            log.AppendLine("desktop=" + o.Desktop + " startmenu=" + o.StartMenu);
         }
 
         public static void CountTree(string path)
@@ -461,10 +505,25 @@ namespace BakuganInstaller
         {
             Directory.CreateDirectory(dst);
             foreach (var file in Directory.GetFiles(src))
+                CopyInstallFile(file, Path.Combine(dst, Path.GetFileName(file)), fromPercent, toPercent);
+            foreach (var dir in Directory.GetDirectories(src))
+                CopyTree(dir, Path.Combine(dst, Path.GetFileName(dir)), fromPercent, toPercent);
+        }
+
+        private static void MakeInstallFileWritable(string path)
+        {
+            if (!File.Exists(path)) return;
+            FileAttributes attributes = File.GetAttributes(path);
+            if ((attributes & FileAttributes.ReadOnly) != 0)
+                File.SetAttributes(path, attributes & ~FileAttributes.ReadOnly);
+        }
+
+        private static void CopyInstallFile(string source, string target, int fromPercent, int toPercent)
+        {
+            // Prior installers copied PS3_DISC.SFB directly from the ISO along with its read-only bit.
+            using (var input = new FileStream(source, FileMode.Open, FileAccess.Read, FileShare.Read))
             {
-                string target = Path.Combine(dst, Path.GetFileName(file));
-                long length = new FileInfo(file).Length;
-                using (var input = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.Read))
+                MakeInstallFileWritable(target);
                 using (var output = new FileStream(target, FileMode.Create, FileAccess.Write, FileShare.None))
                 {
                     var buffer = new byte[1024 * 1024];
@@ -476,15 +535,11 @@ namespace BakuganInstaller
                         if (totalBytes > 0)
                         {
                             int pct = fromPercent + (int)((toPercent - fromPercent) * copiedBytes / totalBytes);
-                            if (pct > toPercent) pct = toPercent;
-                            Status(pct, Loc.T("Copiando ", "Copying ") + Path.GetFileName(file) + "...");
+                            Status(Math.Min(pct, toPercent), Loc.T("Copiando ", "Copying ") + Path.GetFileName(source) + "...");
                         }
                     }
                 }
-                if (length == 0) Status(fromPercent, Loc.T("Copiando ", "Copying ") + Path.GetFileName(file) + "...");
             }
-            foreach (var dir in Directory.GetDirectories(src))
-                CopyTree(dir, Path.Combine(dst, Path.GetFileName(dir)), fromPercent, toPercent);
         }
 
         private static void Status(int percent, string text)
@@ -538,8 +593,8 @@ namespace BakuganInstaller
 
             var l1 = new Label
             {
-                Text = Loc.T("Imagen ISO del juego (Edición europea BLES00758):",
-                             "Game ISO Image (European edition BLES00758):"),
+                Text = Loc.T("ISO del juego (BLES00758). Opcional al actualizar:",
+                             "Game ISO (BLES00758). Optional when updating:"),
                 Location = new Point(18, 18),
                 AutoSize = true
             };
@@ -558,8 +613,7 @@ namespace BakuganInstaller
             };
             dir.Location = new Point(18, 110);
             dir.Width = 430;
-            dir.Text = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                                    "Programs", "BakuganRecomp");
+            dir.Text = Installer.DefaultInstallDirectory();
             browseDir.Text = Loc.T("Examinar...", "Browse...");
             browseDir.Location = new Point(456, 108);
             browseDir.Width = 86;
@@ -575,7 +629,7 @@ namespace BakuganInstaller
             startMenu.AutoSize = true;
             startMenu.Checked = true;
 
-            install.Text = Loc.T("Instalar", "Install");
+            install.Text = Loc.T("Instalar / Actualizar", "Install / Update");
             install.Location = new Point(388, 276);
             install.Width = 154;
             install.Height = 34;
@@ -648,21 +702,22 @@ namespace BakuganInstaller
 
         private void BeginInstall()
         {
-            if (!File.Exists(iso.Text))
-            {
-                MessageBox.Show(this,
-                                Loc.T("Selecciona un archivo ISO válido de Bakugan.",
-                                      "Please select a valid Bakugan ISO file."),
-                                Loc.T("Falta la ISO", "Missing ISO"),
-                                MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                return;
-            }
             string unsafeReason;
             if (Installer.IsUnsafeInstallDirectory(dir.Text, out unsafeReason))
             {
                 MessageBox.Show(this,
                                 unsafeReason,
                                 Loc.T("Carpeta no permitida", "Disallowed Folder"),
+                                MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+            bool emptyIso = string.IsNullOrWhiteSpace(iso.Text);
+            if (emptyIso ? !Installer.CanReuseGame(dir.Text) : !File.Exists(iso.Text))
+            {
+                MessageBox.Show(this,
+                                Loc.T("Selecciona una ISO válida o deja el campo vacío para actualizar una instalación existente.",
+                                      "Select a valid ISO or leave it blank to update an existing installation."),
+                                Loc.T("Falta la ISO", "Missing ISO"),
                                 MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return;
             }

@@ -1,7 +1,7 @@
 Bakugan: Battle Brawlers (BLES00758) - Port nativo para Windows x64
 ====================================================================
 
-Versión 1.2.0 - Windows x64
+Versión 1.3.5 - Windows x64
 
 QUÉ ES
 ------
@@ -30,7 +30,19 @@ incluye los shaders de FSR1 y la biblioteca SDL3.
 
 Al terminar, abre "Bakugan: Battle Brawlers" desde el escritorio, el menú Inicio
 o BakuganLauncher.exe de la carpeta instalada, y pulsa Jugar. El launcher se
-cierra solo al iniciar el juego.
+cierra solo al iniciar el juego. Para usarlo en modo portable, abre
+payload\BakuganLauncher.exe con la carpeta payload completa extraída.
+
+El juego funciona a 30 FPS nativos. FSR 3.1 es opcional y puede presentar
+hasta 60 FPS mediante interpolación en combates compatibles.
+
+ACTUALIZAR DESDE 1.2.0
+----------------------
+Cierra el juego y el launcher. Abre el nuevo BakuganSetup.exe, selecciona
+la carpeta donde ya está instalado el juego y deja la ISO en blanco.
+Pulsa Instalar / Actualizar. El instalador reutiliza los datos del juego
+y conserva las partidas y los ajustes. Para reparar los datos del juego,
+selecciona también tu ISO.
 
 Si el juego se cierra, envía `%LOCALAPPDATA%\BakuganRecomp\BakuganRecomp.log`.
 
