@@ -15,10 +15,15 @@ def main():
         contents = (
             "[Player]\nVersion=1\nLanguage=es\n[Graphics]\n"
             "Output=1080p\nFSR=fsr1\nAAMode=smaa\nSharpness=0.8\nAnisotropy=8\n"
-            "Window=windowed\nFPS=30\n{frame_gen}[Keyboard]\n14=key:66\n")
-        for frame_gen, overrides, expected_frame_gen in (
+            "Window=windowed\n{graphics}[Keyboard]\n14=key:66\n")
+        for graphics, overrides, expected_frame_gen in (
             ("", {}, "off"),
-            ("frame_gen=fsr3\n", {}, "fsr3"),
+            ("FPS=60\n", {}, "off"),
+            ("FPS=120\nframe_gen=fsr3\n", {}, "fsr3"),
+            ("FPS=60\n", {"PS3_FPS_CAP": "90"}, "off"),
+            ("FPS=invalid\n", {}, "off"),
+            ("frame_gen=fsr3\ndisplay_mode=fullscreen\n", {}, "fsr3"),
+            ("display_mode=borderless\n", {"PS3_WINDOW_MODE": "windowed"}, "off"),
             ("frame_gen=fsr3\n", {"PS3_FRAME_GEN": "off", "PS3_OUTPUT": "720p", "PS3_FSR": "0",
                                   "PS3_AA": "off", "PS3_FSR_SHARPNESS": "0.25", "PS3_ANISO": "4",
                                   "PS3_LANG": "de"}, "off"),
@@ -26,7 +31,7 @@ def main():
             ("frame_gen=fsr3\n", {"PS3_FRAME_GEN": "invalid"}, "fsr3"),
             ("frame_gen=invalid\n", {"PS3_FRAME_GEN": "invalid"}, "off"),
         ):
-            config.write_text(contents.format(frame_gen=frame_gen), encoding="ascii")
+            config.write_text(contents.format(graphics=graphics), encoding="ascii")
             report_path = work / "boot.txt"
             report_path.unlink(missing_ok=True)
             env = {k: v for k, v in os.environ.items()
@@ -41,6 +46,8 @@ def main():
                           report_path.read_text().splitlines() if "=" in line)
             expected = dict(PS3_OUTPUT="1080p", PS3_FSR="fsr1", PS3_AA="smaa", PS3_LANG="es",
                             PS3_ANISO="8", PS3_WINDOW_MODE="windowed", PS3_FPS_CAP="30")
+            if "display_mode=fullscreen" in graphics:
+                expected["PS3_WINDOW_MODE"] = "fullscreen"
             expected.update(overrides)
             expected["PS3_FRAME_GEN"] = expected_frame_gen
             for key, value in expected.items():

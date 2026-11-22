@@ -7,11 +7,15 @@ rem
 rem Disc data goes in game\PS3_GAME; settings and pad mapping live in
 rem %LOCALAPPDATA%\BakuganRecomp\player.ini.
 setlocal
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0tools\play.ps1" -Root "%~dp0."
+if /i "%~1"=="pause-fsr3" (
+    powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0tools\play.ps1" -Root "%~dp0." -PauseFsr3
+) else (
+    powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0tools\play.ps1" -Root "%~dp0."
+)
 set "RC=%ERRORLEVEL%"
 if not "%RC%"=="0" (
     echo.
-    echo El juego termino con codigo %RC%. Logs en %LOCALAPPDATA%\BakuganRecomp.
+    echo El juego termino con codigo %RC%.
     pause
 )
 exit /b %RC%

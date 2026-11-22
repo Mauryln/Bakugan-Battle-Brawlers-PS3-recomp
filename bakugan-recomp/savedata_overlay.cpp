@@ -18,11 +18,14 @@
 #define NOMINMAX
 #include <Windows.h>
 #include "input_bridge.h"
+#include "frame_generation.h"
+#include "output_upscale.h"
 #include <windowsx.h>
 #include <d3d12.h>
 #include <d3dcompiler.h>
 #include <xinput.h>
 #include <gdiplus.h>
+#include <wrl/client.h>
 #include "savedata_gdi_cache.h"
 
 #include <algorithm>
@@ -32,6 +35,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <memory>
 #include <string>
 
 #include "cellSaveData.h"
@@ -42,6 +46,7 @@
 #pragma comment(lib, "xinput.lib")
 
 using namespace Gdiplus;
+using Microsoft::WRL::ComPtr;
 
 namespace {
 
@@ -53,6 +58,20 @@ constexpr float kBaseHeight    = 720.0f;
  * Shared state
  * -----------------------------------------------------------------------*/
 
+constexpr UINT PICKER_SRV = 0;
+constexpr UINT DIAGNOSTICS_SRV = 1;
+constexpr UINT HUD_WIDTH = 352;
+constexpr UINT HUD_HEIGHT = 116;
+
+struct OverlayCanvas {
+    ComPtr<ID3D12Resource> texture, upload;
+    std::unique_ptr<Bitmap> bitmap;
+    uint8_t* pixels = nullptr;
+    UINT width = 0, height = 0, pitch = 0;
+    D3D12_RESOURCE_STATES state = D3D12_RESOURCE_STATE_COPY_DEST;
+    bool dirty = false;
+};
+
 struct OverlayState {
     CRITICAL_SECTION lock;
     HANDLE done;
@@ -63,7 +82,6 @@ struct OverlayState {
     int count;
     int sel;
     int dirty;              /* canvas must be redrawn */
-    int upload_dirty;       /* canvas pixels must be copied to the texture */
     int icons_dirty;        /* reload slot icons for this session */
     int pad_primed;
     int result;             /* 1 = picked, 0 = cancelled */
@@ -78,25 +96,20 @@ struct OverlayState {
     ID3D12PipelineState* pso;
     ID3D12DescriptorHeap* srv_heap;
     ID3D12DescriptorHeap* rtv_heap;
-    ID3D12Resource* texture;
-    ID3D12Resource* upload;
-    uint8_t* upload_ptr;
-    UINT upload_pitch;
-    UINT tex_w, tex_h;
-    D3D12_RESOURCE_STATES tex_state;
-    ID3D12Resource* rtvs[4];
-    int rtv_count;
+    OverlayCanvas picker, diagnostics;
+    ULONGLONG next_hud_update;
 
     /* GDI+ */
     ULONG_PTR gdiplus_token;
     int gdiplus_ready;
-    Bitmap* canvas;
     Image* backdrop;
     Image* disc_icon;
     Image* icons[kMaxSlots];
     bakugan::SavedataGdiCache gdi_cache;
 
-    UINT width, height;     /* last output size */
+    rsx_d3d12_output_rect picker_bounds;
+    UINT output_width, output_height;
+    bool picker_enabled;
     std::wstring vfs_root;
 } g;
 
@@ -226,16 +239,10 @@ void draw_icon(Graphics& gr, Image* img, const RectF& box, bool border)
     }
 }
 
-void render_canvas(UINT width, UINT height)
+void render_picker(OverlayCanvas& canvas)
 {
-    if (!g.gdiplus_ready) return;
-    if (!g.canvas || g.canvas->GetWidth() != width || g.canvas->GetHeight() != height) {
-        delete g.canvas;
-        g.canvas = new Bitmap(width, height, PixelFormat32bppPARGB);
-    }
-    if (!g.canvas || g.canvas->GetLastStatus() != Ok) return;
-
-    Graphics gr(g.canvas);
+    const UINT width = canvas.width, height = canvas.height;
+    Graphics gr(canvas.bitmap.get());
     gr.SetSmoothingMode(SmoothingModeAntiAlias);
     gr.SetInterpolationMode(InterpolationModeHighQualityBicubic);
     gr.SetPixelOffsetMode(PixelOffsetModeHighQuality);
@@ -367,24 +374,53 @@ void render_canvas(UINT width, UINT height)
                 L"CANCEL", rgba(255, 46, 56, 66),
                 rgba(255, 255, 240, 220), 18 * s);
 
-    /* Copy the premultiplied BGRA canvas into the mapped upload buffer. */
-    if (g.upload_ptr) {
-        BitmapData bd;
-        Rect lock(0, 0, static_cast<INT>(width), static_cast<INT>(height));
-        if (g.canvas->LockBits(&lock, ImageLockModeRead, PixelFormat32bppPARGB, &bd) == Ok) {
-            const auto* src = static_cast<const uint8_t*>(bd.Scan0);
-            const int stride = bd.Stride;
-            for (UINT y = 0; y < height; y++) {
-                const uint8_t* row = src + static_cast<ptrdiff_t>(y) * stride;
-                memcpy(g.upload_ptr + static_cast<size_t>(y) * g.upload_pitch,
-                       row, static_cast<size_t>(width) * 4);
-            }
-            g.canvas->UnlockBits(&bd);
-            g.upload_dirty = 1;
-        } else {
-            g.canvas->UnlockBits(&bd);
-        }
-    }
+}
+
+bool upload_canvas(OverlayCanvas& canvas)
+{
+    BitmapData data{};
+    const Rect rect(0, 0, static_cast<INT>(canvas.width), static_cast<INT>(canvas.height));
+    if (canvas.bitmap->LockBits(&rect, ImageLockModeRead, PixelFormat32bppPARGB, &data) != Ok)
+        return false;
+    const auto* source = static_cast<const uint8_t*>(data.Scan0);
+    for (UINT row = 0; row < canvas.height; ++row)
+        memcpy(canvas.pixels + static_cast<size_t>(row) * canvas.pitch,
+               source + static_cast<ptrdiff_t>(row) * data.Stride, static_cast<size_t>(canvas.width) * 4);
+    canvas.bitmap->UnlockBits(&data);
+    canvas.dirty = true;
+    return true;
+}
+
+void render_diagnostics(OverlayCanvas& canvas, const rsx_d3d12_overlay_frame& frame)
+{
+    Graphics gr(canvas.bitmap.get());
+    gr.Clear(rgba(220, 10, 14, 22));
+    gr.SetTextRenderingHint(TextRenderingHintAntiAliasGridFit);
+    const bool fg = bakugan_frame_generation_active();
+    const char* cap = std::getenv("PS3_FPS_CAP");
+    const int target = cap ? std::atoi(cap) : 0;
+    std::wstring pacing = L"off";
+    if (fg)
+        pacing = L"FG / 30 native";
+    else if (cap && (!_stricmp(cap, "monitor") || !_stricmp(cap, "auto")))
+        pacing = L"monitor cap";
+    else if (target > 0 && target <= 240)
+        pacing = std::to_wstring(target) + L" FPS cap";
+
+    const auto on_off = [](bool enabled) { return enabled ? L"ON" : L"OFF"; };
+    wchar_t lines[5][96]{};
+    swprintf(lines[0], 96, L"Presented %.1f FPS   Native %.1f FPS", frame.presented_fps, frame.native_fps);
+    swprintf(lines[1], 96, L"Frame %.1f ms   FSR 3.1 FG %ls", frame.frame_ms, on_off(fg));
+    swprintf(lines[2], 96, L"VSync %ls   Pacing %ls", on_off(frame.vsync != 0), pacing.c_str());
+    swprintf(lines[3], 96, L"%ux%u \u2192 %ux%u   %hs",
+             frame.internal_width, frame.internal_height, frame.output_width, frame.output_height, frame.display_mode);
+    swprintf(lines[4], 96, L"SMAA %ls   RCAS %ls   Sixaxis %ls",
+             on_off(bakugan_output_smaa_active()), on_off(bakugan_output_rcas_active()),
+             on_off(ps3_pad_sensor_active(0) != 0));
+
+    for (int i = 0; i < 5; ++i)
+        draw_text(gr, lines[i], RectF(10, 8.0f + 20.0f * i, HUD_WIDTH - 20.0f, 20),
+                  14, i == 0, rgba(255, 241, 245, 250));
 }
 
 /* ---------------------------------------------------------------------------
@@ -504,7 +540,7 @@ bool build_resources(void* device_ptr)
     }
 
     D3D12_DESCRIPTOR_HEAP_DESC heap{};
-    heap.NumDescriptors = 1;
+    heap.NumDescriptors = 2;
     heap.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
     heap.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     if (FAILED(device->CreateDescriptorHeap(&heap, IID_PPV_ARGS(&g.srv_heap)))) {
@@ -512,28 +548,25 @@ bool build_resources(void* device_ptr)
         return false;
     }
 
-    heap.NumDescriptors = 4;
+    heap.NumDescriptors = 1;
     heap.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
     heap.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
     if (FAILED(device->CreateDescriptorHeap(&heap, IID_PPV_ARGS(&g.rtv_heap)))) {
         fprintf(stderr, "[savedata-ui] RTV heap creation failed\n");
         return false;
     }
-    g.rtv_count = 0;
 
     return true;
 }
 
-bool create_canvas_upload(UINT width, UINT height)
+bool create_canvas_upload(OverlayCanvas& canvas, UINT width, UINT height, UINT index)
 {
-    if (g.texture && g.tex_w == width && g.tex_h == height) return true;
-    if (g.texture) { g.texture->Release(); g.texture = nullptr; }
-    if (g.upload) {
-        g.upload->Unmap(0, nullptr);
-        g.upload->Release();
-        g.upload = nullptr;
-        g.upload_ptr = nullptr;
-    }
+    if (canvas.texture && canvas.width == width && canvas.height == height) return true;
+    OverlayCanvas next;
+    next.width = width;
+    next.height = height;
+    next.bitmap = std::make_unique<Bitmap>(width, height, PixelFormat32bppPARGB);
+    if (next.bitmap->GetLastStatus() != Ok) return false;
 
     D3D12_HEAP_PROPERTIES def{};
     def.Type = D3D12_HEAP_TYPE_DEFAULT;
@@ -546,7 +579,7 @@ bool create_canvas_upload(UINT width, UINT height)
     td.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
     td.SampleDesc.Count = 1;
     if (FAILED(g.device->CreateCommittedResource(&def, D3D12_HEAP_FLAG_NONE, &td,
-            D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&g.texture)))) {
+            D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&next.texture)))) {
         fprintf(stderr, "[savedata-ui] canvas texture %ux%u creation failed\n", width, height);
         return false;
     }
@@ -555,24 +588,24 @@ bool create_canvas_upload(UINT width, UINT height)
     up.Type = D3D12_HEAP_TYPE_UPLOAD;
     D3D12_RESOURCE_DESC bd{};
     bd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-    g.upload_pitch = (width * 4 + 255) & ~255u;
-    bd.Width = static_cast<UINT64>(g.upload_pitch) * height;
+    next.pitch = (width * 4 + 255) & ~255u;
+    bd.Width = static_cast<UINT64>(next.pitch) * height;
     bd.Height = 1;
     bd.DepthOrArraySize = 1;
     bd.MipLevels = 1;
     bd.SampleDesc.Count = 1;   /* required for buffers; {} leaves it zero */
     bd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
     if (FAILED(g.device->CreateCommittedResource(&up, D3D12_HEAP_FLAG_NONE, &bd,
-            D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&g.upload)))) {
+            D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&next.upload)))) {
         fprintf(stderr, "[savedata-ui] canvas upload buffer creation failed\n");
         return false;
     }
     void* mapped = nullptr;
-    if (FAILED(g.upload->Map(0, nullptr, &mapped)) || !mapped) {
+    if (FAILED(next.upload->Map(0, nullptr, &mapped)) || !mapped) {
         fprintf(stderr, "[savedata-ui] canvas upload buffer map failed\n");
         return false;
     }
-    g.upload_ptr = static_cast<uint8_t*>(mapped);
+    next.pixels = static_cast<uint8_t*>(mapped);
 
     D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
     srv.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
@@ -580,31 +613,11 @@ bool create_canvas_upload(UINT width, UINT height)
     srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
     srv.Texture2D.MipLevels = 1;
     D3D12_CPU_DESCRIPTOR_HANDLE cpu = g.srv_heap->GetCPUDescriptorHandleForHeapStart();
-    g.device->CreateShaderResourceView(g.texture, &srv, cpu);
-
-    g.tex_w = width;
-    g.tex_h = height;
-    g.tex_state = D3D12_RESOURCE_STATE_COPY_DEST;
-    g.dirty = 1;
-    g.upload_dirty = 1;
-    return true;
-}
-
-D3D12_CPU_DESCRIPTOR_HANDLE rtv_for(ID3D12Resource* target)
-{
-    for (int i = 0; i < g.rtv_count; i++)
-        if (g.rtvs[i] == target)
-            return { g.rtv_heap->GetCPUDescriptorHandleForHeapStart().ptr +
-                     static_cast<SIZE_T>(i) * g.device->GetDescriptorHandleIncrementSize(
-                         D3D12_DESCRIPTOR_HEAP_TYPE_RTV) };
-    int index = g.rtv_count % 4;
-    if (g.rtv_count < 4) g.rtv_count++;
-    g.rtvs[index] = target;
-    D3D12_CPU_DESCRIPTOR_HANDLE cpu = g.rtv_heap->GetCPUDescriptorHandleForHeapStart();
     cpu.ptr += static_cast<SIZE_T>(index) *
-               g.device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
-    g.device->CreateRenderTargetView(target, nullptr, cpu);
-    return cpu;
+               g.device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+    g.device->CreateShaderResourceView(next.texture.Get(), &srv, cpu);
+    canvas = std::move(next);
+    return true;
 }
 
 void barrier(ID3D12GraphicsCommandList* list, ID3D12Resource* resource,
@@ -623,7 +636,7 @@ void barrier(ID3D12GraphicsCommandList* list, ID3D12Resource* resource,
  * Backend callbacks
  * -----------------------------------------------------------------------*/
 
-int overlay_initialize(void*, void* device, void*, u32, u32, u32 out_w, u32 out_h)
+int overlay_initialize(void*, void* device, void*, u32, u32, u32, u32)
 {
     if (!build_resources(device)) return -1;
 
@@ -634,7 +647,7 @@ int overlay_initialize(void*, void* device, void*, u32, u32, u32 out_w, u32 out_
     const char* vfs = getenv("PS3_VFS_ROOT");
     std::wstring base = g.vfs_root;
     if (base.empty() && vfs && *vfs) base = utf8(vfs);
-    if (!base.empty()) {
+    if (g.picker_enabled && !base.empty()) {
         std::wstring path = base + L"\\PS3_GAME\\PIC1.PNG";
         g.backdrop = Image::FromFile(path.c_str());
         if (!g.backdrop || g.backdrop->GetLastStatus() != Ok) {
@@ -657,15 +670,7 @@ int overlay_initialize(void*, void* device, void*, u32, u32, u32 out_w, u32 out_
         }
     }
 
-    if (!create_canvas_upload(out_w ? out_w : 1280, out_h ? out_h : 720)) {
-        fprintf(stderr, "[savedata-ui] canvas upload setup failed (out=%ux%u)\n", out_w, out_h);
-        return -1;
-    }
-    g.width = g.tex_w;
-    g.height = g.tex_h;
     g.ready = 1;
-    fprintf(stderr, "[savedata-ui] in-game overlay ready (GDI+ canvas %ux%u)%c",
-            g.tex_w, g.tex_h, 10);
     return 0;
 }
 
@@ -739,15 +744,17 @@ HWND overlay_window(void)
 
 int hit_test(int x, int y)
 {
-    if (g.width == 0 || g.height == 0) return -3;
-    const Layout l = make_layout(g.width, g.height, g.count, g.sel);
+    if (!g.picker_bounds.width || !g.picker_bounds.height) return -3;
+    const Layout l = make_layout(g.picker_bounds.width, g.picker_bounds.height, g.count, g.sel);
     float fx = static_cast<float>(x), fy = static_cast<float>(y);
     RECT client{};
     if (HWND hwnd = overlay_window(); hwnd && GetClientRect(hwnd, &client) &&
         client.right > client.left && client.bottom > client.top) {
-        fx = fx * static_cast<float>(g.width) / static_cast<float>(client.right - client.left);
-        fy = fy * static_cast<float>(g.height) / static_cast<float>(client.bottom - client.top);
+        fx = fx * static_cast<float>(g.output_width) / static_cast<float>(client.right - client.left);
+        fy = fy * static_cast<float>(g.output_height) / static_cast<float>(client.bottom - client.top);
     }
+    fx -= static_cast<float>(g.picker_bounds.x);
+    fy -= static_cast<float>(g.picker_bounds.y);
     auto inside = [](const RectF& r, float px, float py) {
         return px >= r.X && px < r.GetRight() && py >= r.Y && py < r.GetBottom();
     };
@@ -864,7 +871,44 @@ void poll_pad(void)
     }
 }
 
-int overlay_record(void*, void* command_list, void* target, u32, u32 width, u32 height)
+void draw_canvas(ID3D12GraphicsCommandList* list, OverlayCanvas& canvas, UINT index,
+                 const rsx_d3d12_output_rect& bounds, D3D12_CPU_DESCRIPTOR_HANDLE rtv)
+{
+    if (canvas.dirty) {
+        if (canvas.state != D3D12_RESOURCE_STATE_COPY_DEST)
+            barrier(list, canvas.texture.Get(), canvas.state, D3D12_RESOURCE_STATE_COPY_DEST);
+        D3D12_TEXTURE_COPY_LOCATION dst{};
+        dst.pResource = canvas.texture.Get();
+        dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        D3D12_TEXTURE_COPY_LOCATION src{};
+        src.pResource = canvas.upload.Get();
+        src.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+        src.PlacedFootprint.Footprint = {DXGI_FORMAT_B8G8R8A8_UNORM, canvas.width, canvas.height, 1, canvas.pitch};
+        list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+        barrier(list, canvas.texture.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        canvas.state = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+        canvas.dirty = false;
+    }
+    if (canvas.state != D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE) return;
+
+    list->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
+    const D3D12_VIEWPORT vp{float(bounds.x), float(bounds.y), float(bounds.width), float(bounds.height), 0, 1};
+    const D3D12_RECT sc{LONG(bounds.x), LONG(bounds.y), LONG(bounds.x + bounds.width), LONG(bounds.y + bounds.height)};
+    list->RSSetViewports(1, &vp);
+    list->RSSetScissorRects(1, &sc);
+    ID3D12DescriptorHeap* heaps[] = {g.srv_heap};
+    list->SetDescriptorHeaps(1, heaps);
+    list->SetGraphicsRootSignature(g.root);
+    list->SetPipelineState(g.pso);
+    auto srv = g.srv_heap->GetGPUDescriptorHandleForHeapStart();
+    srv.ptr += static_cast<UINT64>(index) *
+               g.device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+    list->SetGraphicsRootDescriptorTable(0, srv);
+    list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    list->DrawInstanced(3, 1, 0, 0);
+}
+
+int overlay_record(void*, void* command_list, void* target, u32, const rsx_d3d12_overlay_frame* frame)
 {
     static int was_active = 0;
     if (!g.ready) return 0;
@@ -883,65 +927,48 @@ int overlay_record(void*, void* command_list, void* target, u32, u32 width, u32 
         }
     }
     was_active = active;
-    if (!active) return 0;
-
-    poll_pad();
-    if (g.icons_dirty) {
-        load_icons();
-        g.icons_dirty = 0;
-    }
-
-    if (width != g.width || height != g.height) {
-        g.width = width;
-        g.height = height;
-        if (!create_canvas_upload(width, height)) return 0;
-        g.dirty = 1;
-    }
-    if (g.dirty || !g.canvas) {
-        render_canvas(width, height);
-        g.dirty = 0;
-    }
+    if (!frame->diagnostics) g.next_hud_update = 0;
+    if ((!active && !frame->diagnostics) || !g.gdiplus_ready) return 0;
+    const auto& content = frame->content;
+    if (!content.width || !content.height) return 0;
 
     auto* list = static_cast<ID3D12GraphicsCommandList*>(command_list);
     auto* res = static_cast<ID3D12Resource*>(target);
+    const auto rtv = g.rtv_heap->GetCPUDescriptorHandleForHeapStart();
+    g.device->CreateRenderTargetView(res, nullptr, rtv);
 
-    if (g.upload_dirty) {
-        if (g.tex_state != D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE)
-            barrier(list, g.texture, g.tex_state, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-        barrier(list, g.texture, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
-                D3D12_RESOURCE_STATE_COPY_DEST);
-        D3D12_TEXTURE_COPY_LOCATION dst{};
-        dst.pResource = g.texture;
-        dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-        D3D12_TEXTURE_COPY_LOCATION src{};
-        src.pResource = g.upload;
-        src.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
-        src.PlacedFootprint.Offset = 0;
-        src.PlacedFootprint.Footprint.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
-        src.PlacedFootprint.Footprint.Width = width;
-        src.PlacedFootprint.Footprint.Height = height;
-        src.PlacedFootprint.Footprint.Depth = 1;
-        src.PlacedFootprint.Footprint.RowPitch = g.upload_pitch;
-        list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
-        barrier(list, g.texture, D3D12_RESOURCE_STATE_COPY_DEST,
-                D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-        g.tex_state = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
-        g.upload_dirty = 0;
+    if (active) {
+        poll_pad();
+        if (g.icons_dirty) {
+            load_icons();
+            g.icons_dirty = 0;
+        }
+        g.picker_bounds = content;
+        g.output_width = frame->output_width;
+        g.output_height = frame->output_height;
+        const bool size_changed = g.picker.width != content.width || g.picker.height != content.height;
+        if (create_canvas_upload(g.picker, content.width, content.height, PICKER_SRV)) {
+            if (g.dirty || size_changed) {
+                render_picker(g.picker);
+                g.dirty = !upload_canvas(g.picker);
+            }
+            draw_canvas(list, g.picker, PICKER_SRV, content, rtv);
+        }
     }
 
-    D3D12_CPU_DESCRIPTOR_HANDLE rtv = rtv_for(res);
-    list->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
-    D3D12_VIEWPORT vp{0, 0, static_cast<float>(width), static_cast<float>(height), 0, 1};
-    D3D12_RECT sc{0, 0, static_cast<LONG>(width), static_cast<LONG>(height)};
-    list->RSSetViewports(1, &vp);
-    list->RSSetScissorRects(1, &sc);
-    ID3D12DescriptorHeap* heaps[] = {g.srv_heap};
-    list->SetDescriptorHeaps(1, heaps);
-    list->SetGraphicsRootSignature(g.root);
-    list->SetPipelineState(g.pso);
-    list->SetGraphicsRootDescriptorTable(0, g.srv_heap->GetGPUDescriptorHandleForHeapStart());
-    list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-    list->DrawInstanced(3, 1, 0, 0);
+    if (frame->diagnostics && create_canvas_upload(g.diagnostics, HUD_WIDTH, HUD_HEIGHT, DIAGNOSTICS_SRV)) {
+        const ULONGLONG now = GetTickCount64();
+        if (now >= g.next_hud_update) {
+            render_diagnostics(g.diagnostics, *frame);
+            if (upload_canvas(g.diagnostics)) g.next_hud_update = now + 500;
+        }
+        const u32 inset = std::min(12u, std::min(content.width, content.height) / 8);
+        const u32 panel_width = std::min({HUD_WIDTH, content.width - 2 * inset,
+                                        (content.height - 2 * inset) * HUD_WIDTH / HUD_HEIGHT});
+        const rsx_d3d12_output_rect panel{content.x + inset, content.y + inset,
+                                         panel_width, panel_width * HUD_HEIGHT / HUD_WIDTH};
+        draw_canvas(list, g.diagnostics, DIAGNOSTICS_SRV, panel, rtv);
+    }
     return 0;
 }
 
@@ -955,9 +982,8 @@ void overlay_shutdown(void*)
     }
     if (g.disc_icon) { delete g.disc_icon; g.disc_icon = nullptr; }
     if (g.backdrop) { delete g.backdrop; g.backdrop = nullptr; }
-    delete g.canvas; g.canvas = nullptr;
-    if (g.upload) { g.upload->Unmap(0, nullptr); g.upload->Release(); g.upload = nullptr; }
-    if (g.texture) { g.texture->Release(); g.texture = nullptr; }
+    g.picker = {};
+    g.diagnostics = {};
     if (g.srv_heap) { g.srv_heap->Release(); g.srv_heap = nullptr; }
     if (g.rtv_heap) { g.rtv_heap->Release(); g.rtv_heap = nullptr; }
     if (g.pso) { g.pso->Release(); g.pso = nullptr; }
@@ -1039,15 +1065,13 @@ extern "C" bool bakugan_savedata_overlay_active() {
 void bakugan_savedata_overlay_install(const char* vfs_root)
 {
     const char* off = getenv("PS3_SAVEDATA_UI");
-    if (off && *off == '0') {
-        printf("[savedata-ui] disabled by PS3_SAVEDATA_UI=0\n");
-        return;
+    g.picker_enabled = !(off && *off == '0');
+    if (g.picker_enabled) {
+        if (vfs_root && *vfs_root) g.vfs_root = utf8(vfs_root);
+        InitializeCriticalSection(&g.lock);
+        g.done = CreateEventA(nullptr, FALSE, FALSE, nullptr);
+        g.picker_enabled = g.done != nullptr;
     }
-    if (vfs_root && *vfs_root) g.vfs_root = utf8(vfs_root);
-
-    InitializeCriticalSection(&g.lock);
-    g.done = CreateEventA(nullptr, FALSE, FALSE, nullptr);
-    if (!g.done) return;
 
     static rsx_d3d12_host_overlay overlay{};
     overlay.userdata = nullptr;
@@ -1059,6 +1083,8 @@ void bakugan_savedata_overlay_install(const char* vfs_root)
         printf("[savedata-ui] backend does not accept a host overlay\n");
         return;
     }
-    ps3_savedata_set_chooser(pick_slot);
-    printf("[savedata-ui] in-game save picker installed\n");
+    if (g.picker_enabled) {
+        ps3_savedata_set_chooser(pick_slot);
+        printf("[savedata-ui] in-game save picker installed\n");
+    }
 }

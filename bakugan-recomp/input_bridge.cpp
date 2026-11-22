@@ -108,6 +108,14 @@ static void tick_mouse_script(VirtualMouse &vm) {
         vm.cur++;
 }
 
+struct MouseCapture {
+    HWND window = nullptr;
+    POINT cursor{};
+    RECT bounds{};
+    bool borderless = false;
+    bool clipped = false;
+};
+
 void release_cursor_clip(bool &cursor_clipped) {
     if (cursor_clipped) {
         ClipCursor(nullptr);
@@ -116,8 +124,7 @@ void release_cursor_clip(bool &cursor_clipped) {
 }
 
 void update_mouse(HWND hwnd, std::array<float, player::ACTION_COUNT> &v,
-                  HWND &previous_window, POINT &previous_cursor,
-                  bool &cursor_clipped,
+                  MouseCapture &capture,
                   float &mouse_virt_x, float &mouse_virt_y,
                   float &mouse_look_x, float &mouse_look_y,
                   int mouse_buttons, bool &out_in_client,
@@ -143,57 +150,64 @@ void update_mouse(HWND hwnd, std::array<float, player::ACTION_COUNT> &v,
     out_in_client = in_client;
 
     if (vm.active) {
-        release_cursor_clip(cursor_clipped);
+        release_cursor_clip(capture.clipped);
         raw_dx = vm.segs[vm.cur].dx;
         raw_dy = vm.segs[vm.cur].dy;
-        previous_window = nullptr;
+        capture.window = nullptr;
     } else {
         bool overlay_open = bakugan_savedata_overlay_active();
         bool alt_held = (GetAsyncKeyState(VK_MENU) & 0x8000) != 0;
         bool is_borderless = have_rect && ((GetWindowLongPtrW(hwnd, GWL_STYLE) & WS_CAPTION) == 0);
 
         if (!have_rect || !cursor_ok || overlay_open || alt_held) {
-            release_cursor_clip(cursor_clipped);
-            previous_window = nullptr;
+            release_cursor_clip(capture.clipped);
+            capture.window = nullptr;
             player::step_mouse_virtual_stick(mouse_virt_x, mouse_virt_y, 0, 0, sens, dt_sec);
             player::step_mouse_virtual_stick(mouse_look_x, mouse_look_y, 0, 0, sens, dt_sec);
             return;
         }
 
-        // Borderless windows do not constrain the OS cursor across multi-monitor setups;
-        // clip and recenter inside the client rect while gameplay has focus.
+        const bool changed = capture.window != hwnd || capture.borderless != is_borderless ||
+                             !EqualRect(&capture.bounds, &screen_rect);
+        if (changed) {
+            release_cursor_clip(capture.clipped);
+            capture.bounds = screen_rect;
+            capture.borderless = is_borderless;
+        }
+
+        // Keep the cursor on the current monitor and discard movement from a window transition.
         if (is_borderless) {
-            if (ClipCursor(&screen_rect))
-                cursor_clipped = true;
+            if (!capture.clipped && ClipCursor(&screen_rect))
+                capture.clipped = true;
             in_client = true;
             out_in_client = true;
         } else {
-            release_cursor_clip(cursor_clipped);
+            release_cursor_clip(capture.clipped);
             if (!in_client) {
-                previous_window = nullptr;
+                capture.window = nullptr;
                 player::step_mouse_virtual_stick(mouse_virt_x, mouse_virt_y, 0, 0, sens, dt_sec);
                 player::step_mouse_virtual_stick(mouse_look_x, mouse_look_y, 0, 0, sens, dt_sec);
                 return;
             }
         }
 
-        if (previous_window == hwnd) {
-            raw_dx = cursor.x - previous_cursor.x;
-            raw_dy = cursor.y - previous_cursor.y;
+        if (!changed) {
+            raw_dx = cursor.x - capture.cursor.x;
+            raw_dy = cursor.y - capture.cursor.y;
         }
 
         if (is_borderless) {
             POINT center{(screen_rect.left + screen_rect.right) / 2,
                          (screen_rect.top + screen_rect.bottom) / 2};
             if ((cursor.x != center.x || cursor.y != center.y) && SetCursorPos(center.x, center.y)) {
-                previous_cursor = center;
+                capture.cursor = center;
             } else {
-                previous_cursor = cursor;
+                capture.cursor = cursor;
             }
         } else {
-            previous_cursor = cursor;
+            capture.cursor = cursor;
         }
-        previous_window = hwnd;
+        capture.window = hwnd;
     }
 
     bool held = config.mouse_look && (mouse_buttons & 2);
@@ -237,26 +251,10 @@ ps3_host_pad_report sample_gamepad(player::Device *device, bool foreground, ULON
         state.pulse = {};
         state.sixaxis = {};
     }
-    float raw_tilt_x = gp_values[player::R_RIGHT] - gp_values[player::R_LEFT];
-    float raw_tilt_y = gp_values[player::R_DOWN] - gp_values[player::R_UP];
-    float tilt_x = 0.0f, tilt_y = 0.0f;
-    std::array<float, 3> filt_a{0.0f, 9.80665f, 0.0f}, filt_g{};
-    if (foreground && pad) {
-        player::step_sixaxis(state.sixaxis, raw_tilt_x, raw_tilt_y, 0.0f, real, a, g,
-                             config, dt_sec, tilt_x, tilt_y, filt_a, filt_g);
-        if (real) {
-            // Bakugan steers from right-stick / full-range tilt, so mirror smoothed gyro+stick into rx/ry.
-            gp_values[player::R_LEFT] = std::max(0.0f, -tilt_x);
-            gp_values[player::R_RIGHT] = std::max(0.0f, tilt_x);
-            gp_values[player::R_UP] = std::max(0.0f, -tilt_y);
-            gp_values[player::R_DOWN] = std::max(0.0f, tilt_y);
-        }
-    }
-    return to_host_report(player::make_report_with_tilt(
-        gp_values, tilt_x, tilt_y, config.motion, real, filt_a, filt_g, now, state.pulse));
+    return to_host_report(player::make_gamepad_report(
+        gp_values, config, real, a, g, dt_sec, now, state.sixaxis, state.pulse));
 }
-ps3_host_pad_report sample_keyboard(bool foreground, HWND hwnd, POINT &previous_cursor,
-                                    HWND &previous_mouse_window, bool &cursor_clipped,
+ps3_host_pad_report sample_keyboard(bool foreground, HWND hwnd, MouseCapture &capture,
                                     float &mouse_virt_x, float &mouse_virt_y,
                                     float &mouse_look_x, float &mouse_look_y,
                                     player::SixaxisState &kb_sixaxis,
@@ -272,14 +270,14 @@ ps3_host_pad_report sample_keyboard(bool foreground, HWND hwnd, POINT &previous_
                             ((GetAsyncKeyState(VK_MBUTTON) & 0x8000) ? 4 : 0);
         if (vm.active) mouse_buttons = vm.segs[vm.cur].buttons;
         bool in_client = false;
-        update_mouse(hwnd, kb_values, previous_mouse_window, previous_cursor, cursor_clipped,
-                     mouse_virt_x, mouse_virt_y, mouse_look_x, mouse_look_y,
+        update_mouse(hwnd, kb_values, capture,
+                    mouse_virt_x, mouse_virt_y, mouse_look_x, mouse_look_y,
                      mouse_buttons, in_client, vm, dt_sec);
         if (config.mouse_left_cross && (mouse_buttons & 1) && (vm.active || in_client))
             kb_values[player::CROSS] = 1.0f;
     } else {
-        release_cursor_clip(cursor_clipped);
-        previous_mouse_window = nullptr;
+        release_cursor_clip(capture.clipped);
+        capture.window = nullptr;
         mouse_virt_x = 0.0f;
         mouse_virt_y = 0.0f;
         mouse_look_x = 0.0f;
@@ -314,9 +312,7 @@ unsigned __stdcall run(void *) {
     SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     player::MotionPulse kb_pulse;
     player::SixaxisState kb_sixaxis;
-    HWND previous_mouse_window = nullptr;
-    POINT previous_cursor{};
-    bool cursor_clipped = false;
+    MouseCapture capture;
     float mouse_virt_x = 0.0f;
     float mouse_virt_y = 0.0f;
     float mouse_look_x = 0.0f;
@@ -361,15 +357,16 @@ unsigned __stdcall run(void *) {
         }
         HWND hwnd = nullptr;
         bool foreground = focused(hwnd);
-        if (!allow_keyboard || !foreground)
-            release_cursor_clip(cursor_clipped);
+        if (!allow_keyboard || !foreground) {
+            release_cursor_clip(capture.clipped);
+            capture.window = nullptr;
+        }
         std::array<PortState, MAX_PORTS> next_ports{};
         int next_idx = 0;
         std::string state;
         // VirtualMouse scripts always drive port 0 alongside whatever controller is there.
         if (vm.active && allow_keyboard) {
-            ps3_host_pad_report kb = sample_keyboard(foreground, hwnd, previous_cursor,
-                previous_mouse_window, cursor_clipped, mouse_virt_x, mouse_virt_y,
+            ps3_host_pad_report kb = sample_keyboard(foreground, hwnd, capture, mouse_virt_x, mouse_virt_y,
                 mouse_look_x, mouse_look_y, kb_sixaxis, vm, now, dt_sec, kb_pulse);
             next_ports[0].connected = true;
             next_ports[0].report = kb;
@@ -393,8 +390,7 @@ unsigned __stdcall run(void *) {
             if (allow_keyboard && next_idx < MAX_PORTS) {
                 next_ports[next_idx].connected = true;
                 next_ports[next_idx].is_gamepad = false;
-                next_ports[next_idx].report = sample_keyboard(foreground, hwnd, previous_cursor,
-                    previous_mouse_window, cursor_clipped, mouse_virt_x, mouse_virt_y,
+                next_ports[next_idx].report = sample_keyboard(foreground, hwnd, capture, mouse_virt_x, mouse_virt_y,
                     mouse_look_x, mouse_look_y, kb_sixaxis, vm, now, dt_sec, kb_pulse);
                 if (!state.empty()) state += " | ";
                 state += "P" + std::to_string(next_idx + 1) + ": keyboard/mouse";
@@ -414,7 +410,7 @@ unsigned __stdcall run(void *) {
             prior = state;
         }
     }
-    release_cursor_clip(cursor_clipped);
+    release_cursor_clip(capture.clipped);
     pads.close(false);
     return 0;
 }

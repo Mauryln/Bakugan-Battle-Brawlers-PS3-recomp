@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.23)
 project(BakuganRecomp
-    VERSION 0.1.0
+    VERSION 1.3.5
     LANGUAGES C CXX
     DESCRIPTION "Bakugan: Battle Brawlers (BLES00758) native port - ps3recomp"
 )
@@ -249,6 +249,8 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
     ps3recomp_runtime
 )
 
+set_property(SOURCE stubs.cpp APPEND PROPERTY INCLUDE_DIRECTORIES "${PS3RECOMP_DIR}/libs/input")
+
 # The runtime is C++, and on Apple also Objective-C. Letting CMake infer the
 # link language from the generated C would leave the C++ standard library out.
 set_target_properties(${PROJECT_NAME} PROPERTIES LINKER_LANGUAGE CXX)
@@ -292,6 +294,13 @@ if(WIN32)
     target_link_libraries(BakuganLauncher PRIVATE
         user32 comdlg32 gdi32 gdiplus comctl32 "${BAKUGAN_SDL3_LIBRARY}" bakugan_fidelityfx)
     bakugan_copy_sdl3(BakuganLauncher)
+    add_custom_target(bakugan_launcher_assets
+        COMMAND "${CMAKE_COMMAND}" -E copy_directory
+                "${CMAKE_CURRENT_SOURCE_DIR}/assets/launcher"
+                "$<TARGET_FILE_DIR:BakuganLauncher>/assets/launcher"
+        VERBATIM)
+    add_dependencies(BakuganLauncher bakugan_launcher_assets)
+    install(DIRECTORY assets/launcher DESTINATION bin/assets)
     install(TARGETS BakuganLauncher RUNTIME DESTINATION bin)
     install(FILES "${BAKUGAN_SDL3_ROOT}/lib/x64/SDL3.dll" DESTINATION bin)
     install(FILES "${BAKUGAN_SDL3_ROOT}/LICENSE.txt" DESTINATION bin/licenses RENAME SDL3.txt)

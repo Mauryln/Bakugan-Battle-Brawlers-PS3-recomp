@@ -1,159 +1,175 @@
 #define NOMINMAX
 #include "launcher_theme.h"
+#include <commctrl.h>
 #include <objidl.h>
 #include <gdiplus.h>
+#include <algorithm>
 #include <filesystem>
 #include <memory>
-#include <algorithm>
-#include <vector>
 
 namespace launcher_theme {
 namespace {
+constexpr COLORREF BASE = RGB(16, 15, 18);
+constexpr COLORREF PANEL = RGB(28, 25, 29);
+constexpr COLORREF FIELD = RGB(40, 34, 38);
+constexpr COLORREF BORDER = RGB(74, 56, 61);
+constexpr COLORREF TEXT = RGB(247, 241, 236);
+constexpr COLORREF GOLD = RGB(237, 191, 113);
 ULONG_PTR token = 0;
-std::unique_ptr<Gdiplus::Bitmap> background, title;
-HBRUSH panel_brush = nullptr, footer_brush = nullptr;
-bool english = false;
-constexpr COLORREF PANEL = RGB(15, 23, 38), FOOTER = RGB(8, 13, 24), TEXT = RGB(236, 241, 248);
-std::unique_ptr<Gdiplus::Bitmap> load(const std::filesystem::path &path) {
-    auto result = std::unique_ptr<Gdiplus::Bitmap>(Gdiplus::Bitmap::FromFile(path.c_str()));
-    if (!result || result->GetLastStatus() != Gdiplus::Ok)
-        return {};
-    return result;
+std::unique_ptr<Gdiplus::Bitmap> controller;
+HBRUSH panel_brush = nullptr, base_brush = nullptr;
+HWND hovered_button = nullptr;
+
+void fill(HDC dc, const RECT &bounds, COLORREF color) {
+    HBRUSH brush = CreateSolidBrush(color);
+    FillRect(dc, &bounds, brush);
+    DeleteObject(brush);
+}
+
+void draw_text(HDC dc, const wchar_t *text, RECT bounds, int height, int weight, COLORREF color) {
+    HFONT font = CreateFontW(-height, 0, 0, 0, weight, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+                             OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                             DEFAULT_PITCH, L"Segoe UI");
+    auto previous = SelectObject(dc, font);
+    SetTextColor(dc, color);
+    DrawTextW(dc, text, -1, &bounds, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
+    SelectObject(dc, previous);
+    DeleteObject(font);
+}
+
+LRESULT CALLBACK button_subclass(HWND button, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR id, DWORD_PTR) {
+    if (msg == WM_MOUSEMOVE && hovered_button != button) {
+        TRACKMOUSEEVENT tracking{sizeof(tracking), TME_LEAVE, button, 0};
+        if (TrackMouseEvent(&tracking)) {
+            HWND previous = hovered_button;
+            hovered_button = button;
+            if (previous) InvalidateRect(previous, nullptr, FALSE);
+            InvalidateRect(button, nullptr, FALSE);
+        }
+    } else if (msg == WM_MOUSELEAVE && hovered_button == button) {
+        hovered_button = nullptr;
+        InvalidateRect(button, nullptr, FALSE);
+    } else if (msg == WM_NCDESTROY) {
+        if (hovered_button == button) hovered_button = nullptr;
+        RemoveWindowSubclass(button, button_subclass, id);
+    }
+    return DefSubclassProc(button, msg, wp, lp);
 }
 } // namespace
+
 void initialize(const std::wstring &directory) {
     panel_brush = CreateSolidBrush(PANEL);
-    footer_brush = CreateSolidBrush(FOOTER);
+    base_brush = CreateSolidBrush(BASE);
     Gdiplus::GdiplusStartupInput input;
     if (Gdiplus::GdiplusStartup(&token, &input, nullptr) != Gdiplus::Ok) {
         token = 0;
         return;
     }
-    wchar_t env[32768];
-    DWORD n = GetEnvironmentVariableW(L"PS3_VFS_ROOT", env, 32768);
-    std::vector<std::filesystem::path> roots;
-    if (n && n < 32768)
-        roots.emplace_back(env);
-    roots.emplace_back(std::filesystem::path(directory) / L"../../game");
-    roots.emplace_back(std::filesystem::path(directory) / L"game");
-    // Disc art stays in the user's dump; a missing image keeps the native theme usable.
-    for (const auto &root : roots) {
-        if (!background)
-            background = load(root / L"PS3_GAME/PIC1.PNG");
-        if (!title)
-            title = load(root / L"PS3_GAME/ICON0.PNG");
-    }
+    const auto image = std::filesystem::path(directory) / L"assets/launcher/Control.png";
+    controller.reset(Gdiplus::Bitmap::FromFile(image.c_str()));
+    if (controller && controller->GetLastStatus() != Gdiplus::Ok) controller.reset();
 }
-void set_english(bool value) {
-    english = value;
-}
+
+Gdiplus::Bitmap *controller_image() { return controller.get(); }
+
 void shutdown() {
-    background.reset();
-    title.reset();
-    if (token) {
-        Gdiplus::GdiplusShutdown(token);
-        token = 0;
-    }
-    if (panel_brush) {
-        DeleteObject(panel_brush);
-        panel_brush = nullptr;
-    }
-    if (footer_brush) {
-        DeleteObject(footer_brush);
-        footer_brush = nullptr;
-    }
+    controller.reset();
+    if (token) Gdiplus::GdiplusShutdown(token);
+    if (panel_brush) DeleteObject(panel_brush);
+    if (base_brush) DeleteObject(base_brush);
 }
+
 void paint(HWND window, HDC dc) {
-    RECT client;
+    using namespace Gdiplus;
+    RECT client{};
     GetClientRect(window, &client);
     const float scale = std::min(client.right / 1000.f, client.bottom / 800.f);
-    if (scale <= 0)
-        return;
-    FillRect(dc, &client, footer_brush);
+    if (scale <= 0) return;
+    FillRect(dc, &client, base_brush);
+
     if (token) {
-        Gdiplus::Graphics graphics(dc);
+        Graphics graphics(dc);
         graphics.ScaleTransform(scale, scale);
-        graphics.SetInterpolationMode(Gdiplus::InterpolationModeHighQualityBicubic);
-        if (background) {
-            float ratio = std::max(1000.f / background->GetWidth(), 800.f / background->GetHeight());
-            float w = background->GetWidth() * ratio, h = background->GetHeight() * ratio;
-            graphics.DrawImage(background.get(), Gdiplus::RectF((1000 - w) / 2, (800 - h) / 2, w, h));
+        const RectF header(16, 18, 968, 92);
+        LinearGradientBrush header_fill(header, Color(255, 69, 24, 35), Color(255, 24, 21, 25),
+                                        LinearGradientModeHorizontal);
+        SolidBrush panel(Color(255, 28, 25, 29));
+        Pen outline(Color(255, 70, 51, 56));
+        SolidBrush accent(Color(255, 176, 44, 63));
+        graphics.FillRectangle(&header_fill, header);
+        graphics.DrawRectangle(&outline, header);
+        graphics.FillRectangle(&accent, RectF(16, 18, 4, 92));
+        graphics.FillRectangle(&panel, RectF(692, 18, 292, 92));
+        for (const RectF &card : {RectF(16, 128, 302, 582), RectF(332, 128, 652, 582)}) {
+            graphics.FillRectangle(&panel, card);
+            graphics.DrawRectangle(&outline, card);
         }
-        Gdiplus::SolidBrush shade(Gdiplus::Color(150, 4, 8, 18));
-        graphics.FillRectangle(&shade, Gdiplus::RectF(0, 0, 1000, 800));
-        Gdiplus::SolidBrush panel(Gdiplus::Color(255, 15, 23, 38));
-        graphics.FillRectangle(&panel, Gdiplus::RectF(16, 146, 302, 558));
-        graphics.FillRectangle(&panel, Gdiplus::RectF(332, 146, 652, 558));
-        Gdiplus::SolidBrush footer(Gdiplus::Color(255, 8, 13, 24));
-        graphics.FillRectangle(&footer, Gdiplus::RectF(0, 710, 1000, 90));
-        Gdiplus::Pen blue(Gdiplus::Color(255, 55, 83, 116), 1);
-        graphics.DrawRectangle(&blue, Gdiplus::RectF(16, 146, 302, 558));
-        graphics.DrawRectangle(&blue, Gdiplus::RectF(332, 146, 652, 558));
-        Gdiplus::SolidBrush red(Gdiplus::Color(255, 195, 35, 46));
-        graphics.FillRectangle(&red, Gdiplus::RectF(16, 146, 302, 3));
-        graphics.FillRectangle(&red, Gdiplus::RectF(332, 146, 652, 3));
-        if (title)
-            graphics.DrawImage(title.get(), Gdiplus::RectF(24, 16, 174.5f, 96));
-        Gdiplus::SolidBrush plate(Gdiplus::Color(215, 8, 13, 24));
-        graphics.FillRectangle(&plate, Gdiplus::RectF(212, 16, 490, 96));
+        SolidBrush gold(Color(255, 237, 191, 113));
+        graphics.FillRectangle(&gold, RectF(32, 156, 24, 2));
+        graphics.FillRectangle(&gold, RectF(348, 156, 24, 2));
+        graphics.DrawLine(&outline, 16.f, 723.f, 984.f, 723.f);
     }
+
+    const auto area = [scale](int left, int top, int right, int bottom) {
+        return RECT{LONG(left * scale), LONG(top * scale), LONG(right * scale), LONG(bottom * scale)};
+    };
     int saved = SaveDC(dc);
     SetBkMode(dc, TRANSPARENT);
-    SetTextColor(dc, TEXT);
-    HFONT heading =
-        CreateFontW(-(int)(28 * scale), 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
-                    OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
-    SelectObject(dc, heading);
-    RECT text{(LONG)(232 * scale), (LONG)(28 * scale), (LONG)(900 * scale), (LONG)(68 * scale)};
-    DrawTextW(dc, L"BAKUGAN: BATTLE BRAWLERS", -1, &text, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+    draw_text(dc, L"Bakugan: Battle Brawlers", area(36, 32, 676, 74), int(34 * scale), FW_BOLD, TEXT);
+    draw_text(dc, L"v1.3.5", area(38, 74, 676, 99), int(15 * scale), FW_SEMIBOLD, GOLD);
     RestoreDC(dc, saved);
-    DeleteObject(heading);
-    saved = SaveDC(dc);
-    SetBkMode(dc, TRANSPARENT);
-    SetTextColor(dc, RGB(238, 193, 97));
-    HFONT subtitle_font =
-        CreateFontW(-(int)(15 * scale), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
-                    OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
-    SelectObject(dc, subtitle_font);
-    text = {(LONG)(234 * scale), (LONG)(76 * scale), (LONG)(950 * scale), (LONG)(103 * scale)};
-    DrawTextW(dc, english ? L"PREPARE YOUR NEXT BATTLE" : L"PREPARA TU PRÓXIMA BATALLA", -1, &text,
-              DT_LEFT | DT_SINGLELINE);
-    RestoreDC(dc, saved);
-    DeleteObject(subtitle_font);
 }
+
 HBRUSH control_color(HWND, HDC dc, bool footer) {
     SetTextColor(dc, TEXT);
-    SetBkColor(dc, footer ? FOOTER : PANEL);
-    return footer ? footer_brush : panel_brush;
+    SetBkColor(dc, footer ? BASE : PANEL);
+    return footer ? base_brush : panel_brush;
 }
+
+void track_button(HWND button) { SetWindowSubclass(button, button_subclass, 1, 0); }
+
 void draw_button(const DRAWITEMSTRUCT &item, bool primary) {
     int saved = SaveDC(item.hDC);
     const bool pressed = (item.itemState & ODS_SELECTED) != 0;
-    COLORREF color = primary ? (pressed ? RGB(138, 24, 36) : RGB(189, 35, 49))
-                             : (pressed ? RGB(38, 59, 83) : RGB(25, 39, 59));
-    HBRUSH brush = CreateSolidBrush(color);
-    FillRect(item.hDC, &item.rcItem, brush);
-    DeleteObject(brush);
-    brush = CreateSolidBrush((item.itemState & ODS_FOCUS) ? RGB(238, 193, 97) : RGB(67, 88, 116));
-    FrameRect(item.hDC, &item.rcItem, brush);
-    DeleteObject(brush);
+    const bool hovered = item.hwndItem == hovered_button;
+    const bool focused = (item.itemState & ODS_FOCUS) != 0;
+    const COLORREF color = primary ? (pressed ? RGB(129, 27, 43) : hovered ? RGB(201, 55, 77) : RGB(172, 39, 61))
+                                   : (pressed ? RGB(60, 40, 46) : hovered ? RGB(70, 47, 54) : FIELD);
+    fill(item.hDC, item.rcItem, color);
+    HBRUSH edge = CreateSolidBrush(focused || hovered ? GOLD : BORDER);
+    FrameRect(item.hDC, &item.rcItem, edge);
+    DeleteObject(edge);
     SetBkMode(item.hDC, TRANSPARENT);
-    SetTextColor(item.hDC, (item.itemState & ODS_DISABLED) ? RGB(130, 140, 155) : TEXT);
+    SetTextColor(item.hDC, (item.itemState & ODS_DISABLED) ? RGB(161, 151, 154) : TEXT);
     auto font = (HFONT)SendMessageW(item.hwndItem, WM_GETFONT, 0, 0);
-    if (font)
-        SelectObject(item.hDC, font);
-    wchar_t text[256];
+    if (font) SelectObject(item.hDC, font);
+    wchar_t text[256]{};
     GetWindowTextW(item.hwndItem, text, 256);
     RECT area = item.rcItem;
     InflateRect(&area, -4, 0);
-    if (pressed)
-        OffsetRect(&area, 1, 1);
+    if (pressed) OffsetRect(&area, 1, 1);
     DrawTextW(item.hDC, text, -1, &area, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
-    if ((item.itemState & ODS_FOCUS) && !(item.itemState & ODS_NOFOCUSRECT)) {
-        RECT focus = item.rcItem;
-        InflateRect(&focus, -3, -3);
-        DrawFocusRect(item.hDC, &focus);
-    }
+    RestoreDC(item.hDC, saved);
+}
+
+void draw_combo(const DRAWITEMSTRUCT &item) {
+    const bool selected = (item.itemState & ODS_SELECTED) && !(item.itemState & ODS_COMBOBOXEDIT);
+    fill(item.hDC, item.rcItem, selected ? RGB(101, 39, 52) : FIELD);
+    if (item.itemID == UINT(-1)) return;
+    const LRESULT size = SendMessageW(item.hwndItem, CB_GETLBTEXTLEN, item.itemID, 0);
+    if (size == CB_ERR) return;
+    std::wstring text(static_cast<size_t>(size) + 1, L'\0');
+    SendMessageW(item.hwndItem, CB_GETLBTEXT, item.itemID, reinterpret_cast<LPARAM>(text.data()));
+    const int saved = SaveDC(item.hDC);
+    SetBkMode(item.hDC, TRANSPARENT);
+    SetTextColor(item.hDC, TEXT);
+    auto font = (HFONT)SendMessageW(item.hwndItem, WM_GETFONT, 0, 0);
+    if (font) SelectObject(item.hDC, font);
+    RECT area = item.rcItem;
+    InflateRect(&area, -5, 0);
+    DrawTextW(item.hDC, text.c_str(), -1, &area, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    if ((item.itemState & ODS_FOCUS) && !(item.itemState & ODS_NOFOCUSRECT))
+        DrawFocusRect(item.hDC, &item.rcItem);
     RestoreDC(item.hDC, saved);
 }
 } // namespace launcher_theme

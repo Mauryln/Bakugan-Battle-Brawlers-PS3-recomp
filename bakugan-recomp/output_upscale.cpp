@@ -23,16 +23,17 @@ constexpr u32 HUDLESS_DESCRIPTOR_BASE = 6;
 struct fsr_output {
     ComPtr<ID3D12Device> device;
     ComPtr<ID3D12RootSignature> root;
-    ComPtr<ID3D12PipelineState> smaa_edge, smaa_weight, smaa_blend, easu, rcas;
+    ComPtr<ID3D12PipelineState> smaa_edge, smaa_weight, smaa_blend, copy, easu, rcas;
     ComPtr<ID3D12DescriptorHeap> srv_heap, rtv_heap;
     ComPtr<ID3D12Resource> intermediate, smaa_edges, smaa_weights, smaa_color;
     ID3D12Resource* inputs[OUTPUT_FRAMES * 2]{};
     ID3D12Resource* outputs[OUTPUT_FRAMES * 2]{};
-    UINT srv_step{}, rtv_step{}, constants[24]{};
+    UINT srv_step{}, rtv_step{}, constants[28]{};
+    rsx_d3d12_output_rect content{};
     UINT width = 1920, height = 1080;
     UINT input_width = 1280, input_height = 720;
     float sharpness = 0.6f;
-    bool fsr_enabled = true, aa_enabled = true;
+    bool fsr_enabled = true, aa_enabled = true, fsr_active = false;
     D3D12_RESOURCE_STATES intermediate_state = D3D12_RESOURCE_STATE_COMMON;
     D3D12_RESOURCE_STATES smaa_edges_state = D3D12_RESOURCE_STATE_COMMON;
     D3D12_RESOURCE_STATES smaa_weights_state = D3D12_RESOURCE_STATE_COMMON;
@@ -52,9 +53,6 @@ static void monitor_size(u32* width, u32* height)
     if (!*width || !*height) { *width = 1920; *height = 1080; }
 }
 
-/* Native means "the monitor's vertical resolution, 16:9". The game presents
- * 16:9, so a narrower-than-monitor output keeps the aspect and leaves the
- * window smaller instead of stretching the picture. */
 static void configure_output_size(u32* width, u32* height)
 {
     u32 monitor_w = 0, monitor_h = 0;
@@ -86,14 +84,9 @@ static void configure_output_size(u32* width, u32* height)
     /* Never ask for a raster taller than the panel: DWM would downscale the
      * whole window and blur the image on smaller monitors. */
     if (monitor_h && wanted > monitor_h) wanted = monitor_h;
-    if (wanted & 1) wanted++;
-    u32 w = (wanted * 16u + 8u) / 9u;
-    if (w & 1) w++;
-    if (monitor_w && w > monitor_w) {
-        w = monitor_w & ~1u;
-        wanted = ((w * 9u + 8u) / 16u) & ~1u;
-    }
-    *width = w; *height = wanted;
+    const auto content = rsx_d3d12_fit_16_9(monitor_w, wanted);
+    *width = content.width;
+    *height = content.height;
 }
 
 static int internal_height_from_env(void)
@@ -168,7 +161,10 @@ bool create_rt_2d(UINT w, UINT h, DXGI_FORMAT fmt, UINT heap_index, ComPtr<ID3D1
         cpu_handle(output.srv_heap.Get(), output.srv_step, heap_index));
     return true;
 }
-int initialize(void*, void* device, void*, u32 input_width, u32 input_height) {
+int resize(void*, u32 width, u32 height);
+
+int initialize(void*, void* device, void*, u32 input_width, u32 input_height,
+               u32 output_width, u32 output_height) {
     output.device = static_cast<ID3D12Device*>(device);
     output.input_width = input_width;
     output.input_height = input_height;
@@ -190,7 +186,7 @@ int initialize(void*, void* device, void*, u32 input_width, u32 input_height) {
     parameters[1].DescriptorTable.pDescriptorRanges = &range1;
     parameters[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
     parameters[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
-    parameters[2].Constants.Num32BitValues = 24;
+    parameters[2].Constants.Num32BitValues = 28;
     parameters[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
     D3D12_STATIC_SAMPLER_DESC samplers[2]{};
     for (int s = 0; s < 2; ++s) {
@@ -248,6 +244,13 @@ int initialize(void*, void* device, void*, u32 input_width, u32 input_height) {
         if (failed(output.device->CreateGraphicsPipelineState(&pipeline, IID_PPV_ARGS(&output.smaa_blend)), "SMAA blend"))
             return -1;
     }
+    if (!output.aa_enabled) {
+        ComPtr<ID3DBlob> copy;
+        if (!compile(path, "copy_main", "ps_5_0", copy)) return -1;
+        pipeline.PS = {copy->GetBufferPointer(), copy->GetBufferSize()};
+        if (failed(output.device->CreateGraphicsPipelineState(&pipeline, IID_PPV_ARGS(&output.copy)), "copy pipeline"))
+            return -1;
+    }
     if (output.fsr_enabled) {
         ComPtr<ID3DBlob> easu, rcas;
         if (!compile(path, "easu_main", "ps_5_0", easu) ||
@@ -271,9 +274,6 @@ int initialize(void*, void* device, void*, u32 input_width, u32 input_height) {
     if (failed(output.device->CreateDescriptorHeap(&heap, IID_PPV_ARGS(&output.rtv_heap)), "RTV heap")) return -1;
     output.srv_step = output.device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
     output.rtv_step = output.device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
-    if (output.fsr_enabled &&
-        !create_rt_2d(output.width, output.height, DXGI_FORMAT_R8G8B8A8_UNORM, 2, output.intermediate, "EASU target"))
-        return -1;
     if (output.aa_enabled) {
         if (!create_rt_2d(input_width, input_height, DXGI_FORMAT_R8G8_UNORM, 3, output.smaa_edges, "SMAA edges") ||
             !create_rt_2d(input_width, input_height, DXGI_FORMAT_R8G8B8A8_UNORM, 4, output.smaa_weights, "SMAA weights"))
@@ -282,18 +282,16 @@ int initialize(void*, void* device, void*, u32 input_width, u32 input_height) {
             !create_rt_2d(input_width, input_height, DXGI_FORMAT_R8G8B8A8_UNORM, 5, output.smaa_color, "SMAA color"))
             return -1;
     }
-    FsrEasuCon(output.constants, output.constants + 4, output.constants + 8, output.constants + 12,
-        float(input_width), float(input_height), float(input_width), float(input_height),
-        float(output.width), float(output.height));
-    FsrRcasCon(output.constants + 16, output.sharpness);
-    output.constants[20] = output.width; output.constants[21] = output.height;
-    output.constants[22] = input_width; output.constants[23] = input_height;
-    std::fprintf(stderr, "[OUTPUT] %s%s ready: %ux%u -> %ux%u\n",
-                 output.aa_enabled ? "SMAA" : "",
-                 (output.aa_enabled && output.fsr_enabled) ? "+FSR1" : (output.fsr_enabled ? "FSR1" : ""),
-                 input_width, input_height, output.width, output.height);
-    return 0;
+    return resize(nullptr, output_width, output_height);
 }
+
+void set_viewport(ID3D12GraphicsCommandList* list, const rsx_d3d12_output_rect& rect) {
+    const D3D12_VIEWPORT viewport{float(rect.x), float(rect.y), float(rect.width), float(rect.height), 0, 1};
+    const D3D12_RECT scissor{LONG(rect.x), LONG(rect.y), LONG(rect.x + rect.width), LONG(rect.y + rect.height)};
+    list->RSSetViewports(1, &viewport);
+    list->RSSetScissorRects(1, &scissor);
+}
+
 int record_output(void* command_list, void* input, void* destination, u32 frame, bool hudless) {
     if (frame >= OUTPUT_FRAMES) return -1;
     const u32 descriptor = hudless ? HUDLESS_DESCRIPTOR_BASE + frame : frame;
@@ -320,14 +318,11 @@ int record_output(void* command_list, void* input, void* destination, u32 frame,
     ID3D12DescriptorHeap* heaps[] = {output.srv_heap.Get()};
     list->SetDescriptorHeaps(1, heaps);
     list->SetGraphicsRootSignature(output.root.Get());
-    list->SetGraphicsRoot32BitConstants(2, 24, output.constants, 0);
+    list->SetGraphicsRoot32BitConstants(2, 28, output.constants, 0);
     list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
     if (output.aa_enabled) {
-        D3D12_VIEWPORT in_vp{0, 0, float(output.input_width), float(output.input_height), 0, 1};
-        D3D12_RECT in_sc{0, 0, LONG(output.input_width), LONG(output.input_height)};
-        list->RSSetViewports(1, &in_vp);
-        list->RSSetScissorRects(1, &in_sc);
+        set_viewport(list, {0, 0, output.input_width, output.input_height});
 
         transition(list, output.smaa_edges.Get(), output.smaa_edges_state, D3D12_RESOURCE_STATE_RENDER_TARGET);
         auto rtv = cpu_handle(output.rtv_heap.Get(), output.rtv_step, 3);
@@ -347,7 +342,10 @@ int record_output(void* command_list, void* input, void* destination, u32 frame,
         transition(list, output.smaa_weights.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
         output.smaa_weights_state = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
 
-        if (output.fsr_enabled) {
+        if (output.fsr_active) {
+            const UINT native_view[] = {output.input_width, output.input_height,
+                                        output.input_width, output.input_height, 0, 0};
+            list->SetGraphicsRoot32BitConstants(2, 6, native_view, 20);
             transition(list, output.smaa_color.Get(), output.smaa_color_state, D3D12_RESOURCE_STATE_RENDER_TARGET);
             rtv = cpu_handle(output.rtv_heap.Get(), output.rtv_step, 5);
             list->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
@@ -357,36 +355,38 @@ int record_output(void* command_list, void* input, void* destination, u32 frame,
             list->DrawInstanced(3, 1, 0, 0);
             transition(list, output.smaa_color.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
             output.smaa_color_state = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
-        } else {
-            transition(list, target, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET);
-            rtv = cpu_handle(output.rtv_heap.Get(), output.rtv_step, descriptor);
-            list->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
-            list->SetPipelineState(output.smaa_blend.Get());
-            list->SetGraphicsRootDescriptorTable(0, gpu_handle(descriptor));
-            list->SetGraphicsRootDescriptorTable(1, gpu_handle(4));
-            list->DrawInstanced(3, 1, 0, 0);
-            transition(list, source, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COMMON);
-            transition(list, target, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COMMON);
-            return 0;
+            list->SetGraphicsRoot32BitConstants(2, 6, output.constants + 20, 20);
         }
     }
 
-    D3D12_VIEWPORT viewport{0, 0, float(output.width), float(output.height), 0, 1};
-    D3D12_RECT scissor{0, 0, LONG(output.width), LONG(output.height)};
-    list->RSSetViewports(1, &viewport); list->RSSetScissorRects(1, &scissor);
-    transition(list, output.intermediate.Get(), output.intermediate_state, D3D12_RESOURCE_STATE_RENDER_TARGET);
-    auto rtv = cpu_handle(output.rtv_heap.Get(), output.rtv_step, 2);
-    list->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
-    list->SetPipelineState(output.easu.Get());
-    list->SetGraphicsRootDescriptorTable(0, gpu_handle(output.aa_enabled ? 5 : descriptor));
-    list->DrawInstanced(3, 1, 0, 0);
-    transition(list, output.intermediate.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-    output.intermediate_state = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    if (output.fsr_active) {
+        set_viewport(list, {0, 0, output.content.width, output.content.height});
+        transition(list, output.intermediate.Get(), output.intermediate_state, D3D12_RESOURCE_STATE_RENDER_TARGET);
+        const auto intermediate = cpu_handle(output.rtv_heap.Get(), output.rtv_step, 2);
+        list->OMSetRenderTargets(1, &intermediate, FALSE, nullptr);
+        list->SetPipelineState(output.easu.Get());
+        list->SetGraphicsRootDescriptorTable(0, gpu_handle(output.aa_enabled ? 5 : descriptor));
+        list->DrawInstanced(3, 1, 0, 0);
+        transition(list, output.intermediate.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        output.intermediate_state = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    }
+
+    set_viewport(list, output.content);
     transition(list, target, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET);
-    rtv = cpu_handle(output.rtv_heap.Get(), output.rtv_step, descriptor);
+    const auto rtv = cpu_handle(output.rtv_heap.Get(), output.rtv_step, descriptor);
+    if (output.content.width != output.width || output.content.height != output.height) {
+        constexpr float black[] = {0, 0, 0, 1};
+        list->ClearRenderTargetView(rtv, black, 0, nullptr);
+    }
     list->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
-    list->SetPipelineState(output.rcas.Get());
-    list->SetGraphicsRootDescriptorTable(0, gpu_handle(2));
+    if (output.fsr_active) {
+        list->SetPipelineState(output.rcas.Get());
+        list->SetGraphicsRootDescriptorTable(0, gpu_handle(2));
+    } else {
+        list->SetPipelineState(output.aa_enabled ? output.smaa_blend.Get() : output.copy.Get());
+        list->SetGraphicsRootDescriptorTable(0, gpu_handle(descriptor));
+        if (output.aa_enabled) list->SetGraphicsRootDescriptorTable(1, gpu_handle(4));
+    }
     list->DrawInstanced(3, 1, 0, 0);
     transition(list, source, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COMMON);
     transition(list, target, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COMMON);
@@ -398,14 +398,45 @@ int record(void*, void* commands, void* input, void* output, u32 frame) {
 int record_hudless(void*, void* commands, void* input, void* output, u32 frame) {
     return record_output(commands, input, output, frame, true);
 }
+int resize(void*, u32 width, u32 height) {
+    const auto content = rsx_d3d12_fit_16_9(width, height);
+    if (!content.width || !content.height) return -1;
+    for (auto& cached : output.outputs) cached = nullptr;
+    const bool use_fsr = output.fsr_enabled && content.width >= output.input_width &&
+                         content.height >= output.input_height;
+    if (use_fsr && (!output.intermediate || content.width != output.content.width ||
+                   content.height != output.content.height)) {
+        if (!create_rt_2d(content.width, content.height, DXGI_FORMAT_R8G8B8A8_UNORM, 2,
+                          output.intermediate, "EASU target"))
+            return -1;
+        output.intermediate_state = D3D12_RESOURCE_STATE_COMMON;
+    }
+    output.width = width;
+    output.height = height;
+    output.content = content;
+    output.fsr_active = use_fsr;
+    FsrEasuCon(output.constants, output.constants + 4, output.constants + 8, output.constants + 12,
+        float(output.input_width), float(output.input_height),
+        float(output.input_width), float(output.input_height),
+        float(content.width), float(content.height));
+    FsrRcasCon(output.constants + 16, output.sharpness);
+    output.constants[20] = content.width;
+    output.constants[21] = content.height;
+    output.constants[22] = output.input_width;
+    output.constants[23] = output.input_height;
+    output.constants[24] = content.x;
+    output.constants[25] = content.y;
+    return 0;
+}
 void shutdown(void*) { output = fsr_output{}; }
 }
 
 int bakugan_output_configure() {
     const char* window_mode = std::getenv("PS3_WINDOW_MODE");
-    if (window_mode && *window_mode && std::strcmp(window_mode, "windowed") &&
-        std::strcmp(window_mode, "borderless")) {
-        std::fprintf(stderr, "[OUTPUT] PS3_WINDOW_MODE must be windowed or borderless\n"); return -1;
+    if (window_mode && *window_mode && _stricmp(window_mode, "windowed") &&
+        _stricmp(window_mode, "borderless") && _stricmp(window_mode, "fullscreen")) {
+        std::fprintf(stderr, "[OUTPUT] PS3_WINDOW_MODE must be windowed, borderless or fullscreen\n");
+        return -1;
     }
 
     configure_output_size(&output.width, &output.height);
@@ -452,12 +483,9 @@ int bakugan_output_configure() {
                                  "use PS3_FSR=fsr1 for a larger presentation\n",
                          output.width, output.height);
         }
-        if (!output.aa_enabled) {
-            std::fprintf(stderr, "[OUTPUT] native %ux%u (AA off)\n", output.width, output.height);
-            return 0;
-        }
-        std::fprintf(stderr, "[OUTPUT] native %ux%u + SMAA\n", output.width, output.height);
-        rsx_d3d12_output_pass pass{output.width, output.height, nullptr, initialize, record, shutdown, record_hudless};
+        std::fprintf(stderr, "[OUTPUT] native %ux%u, AA=%s\n",
+                     output.width, output.height, output.aa_enabled ? "smaa" : "off");
+        const rsx_d3d12_output_pass pass{output.width, output.height, nullptr, initialize, record, shutdown, record_hudless, resize};
         return rsx_d3d12_backend_set_output_pass(&pass);
     }
 
@@ -475,6 +503,9 @@ int bakugan_output_configure() {
     std::fprintf(stderr, "[OUTPUT] %dp internal -> %ux%u, AA=%s, FSR1 sharpness %.2f\n",
                  internal_height, output.width, output.height,
                  output.aa_enabled ? "smaa" : "off", output.sharpness);
-    rsx_d3d12_output_pass pass{output.width, output.height, nullptr, initialize, record, shutdown, record_hudless};
+    rsx_d3d12_output_pass pass{output.width, output.height, nullptr, initialize, record, shutdown, record_hudless, resize};
     return rsx_d3d12_backend_set_output_pass(&pass);
 }
+
+bool bakugan_output_smaa_active() { return output.device && output.aa_enabled; }
+bool bakugan_output_rcas_active() { return output.fsr_active; }

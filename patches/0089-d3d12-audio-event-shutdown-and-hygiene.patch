@@ -1,0 +1,634 @@
+diff --git a/libs/audio/cellAudio.c b/libs/audio/cellAudio.c
+index eae9663..3305c9b 100644
+--- a/libs/audio/cellAudio.c
++++ b/libs/audio/cellAudio.c
+@@ -153,6 +153,7 @@ static thread_t      s_mix_thread;
+ static int           s_mix_thread_live = 0;
+ #endif
+ static mutex_t       s_audio_mutex;
++static int           s_audio_mutex_inited = 0;
+ 
+ static u8      s_port_ever_had_pcm[CELL_AUDIO_PORT_MAX];
+ static u32     s_port_underrun_streak[CELL_AUDIO_PORT_MAX];
+@@ -1227,7 +1228,10 @@ s32 cellAudioInit(void)
+     if (audio_debug_enabled()) {
+         fprintf(stderr, "[AUDIO_DEBUG] enabled (underruns, mix clipping/NaN, stall_waits drops)\n");
+     }
+-    mutex_init(&s_audio_mutex);
++    if (!s_audio_mutex_inited) {
++        mutex_init(&s_audio_mutex);
++        s_audio_mutex_inited = 1;
++    }
+ 
+     if (audio_backend_init() < 0) {
+         printf("[cellAudio] WARNING: Audio backend init failed, continuing silently\n");
+@@ -1259,9 +1263,14 @@ s32 cellAudioQuit(void)
+     if (!s_audio_initialized)
+         return CELL_AUDIO_ERROR_NOT_INIT;
+ 
++    s_audio_initialized = 0;
+     audio_stop_mix_thread();
+     audio_backend_shutdown();
+ 
++    /* Keep s_audio_mutex alive across shutdown: guest PPU/SPURS audio threads
++     * may still be running during teardown, and destroying the CRITICAL_SECTION
++     * while a concurrent guest call is entering or leaving it faults. */
++    mutex_lock(&s_audio_mutex);
+     /* Port buffers live in the guest vm_base arena (bump-allocated, not host
+      * malloc) -- just drop the references; never free() them. */
+     for (int i = 0; i < CELL_AUDIO_PORT_MAX; i++) {
+@@ -1269,9 +1278,9 @@ s32 cellAudioQuit(void)
+         s_ports[i].in_use = 0;
+         s_ports[i].running = 0;
+     }
++    memset(s_notify_queues, 0, sizeof(s_notify_queues));
++    mutex_unlock(&s_audio_mutex);
+ 
+-    mutex_destroy(&s_audio_mutex);
+-    s_audio_initialized = 0;
+     return CELL_OK;
+ }
+ 
+@@ -1443,13 +1452,19 @@ s32 cellAudioGetPortBlockTag(u32 portNum, u64 blockNo, u64* tag)
+         return CELL_AUDIO_ERROR_NOT_INIT;
+     if (portNum >= CELL_AUDIO_PORT_MAX)
+         return CELL_AUDIO_ERROR_PARAM;
+-    if (!s_ports[portNum].in_use)
+-        return CELL_AUDIO_ERROR_PORT_NOT_OPEN;
+     if (!tag_ea)
+         return CELL_AUDIO_ERROR_PARAM;
+ 
+     mutex_lock(&s_audio_mutex);
++    if (!s_audio_initialized) {
++        mutex_unlock(&s_audio_mutex);
++        return CELL_AUDIO_ERROR_NOT_INIT;
++    }
+     AudioPortSlot* port = &s_ports[portNum];
++    if (!port->in_use) {
++        mutex_unlock(&s_audio_mutex);
++        return CELL_AUDIO_ERROR_PORT_NOT_OPEN;
++    }
+     u64 nblk = port->param.nBlock ? port->param.nBlock : 1;
+     if (blockNo >= nblk) {
+         mutex_unlock(&s_audio_mutex);
+@@ -1470,12 +1485,18 @@ s32 cellAudioGetPortTimestamp(u32 portNum, u64 tag, u64* stamp)
+         return CELL_AUDIO_ERROR_NOT_INIT;
+     if (portNum >= CELL_AUDIO_PORT_MAX)
+         return CELL_AUDIO_ERROR_PARAM;
+-    if (!s_ports[portNum].in_use)
+-        return CELL_AUDIO_ERROR_PORT_NOT_OPEN;
+     if (!stamp_ea)
+         return CELL_AUDIO_ERROR_PARAM;
+ 
+     mutex_lock(&s_audio_mutex);
++    if (!s_audio_initialized) {
++        mutex_unlock(&s_audio_mutex);
++        return CELL_AUDIO_ERROR_NOT_INIT;
++    }
++    if (!s_ports[portNum].in_use) {
++        mutex_unlock(&s_audio_mutex);
++        return CELL_AUDIO_ERROR_PORT_NOT_OPEN;
++    }
+     u64 global_counter = s_ports[portNum].read_index;
+     mutex_unlock(&s_audio_mutex);
+     if (tag > global_counter)
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index ce4713a..8d173b1 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -126,6 +126,7 @@ typedef struct {
+     u32 sampler_table; /* immutable per-draw sampler heap/table */
+     int tex_slot;       /* legacy single-slot path (atlas); -1 = none */
+     int vs_idx;         /* VPVSEntry slot for this draw's vertex program (-1 = primary) */
++    u32 vs_hash;        /* FNV-1a ucode hash of this draw's vertex program */
+     int blend;          /* guest blend enable at draw time */
+     u32 blend_key;      /* packed guest blend state (factors+equation), PSO key */
+     u32 depth_key;     /* snapshot: enable, write mask, comparison (PSO key) */
+@@ -271,6 +272,10 @@ typedef struct {
+     HWND hwnd;
+     u32  width;
+     u32  height;
++    u32  present_width;
++    u32  present_height;
++    u32  pending_resize_width;
++    u32  pending_resize_height;
+     int  window_closed;
+ 
+     /* D3D12 core */
+@@ -1031,12 +1036,21 @@ static LRESULT CALLBACK d3d12_wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
+     switch (msg) {
+     case WM_CLOSE:
+         s_d3d.window_closed = 1;
+-        DestroyWindow(hwnd);
+         return 0;
+     case WM_DESTROY:
+         s_d3d.hwnd = NULL;
+         PostQuitMessage(0);
+         return 0;
++    case WM_SIZE:
++        if (wp != SIZE_MINIMIZED && s_d3d.swap_chain) {
++            u32 new_w = (u32)LOWORD(lp) & ~1u;
++            u32 new_h = (u32)HIWORD(lp) & ~1u;
++            if (new_w >= 64 && new_h >= 64) {
++                s_d3d.pending_resize_width = new_w;
++                s_d3d.pending_resize_height = new_h;
++            }
++        }
++        return 0;
+     case WM_SETCURSOR:
+         if (LOWORD(lp) == HTCLIENT && !s_exit_prompt && GetForegroundWindow() == hwnd) {
+             SetCursor(NULL);
+@@ -1060,7 +1074,6 @@ static LRESULT CALLBACK d3d12_wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
+             s_exit_prompt = 0;
+             if (choice == IDYES) {
+                 s_d3d.window_closed = 1;
+-                DestroyWindow(hwnd);
+             }
+         }
+         return 0;
+@@ -1101,28 +1114,27 @@ static HWND create_window(u32 width, u32 height, const char* title)
+     const char* mode = getenv("PS3_WINDOW_MODE");
+     int borderless = mode && strcmp(mode, "borderless") == 0;
+     DWORD style = borderless ? WS_POPUP : WS_OVERLAPPEDWINDOW;
++    RECT work = monitor.rcWork;
++    LONG work_w = work.right - work.left, work_h = work.bottom - work.top;
++    RECT frame = {0, 0, 0, 0};
++    if (!AdjustWindowRect(&frame, WS_OVERLAPPEDWINDOW, FALSE)) return NULL;
++    LONG extra_w = frame.right - frame.left, extra_h = frame.bottom - frame.top;
++    LONG available_w = work_w - extra_w, available_h = work_h - extra_h;
++    if (available_w < 1 || available_h < 1) return NULL;
++    double scale = 1.0;
++    if (width > (u32)available_w) scale = (double)available_w / width;
++    if (height * scale > available_h) scale = (double)available_h / height;
++    LONG windowed_w = (LONG)(width * scale) + extra_w;
++    LONG windowed_h = (LONG)(height * scale) + extra_h;
++    LONG windowed_x = work.left + (work_w - windowed_w) / 2;
++    LONG windowed_y = work.top + (work_h - windowed_h) / 2;
++
+     RECT area = borderless ? monitor.rcMonitor : monitor.rcWork;
+     LONG area_w = area.right - area.left, area_h = area.bottom - area.top;
+-    LONG window_w, window_h;
+-    if (borderless) {
+-        /* The swap chain is exactly `width x height`; matching the window to it
+-         * keeps the picture unstretched when the monitor is not 16:9. Native
+-         * output already equals the monitor on a 16:9 display. */
+-        window_w = (LONG)width; window_h = (LONG)height;
+-    } else {
+-        RECT frame = {0, 0, 0, 0};
+-        if (!AdjustWindowRect(&frame, style, FALSE)) return NULL;
+-        LONG extra_w = frame.right - frame.left, extra_h = frame.bottom - frame.top;
+-        LONG available_w = area_w - extra_w, available_h = area_h - extra_h;
+-        if (available_w < 1 || available_h < 1) return NULL;
+-        double scale = 1.0;
+-        if (width > (u32)available_w) scale = (double)available_w / width;
+-        if (height * scale > available_h) scale = (double)available_h / height;
+-        window_w = (LONG)(width * scale) + extra_w;
+-        window_h = (LONG)(height * scale) + extra_h;
+-    }
+-    LONG x = area.left + (area_w - window_w) / 2;
+-    LONG y = area.top + (area_h - window_h) / 2;
++    LONG window_w = borderless ? (LONG)width : windowed_w;
++    LONG window_h = borderless ? (LONG)height : windowed_h;
++    LONG x = borderless ? area.left + (area_w - window_w) / 2 : windowed_x;
++    LONG y = borderless ? area.top + (area_h - window_h) / 2 : windowed_y;
+ 
+     /* Keep the display awake (see rsx_null_backend.c). */
+     SetThreadExecutionState(ES_CONTINUOUS | ES_DISPLAY_REQUIRED | ES_SYSTEM_REQUIRED);
+@@ -1133,8 +1145,16 @@ static HWND create_window(u32 width, u32 height, const char* title)
+         x, y, window_w, window_h,
+         NULL, NULL, GetModuleHandle(NULL), NULL);
+     if (hwnd) {
+-        GetWindowRect(hwnd, &s_windowed_rect);
+-        s_windowed_style = GetWindowLongPtrA(hwnd, GWL_STYLE);
++        if (borderless) {
++            s_windowed_rect.left = windowed_x;
++            s_windowed_rect.top = windowed_y;
++            s_windowed_rect.right = windowed_x + windowed_w;
++            s_windowed_rect.bottom = windowed_y + windowed_h;
++            s_windowed_style = WS_OVERLAPPEDWINDOW | WS_VISIBLE;
++        } else {
++            GetWindowRect(hwnd, &s_windowed_rect);
++            s_windowed_style = GetWindowLongPtrA(hwnd, GWL_STYLE);
++        }
+         s_fullscreen = borderless;
+         RECT actual, client;
+         if (GetWindowRect(hwnd, &actual) && GetClientRect(hwnd, &client))
+@@ -1286,9 +1306,11 @@ static int init_d3d12(u32 width, u32 height)
+     }
+ 
+     /* Create swap chain */
++    s_d3d.present_width = s_output_pass.record ? s_output_pass.width : width;
++    s_d3d.present_height = s_output_pass.record ? s_output_pass.height : height;
+     DXGI_SWAP_CHAIN_DESC1 sc_desc = {0};
+-    sc_desc.Width = s_output_pass.record ? s_output_pass.width : width;
+-    sc_desc.Height = s_output_pass.record ? s_output_pass.height : height;
++    sc_desc.Width = s_d3d.present_width;
++    sc_desc.Height = s_d3d.present_height;
+     sc_desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+     sc_desc.SampleDesc.Count = 1;
+     sc_desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+@@ -2621,6 +2643,7 @@ static int vp_get_vs_impl(const rsx_state* st)
+         if (s_d3d.vp_vs[0].vs) s_d3d.vp_vs[0].vs->lpVtbl->Release(s_d3d.vp_vs[0].vs);
+         memmove(&s_d3d.vp_vs[0], &s_d3d.vp_vs[1], sizeof(VPVSEntry)*(VP_VS_CACHE-1));
+         slot = VP_VS_CACHE - 1;
++        s_d3d.vp_gen++;
+     }
+     s_d3d.vp_vs[slot].input_mask = input_mask;
+     s_d3d.vp_vs[slot].hash = hash;
+@@ -2652,10 +2675,11 @@ static int vp_get_vs(const rsx_state* state)
+      * only changes when the microcode does, which is exactly what
+      * vp_ucode_gen records, so memoise on it and on the program selection. */
+     static const rsx_state* m_st;
+-    static u32 m_gen, m_ts, m_vb;
++    static u32 m_gen, m_vp_gen, m_ts, m_vb;
+     static int m_idx;
+     int result;
+     if (state && m_st == state && m_gen == state->vp_ucode_gen &&
++        m_vp_gen == s_d3d.vp_gen &&
+         m_ts == state->transform_program_start &&
+         m_vb == state->vp_ucode_bytes) {
+         result = m_idx;
+@@ -2663,6 +2687,7 @@ static int vp_get_vs(const rsx_state* state)
+         result = vp_get_vs_impl(state);
+         m_st = state;
+         m_gen = state ? state->vp_ucode_gen : 0;
++        m_vp_gen = s_d3d.vp_gen;
+         m_ts  = state ? state->transform_program_start : 0;
+         m_vb  = state ? state->vp_ucode_bytes : 0;
+         m_idx = result;
+@@ -2942,9 +2967,10 @@ typedef struct {
+     u32 size;
+     int ready;
+     CRITICAL_SECTION lock;
+-    HANDLE wake, idle;
++    HANDLE wake, idle, thread;
+     DiskShaderWrite* pending;
+     int started;
++    int stop;
+     DiskShaderHtSlot* ht;
+     u32 ht_cap;
+     u32 ht_count;
+@@ -3001,8 +3027,12 @@ static DWORD WINAPI shader_cache_writer(void* param)
+         EnterCriticalSection(&c->lock);
+         DiskShaderWrite* job = c->pending;
+         c->pending = NULL;
++        int stop = c->stop;
+         LeaveCriticalSection(&c->lock);
+-        if (!job) continue;
++        if (!job) {
++            if (stop) return 0;
++            continue;
++        }
+         wchar_t temporary[MAX_PATH + 40];
+         swprintf(temporary, MAX_PATH + 40, L"%ls.tmp.%lu", job->path,
+                  (unsigned long)GetCurrentProcessId());
+@@ -3023,7 +3053,9 @@ static DWORD WINAPI shader_cache_writer(void* param)
+         free(job);
+         EnterCriticalSection(&c->lock);
+         if (!c->pending) SetEvent(c->idle);
++        stop = c->stop && !c->pending;
+         LeaveCriticalSection(&c->lock);
++        if (stop) return 0;
+     }
+ }
+ 
+@@ -3037,6 +3069,26 @@ static void shader_cache_flush(DiskShaderCache* c)
+ static void shader_cache_shutdown(DiskShaderCache* c)
+ {
+     shader_cache_flush(c);
++    if (c->started) {
++        EnterCriticalSection(&c->lock);
++        c->stop = 1;
++        SetEvent(c->wake);
++        LeaveCriticalSection(&c->lock);
++        if (c->thread) {
++            WaitForSingleObject(c->thread, 5000);
++            CloseHandle(c->thread);
++            c->thread = NULL;
++        }
++        EnterCriticalSection(&c->lock);
++        free(c->pending);
++        c->pending = NULL;
++        LeaveCriticalSection(&c->lock);
++        if (c->wake) { CloseHandle(c->wake); c->wake = NULL; }
++        if (c->idle) { CloseHandle(c->idle); c->idle = NULL; }
++        DeleteCriticalSection(&c->lock);
++        c->started = 0;
++        c->stop = 0;
++    }
+     free(c->data); c->data = NULL; c->size = 0;
+     free(c->ht);   c->ht = NULL;   c->ht_cap = 0; c->ht_count = 0;
+     c->ready = 0;
+@@ -3055,16 +3107,17 @@ static void shader_cache_save(DiskShaderCache* c)
+         InitializeCriticalSection(&c->lock);
+         c->wake = CreateEventW(NULL, FALSE, FALSE, NULL);
+         c->idle = CreateEventW(NULL, TRUE, TRUE, NULL);
++        c->stop = 0;
+         HANDLE thread = c->wake && c->idle
+             ? CreateThread(NULL, 0, shader_cache_writer, c, 0, NULL) : NULL;
+         if (!thread) {
+-            if (c->wake) CloseHandle(c->wake);
+-            if (c->idle) CloseHandle(c->idle);
++            if (c->wake) { CloseHandle(c->wake); c->wake = NULL; }
++            if (c->idle) { CloseHandle(c->idle); c->idle = NULL; }
+             DeleteCriticalSection(&c->lock);
+             c->path[0] = 0;
+             return;
+         }
+-        CloseHandle(thread);
++        c->thread = thread;
+         c->started = 1;
+     }
+     /* The writer owns an immutable snapshot; render never waits for file I/O. */
+@@ -3885,11 +3938,23 @@ static DXGI_FORMAT rsx_surface_dxgi(u32 fmt);
+ static ID3D12PipelineState* vp_prepare_draw_pso(const D3D12DrawRecord* dr)
+ {
+     if (!dr->fp_addr) return NULL;
++    int vs_idx = dr->vs_idx;
++    if (dr->vs_hash) {
++        if (vs_idx < 0 || vs_idx >= s_d3d.vp_vs_n || s_d3d.vp_vs[vs_idx].hash != dr->vs_hash) {
++            vs_idx = -1;
++            for (int i = 0; i < s_d3d.vp_vs_n; ++i) {
++                if (s_d3d.vp_vs[i].hash == dr->vs_hash) {
++                    vs_idx = i;
++                    break;
++                }
++            }
++        }
++    }
+     u32 blend = dr->blend_key, alpha = dr->alpha_ctl;
+     static int opaque = -1;
+     if (opaque < 0) { const char* e = getenv("RX_OPAQUE"); opaque = e ? atoi(e) : 0; }
+     if (opaque && dr->rt_off == 0) { blend = 0; alpha = 0; }
+-    return vp_get_fp_pso(dr->vs_idx, dr->fp_addr, blend, dr_num_rts(dr),
++    return vp_get_fp_pso(vs_idx, dr->fp_addr, blend, dr_num_rts(dr),
+         dr->rt_off ? rsx_surface_dxgi(dr->rt_fmt) : DXGI_FORMAT_R8G8B8A8_UNORM,
+         dr->fp_exp32, dr->cmask, dr->cull, dr_cube_mask(dr), dr->depth_key,
+         alpha, dr->depth_bias, dr->slope_bias, dr->shadow, dr->packed_depth_units);
+@@ -6862,6 +6927,78 @@ static void fps_title_on_present(void)
+     }
+ }
+ 
++static void handle_pending_resize(void)
++{
++    u32 new_w = s_d3d.pending_resize_width;
++    u32 new_h = s_d3d.pending_resize_height;
++    s_d3d.pending_resize_width = 0;
++    s_d3d.pending_resize_height = 0;
++    if (!new_w || !new_h || !s_d3d.swap_chain) return;
++    if (new_w == s_d3d.present_width && new_h == s_d3d.present_height) return;
++
++    wait_for_gpu();
++    if (s_d3d.custom_swapchain && s_swapchain_provider.resize)
++        s_swapchain_provider.resize(s_d3d.swap_chain, new_w, new_h);
++
++    for (u32 i = 0; i < FRAME_COUNT; i++) {
++        if (s_output_pass_ready) {
++            if (s_d3d.output_targets[i]) {
++                s_d3d.output_targets[i]->lpVtbl->Release(s_d3d.output_targets[i]);
++                s_d3d.output_targets[i] = NULL;
++            }
++            if (s_d3d.hudless_output[i]) {
++                s_d3d.hudless_output[i]->lpVtbl->Release(s_d3d.hudless_output[i]);
++                s_d3d.hudless_output[i] = NULL;
++            }
++        } else {
++            if (s_d3d.render_targets[i]) {
++                s_d3d.render_targets[i]->lpVtbl->Release(s_d3d.render_targets[i]);
++                s_d3d.render_targets[i] = NULL;
++            }
++        }
++    }
++
++    HRESULT hr = s_d3d.swap_chain->lpVtbl->ResizeBuffers(
++        s_d3d.swap_chain, FRAME_COUNT, new_w, new_h,
++        DXGI_FORMAT_R8G8B8A8_UNORM, 0);
++    if (FAILED(hr)) {
++        fprintf(stderr, "[D3D12] ResizeBuffers(%ux%u) failed (0x%08lX)\n",
++                new_w, new_h, (unsigned long)hr);
++    } else {
++        s_d3d.present_width = new_w;
++        s_d3d.present_height = new_h;
++    }
++
++    s_d3d.frame_index = s_d3d.swap_chain->lpVtbl->GetCurrentBackBufferIndex(s_d3d.swap_chain);
++    D3D12_CPU_DESCRIPTOR_HANDLE rtv_handle = s_d3d.rtv_heap_cpu_base;
++    for (u32 i = 0; i < FRAME_COUNT; i++) {
++        hr = s_d3d.swap_chain->lpVtbl->GetBuffer(
++            s_d3d.swap_chain, i, &IID_ID3D12Resource,
++            s_output_pass_ready ? (void**)&s_d3d.output_targets[i]
++                                : (void**)&s_d3d.render_targets[i]);
++        if (FAILED(hr)) {
++            fprintf(stderr, "[D3D12] GetBuffer(%u) after resize failed (0x%08lX)\n",
++                    i, (unsigned long)hr);
++            return;
++        }
++        if (!s_output_pass_ready) {
++            s_d3d.device->lpVtbl->CreateRenderTargetView(
++                s_d3d.device, s_d3d.render_targets[i], NULL, rtv_handle);
++        }
++        rtv_handle.ptr += s_d3d.rtv_descriptor_size;
++    }
++
++    if (s_output_pass_ready) {
++        s_output_pass.width = s_d3d.present_width;
++        s_output_pass.height = s_d3d.present_height;
++        if (s_output_pass.resize &&
++            s_output_pass.resize(s_output_pass.userdata, s_d3d.present_width, s_d3d.present_height) != 0) {
++            fprintf(stderr, "[OUTPUT] resize(%ux%u) failed\n",
++                    s_d3d.present_width, s_d3d.present_height);
++        }
++    }
++}
++
+ static void render_frame(void)
+ {
+     double _rf0 = perf_on() ? perf_now() : 0.0;
+@@ -6900,6 +7037,10 @@ static void render_frame(void)
+      * costs little. */
+     double fence_start = perf_on() ? perf_now() : 0.0;
+     wait_for_gpu();
++    if (s_d3d.pending_resize_width || s_d3d.pending_resize_height) {
++        handle_pending_resize();
++        fi = s_d3d.frame_index;
++    }
+     if (perf_on()) s_perf_fence += perf_now() - fence_start;
+     double flush_start = perf_on() ? perf_now() : 0.0;
+     vp_release_frame_psos();
+@@ -8029,7 +8170,7 @@ static void render_frame(void)
+                 }
+                 /* The battle post-process is copied to the display with a full
+                  * viewport, unblended quad. The following 2D draws are HUD. */
+-                if (s_present_this_frame && s_pending_scene_zeta && !dr->rt_off && !dr->blend &&
++                if (!captured_hudless && s_present_this_frame && s_pending_scene_zeta && !dr->rt_off && !dr->blend &&
+                     !(dr->depth_key & 1u) && dr->cmask == 0xf &&
+                     dr->vp_x == 0 && dr->vp_y == 0 && dr->vp_w == s_d3d.width && dr->vp_h == s_d3d.height &&
+                     (dr->vertex_count == 4 || dr->vertex_count == 6) && dr->tex_rt[0] >= 0) {
+@@ -10365,6 +10506,8 @@ static void d3d12_draw_arrays_impl(void* ud, u32 primitive, u32 first, u32 count
+                 }
+                 dr->tex_slot = -1;
+                 dr->vs_idx = vp_get_vs(s_d3d.current_rsx_state);
++                dr->vs_hash = (dr->vs_idx >= 0 && dr->vs_idx < s_d3d.vp_vs_n)
++                    ? s_d3d.vp_vs[dr->vs_idx].hash : 0;
+                 dr->is_clear = 0;
+                 dr->blend = s_d3d.current_rsx_state ? s_d3d.current_rsx_state->blend_enable : 1;
+                 dr->blend_key = rsx_blend_key(s_d3d.current_rsx_state, dr->blend);
+@@ -10492,6 +10635,8 @@ static void d3d12_draw_arrays_impl(void* ud, u32 primitive, u32 first, u32 count
+             }
+             dr->tex_slot = -1;
+             dr->vs_idx = vp_get_vs(s_d3d.current_rsx_state);
++            dr->vs_hash = (dr->vs_idx >= 0 && dr->vs_idx < s_d3d.vp_vs_n)
++                ? s_d3d.vp_vs[dr->vs_idx].hash : 0;
+             dr->is_clear = 0;
+             dr->blend = s_d3d.current_rsx_state ? s_d3d.current_rsx_state->blend_enable : 1;
+             dr->blend_key = rsx_blend_key(s_d3d.current_rsx_state, dr->blend);
+@@ -10746,6 +10891,8 @@ static void d3d12_draw_indexed_impl(void* ud, u32 primitive, u32 first, u32 coun
+         }
+         dr->tex_slot = -1;
+         dr->vs_idx = vp_get_vs(s_d3d.current_rsx_state);
++        dr->vs_hash = (dr->vs_idx >= 0 && dr->vs_idx < s_d3d.vp_vs_n)
++            ? s_d3d.vp_vs[dr->vs_idx].hash : 0;
+         dr->is_clear = 0;
+         dr->blend = s_d3d.current_rsx_state ? s_d3d.current_rsx_state->blend_enable : 1;
+         dr->blend_key = rsx_blend_key(s_d3d.current_rsx_state, dr->blend);
+@@ -11131,15 +11278,54 @@ void rsx_d3d12_backend_shutdown(void)
+     memset(s_off_rt_srv_state, 0, sizeof s_off_rt_srv_state);
+     memset(s_vp_fp_ht, 0, sizeof s_vp_fp_ht);
+     s_vp_fp_evict = 0;
+-    s_d3d.vp_fp_n = 0;
+     memset(s_vp_tex_ht, 0, sizeof s_vp_tex_ht);
+     s_vp_tex_cursor = 0;
+     s_screen_copy_id = 0;
+-    if (!s_d3d.initialized) return;
++    if (!s_d3d.initialized) {
++        s_d3d.vp_fp_n = 0;
++        s_d3d.vp_vs_n = 0;
++        return;
++    }
+ 
+     wait_for_gpu();
+     if (s_d3d.custom_swapchain) s_swapchain_provider.drain(s_d3d.swap_chain);
+     s_pending_scene_zeta = 0;
++    for (int i = 0; i < s_d3d.vp_fp_n; i++) {
++        if (s_d3d.vp_fp[i].pso) {
++            s_d3d.vp_fp[i].pso->lpVtbl->Release(s_d3d.vp_fp[i].pso);
++            s_d3d.vp_fp[i].pso = NULL;
++        }
++    }
++    memset(s_d3d.vp_fp, 0, sizeof s_d3d.vp_fp);
++    s_d3d.vp_fp_n = 0;
++
++    for (int i = 0; i < s_d3d.vp_vs_n; i++) {
++        if (s_d3d.vp_vs[i].vs) {
++            s_d3d.vp_vs[i].vs->lpVtbl->Release(s_d3d.vp_vs[i].vs);
++            s_d3d.vp_vs[i].vs = NULL;
++        }
++    }
++    memset(s_d3d.vp_vs, 0, sizeof s_d3d.vp_vs);
++    s_d3d.vp_vs_n = 0;
++    if (s_d3d.vp_vs_blob) {
++        s_d3d.vp_vs_blob->lpVtbl->Release(s_d3d.vp_vs_blob);
++        s_d3d.vp_vs_blob = NULL;
++    }
++    s_d3d.vp_gen++;
++
++    for (int i = 0; i < MAX_OFF_RTS; i++) {
++        if (s_d3d.off_rt[i].res) { s_d3d.off_rt[i].res->lpVtbl->Release(s_d3d.off_rt[i].res); s_d3d.off_rt[i].res = NULL; }
++        if (s_d3d.off_rt[i].up)  { s_d3d.off_rt[i].up->lpVtbl->Release(s_d3d.off_rt[i].up);   s_d3d.off_rt[i].up  = NULL; }
++    }
++    memset(s_d3d.off_rt, 0, sizeof s_d3d.off_rt);
++
++    if (s_screen_copy) { s_screen_copy->lpVtbl->Release(s_screen_copy); s_screen_copy = NULL; }
++    for (int i = 0; i < SUBVP_SLOTS; i++) {
++        if (s_subvp[i].res) { s_subvp[i].res->lpVtbl->Release(s_subvp[i].res); s_subvp[i].res = NULL; }
++        s_subvp[i].res_id = 0;
++    }
++    s_subvp_n = 0;
++
+     for (int i = 0; i < VP_TEX_SLOTS; i++) {
+         if (s_d3d.vp_tex[i].res) { s_d3d.vp_tex[i].res->lpVtbl->Release(s_d3d.vp_tex[i].res); s_d3d.vp_tex[i].res = NULL; }
+         if (s_d3d.vp_tex[i].up)  { s_d3d.vp_tex[i].up->lpVtbl->Release(s_d3d.vp_tex[i].up);   s_d3d.vp_tex[i].up  = NULL; }
+@@ -11162,6 +11348,16 @@ void rsx_d3d12_backend_shutdown(void)
+         s_d3d.vp_vb->lpVtbl->Release(s_d3d.vp_vb);
+         s_d3d.vp_vb = NULL; s_d3d.vp_vb_upload = NULL;
+     }
++    if (s_d3d.vp_cb) {
++        if (s_d3d.vp_cb_mapped) s_d3d.vp_cb->lpVtbl->Unmap(s_d3d.vp_cb, 0, NULL);
++        s_d3d.vp_cb->lpVtbl->Release(s_d3d.vp_cb);
++        s_d3d.vp_cb = NULL; s_d3d.vp_cb_mapped = NULL;
++    }
++    if (s_d3d.vp_fpcb) {
++        if (s_d3d.vp_fpcb_mapped) s_d3d.vp_fpcb->lpVtbl->Unmap(s_d3d.vp_fpcb, 0, NULL);
++        s_d3d.vp_fpcb->lpVtbl->Release(s_d3d.vp_fpcb);
++        s_d3d.vp_fpcb = NULL; s_d3d.vp_fpcb_mapped = NULL;
++    }
+     for (u32 i = 0; i < SAMPLER_MAX_PAGES; ++i) {
+         if (s_sampler_pages[i].heap) s_sampler_pages[i].heap->lpVtbl->Release(s_sampler_pages[i].heap);
+         memset(&s_sampler_pages[i], 0, sizeof(s_sampler_pages[i]));
+@@ -11170,10 +11366,18 @@ void rsx_d3d12_backend_shutdown(void)
+     if (s_d3d.vertex_buffer) {
+         s_d3d.vertex_buffer->lpVtbl->Unmap(s_d3d.vertex_buffer, 0, NULL);
+         s_d3d.vertex_buffer->lpVtbl->Release(s_d3d.vertex_buffer);
+-    }
+-    if (s_d3d.pipeline_state)        s_d3d.pipeline_state->lpVtbl->Release(s_d3d.pipeline_state);
+-    if (s_d3d.pipeline_state_lines)  s_d3d.pipeline_state_lines->lpVtbl->Release(s_d3d.pipeline_state_lines);
+-    if (s_d3d.pipeline_state_points) s_d3d.pipeline_state_points->lpVtbl->Release(s_d3d.pipeline_state_points);
++        s_d3d.vertex_buffer = NULL;
++    }
++    if (s_d3d.pipeline_state)        { s_d3d.pipeline_state->lpVtbl->Release(s_d3d.pipeline_state); s_d3d.pipeline_state = NULL; }
++    if (s_d3d.pipeline_state_lines)  { s_d3d.pipeline_state_lines->lpVtbl->Release(s_d3d.pipeline_state_lines); s_d3d.pipeline_state_lines = NULL; }
++    if (s_d3d.pipeline_state_points) { s_d3d.pipeline_state_points->lpVtbl->Release(s_d3d.pipeline_state_points); s_d3d.pipeline_state_points = NULL; }
++    if (s_d3d.pipeline_state_tex)    { s_d3d.pipeline_state_tex->lpVtbl->Release(s_d3d.pipeline_state_tex); s_d3d.pipeline_state_tex = NULL; }
++    if (s_d3d.pipeline_state_vp)     { s_d3d.pipeline_state_vp->lpVtbl->Release(s_d3d.pipeline_state_vp); s_d3d.pipeline_state_vp = NULL; }
++    if (s_d3d.pipeline_state_vp_color) { s_d3d.pipeline_state_vp_color->lpVtbl->Release(s_d3d.pipeline_state_vp_color); s_d3d.pipeline_state_vp_color = NULL; }
++    if (s_d3d.vp_root_sig)           { s_d3d.vp_root_sig->lpVtbl->Release(s_d3d.vp_root_sig); s_d3d.vp_root_sig = NULL; }
++    if (s_d3d.srv_heap)              { s_d3d.srv_heap->lpVtbl->Release(s_d3d.srv_heap); s_d3d.srv_heap = NULL; }
++    if (s_d3d.rt_rtv_heap)           { s_d3d.rt_rtv_heap->lpVtbl->Release(s_d3d.rt_rtv_heap); s_d3d.rt_rtv_heap = NULL; }
++    if (s_d3d.readback_buf)          { s_d3d.readback_buf->lpVtbl->Release(s_d3d.readback_buf); s_d3d.readback_buf = NULL; }
+     if (s_d3d.depth_buffer) s_d3d.depth_buffer->lpVtbl->Release(s_d3d.depth_buffer);
+     if (s_d3d.dsv_heap)     s_d3d.dsv_heap->lpVtbl->Release(s_d3d.dsv_heap);
+     if (s_d3d.root_signature) s_d3d.root_signature->lpVtbl->Release(s_d3d.root_signature);
+diff --git a/libs/video/rsx_d3d12_backend.h b/libs/video/rsx_d3d12_backend.h
+index cb37430..ecd4a39 100644
+--- a/libs/video/rsx_d3d12_backend.h
++++ b/libs/video/rsx_d3d12_backend.h
+@@ -51,6 +51,7 @@ typedef struct rsx_d3d12_output_pass {
+     int (*record)(void* userdata, void* command_list, void* input, void* output, u32 frame_index);
+     void (*shutdown)(void* userdata);
+     int (*record_hudless)(void* userdata, void* command_list, void* input, void* output, u32 frame_index);
++    int (*resize)(void* userdata, u32 width, u32 height);
+ } rsx_d3d12_output_pass;
+ int rsx_d3d12_backend_set_output_pass(const rsx_d3d12_output_pass* pass);
+ 
+@@ -72,6 +73,7 @@ typedef struct rsx_d3d12_swapchain_provider {
+     void* (*create)(void* hwnd, const void* desc, void* queue, void* factory);
+     void (*record)(void* command_list, const rsx_d3d12_present_scene* scene);
+     void (*drain)(void* swapchain);
++    void (*resize)(void* swapchain, u32 width, u32 height);
+ } rsx_d3d12_swapchain_provider;
+ int rsx_d3d12_backend_set_swapchain_provider(const rsx_d3d12_swapchain_provider* provider);
+ 
+diff --git a/runtime/syscalls/sys_event.c b/runtime/syscalls/sys_event.c
+index 141a53d..894a8ea 100644
+--- a/runtime/syscalls/sys_event.c
++++ b/runtime/syscalls/sys_event.c
+@@ -978,11 +978,16 @@ int sys_event_queue_push_by_id(uint32_t queue_id,
+ uint32_t sys_event_find_queue_by_key(uint64_t key)
+ {
+     if (key == 0) return 0;
++    evt_table_lock();
++    uint32_t found = 0;
+     for (int i = 0; i < SYS_EVENT_QUEUE_MAX; i++) {
+-        if (g_sys_event_queues[i].active && g_sys_event_queues[i].key == key)
+-            return (uint32_t)(i + 1);
++        if (g_sys_event_queues[i].active && g_sys_event_queues[i].key == key) {
++            found = (uint32_t)(i + 1);
++            break;
++        }
+     }
+-    return 0;
++    evt_table_unlock();
++    return found;
+ }
+ 
+ int64_t sys_event_port_send(ppu_context* ctx)

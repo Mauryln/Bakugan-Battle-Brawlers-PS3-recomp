@@ -212,9 +212,9 @@ bool load(Config &c, const std::wstring &path, std::wstring *error) {
     }
     c.output = choose(get(L"Graphics", L"Output", c.output, path),
                       {L"auto", L"native", L"720p", L"1080p", L"1440p", L"2160p"}, L"720p");
-    c.cap =
-        choose(get(L"Graphics", L"FPS", c.cap, path), {L"0", L"30", L"60", L"90", L"120", L"monitor"}, c.cap);
-    c.window = choose(get(L"Graphics", L"Window", c.window, path), {L"windowed", L"borderless"}, c.window);
+    const auto legacy_mode = get(L"Graphics", L"Window", c.display_mode, path);
+    c.display_mode = choose(get(L"Graphics", L"display_mode", legacy_mode, path),
+                            {L"windowed", L"borderless", L"fullscreen"}, c.display_mode);
     c.fsr = choose(get(L"Graphics", L"FSR", c.fsr, path), {L"auto", L"fsr1", L"0"}, c.fsr);
     c.frame_gen = choose(get(L"Graphics", L"frame_gen", c.frame_gen, path),
                          {bakugan::FRAME_GEN_OFF, bakugan::FRAME_GEN_FSR3}, c.frame_gen);
@@ -262,15 +262,20 @@ bool load(Config &c, const std::wstring &path, std::wstring *error) {
     c.aniso = (a == 1 || a == 2 || a == 4 || a == 8 || a == 16) ? a : 16;
     c.input = (InputMode)(int)number(get(L"Input", L"Mode", L"0", path), 0, 0, 2);
     c.motion = (MotionMode)(int)number(get(L"Input", L"Motion", L"0", path), 0, 0, 2);
-    c.sixaxis_profile = (SixaxisProfile)(int)number(get(L"Input", L"SixaxisProfile", L"1", path), 1, 0, 3);
-    c.deadzone = number(get(L"Input", L"Deadzone", L"0.15", path), 0.15f, 0.02f, 0.5f);
+    const auto profile = static_cast<SixaxisProfile>(static_cast<int>(
+        number(get(L"Input", L"SixaxisProfile", L"", path), static_cast<float>(c.sixaxis_profile), 0, 3)));
+    apply_sixaxis_profile(c, profile);
+    const auto input_number = [&](const wchar_t *key, float fallback, float minimum, float maximum) {
+        return number(get(L"Input", key, L"", path), fallback, minimum, maximum);
+    };
+    c.deadzone = input_number(L"Deadzone", c.deadzone, 0.02f, 0.5f);
     c.mouse_sensitivity = number(get(L"Input", L"MouseSensitivity", L"0.5", path), 0.5f, 0.05f, 2);
     c.mouse_look = get(L"Input", L"MouseLook", L"1", path) != L"0";
     c.mouse_left_cross = get(L"Input", L"MouseLeftCross", L"1", path) != L"0";
-    c.gyro_sensitivity = number(get(L"Input", L"GyroSensitivity", L"1.0", path), 1.0f, 0.1f, 5.0f);
-    c.gyro_deadzone = number(get(L"Input", L"GyroDeadzone", L"0.05", path), 0.05f, 0.0f, 0.5f);
-    c.sixaxis_curve = number(get(L"Input", L"SixaxisCurve", L"0.50", path), 0.50f, 0.0f, 1.0f);
-    c.sixaxis_smoothing = number(get(L"Input", L"SixaxisSmoothing", L"0.45", path), 0.45f, 0.0f, 1.0f);
+    c.gyro_sensitivity = input_number(L"GyroSensitivity", c.gyro_sensitivity, 0.1f, 5.0f);
+    c.gyro_deadzone = input_number(L"GyroDeadzone", c.gyro_deadzone, 0.0f, 0.5f);
+    c.sixaxis_curve = input_number(L"SixaxisCurve", c.sixaxis_curve, 0.0f, 1.0f);
+    c.sixaxis_smoothing = input_number(L"SixaxisSmoothing", c.sixaxis_smoothing, 0.0f, 1.0f);
     c.gyro_invert_x = get(L"Input", L"GyroInvertX", L"0", path) != L"0";
     c.gyro_invert_y = get(L"Input", L"GyroInvertY", L"0", path) != L"0";
     auto guid = get(L"Input", L"GUID", L"", path);
@@ -319,8 +324,8 @@ bool save(const Config &c, const std::wstring &path, std::wstring *error) {
     put(L"Player", L"Language", c.language);
     put(L"Player", L"LauncherLanguage", c.ui_language);
     put(L"Graphics", L"Output", c.output);
-    put(L"Graphics", L"FPS", c.cap);
-    put(L"Graphics", L"Window", c.window);
+    put(L"Graphics", L"FPS", L"" PS3_DEFAULT_FPS_CAP);
+    put(L"Graphics", L"display_mode", c.display_mode);
     put(L"Graphics", L"FSR", c.fsr);
     put(L"Graphics", L"frame_gen", c.frame_gen);
     put(L"Graphics", L"AAMode", c.aa_mode);
@@ -405,9 +410,9 @@ void apply_environment(const Config &c, const std::wstring &path) {
         choose(c.frame_gen, {bakugan::FRAME_GEN_OFF, bakugan::FRAME_GEN_FSR3}, L""));
     env(L"PS3_ANISO", std::to_wstring(c.aniso));
     env(L"PS3_LOD_BIAS", L"0");
-    env(L"PS3_FPS_CAP", choose(c.cap, {L"0", L"30", L"60", L"90", L"120", L"monitor"}, L"30"));
+    env(L"" PS3_ENV_FPS_CAP, L"" PS3_DEFAULT_FPS_CAP);
     env(L"PS3_TICK_HZ", L"");
-    env(L"PS3_WINDOW_MODE", c.window);
+    env(L"PS3_WINDOW_MODE", c.display_mode);
     env(L"PS3_WINDOW_MONITOR", L"primary");
     env(L"PS3_LANG", c.language == L"auto" ? L"" : c.language);
     env(L"PS3_VERBOSE", L"0");

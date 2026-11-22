@@ -22,6 +22,8 @@ int main() {
     using namespace player;
     auto c = defaults();
     CHECK(c.frame_gen == L"off");
+    CHECK(c.sixaxis_profile == SixaxisProfile::Fast);
+    CHECK(c.deadzone == 0.10f && c.gyro_sensitivity == 1.40f && c.sixaxis_smoothing == 0.15f);
     CHECK(c.gamepad[CROSS].kind == BindingKind::Button && c.gamepad[CROSS].code == SDL_GAMEPAD_BUTTON_SOUTH);
     Binding b;
     CHECK(!parse_binding(L"key:999", b));
@@ -33,7 +35,7 @@ int main() {
     std::filesystem::remove(path);
     c.language = L"es";
     c.output = L"1440p";
-    c.cap = L"60";
+    c.display_mode = L"fullscreen";
     c.aa_mode = L"off";
     c.frame_gen = L"fsr3";
     c.sharpness = 1.2f;
@@ -46,11 +48,19 @@ int main() {
     c.motion = MotionMode::RightStick;
     std::wstring error;
     CHECK(save(c, path.wstring(), &error));
+    wchar_t fps[16];
+    CHECK(GetPrivateProfileStringW(L"Graphics", L"FPS", L"", fps, 16, path.c_str()) &&
+          std::wstring(fps) == L"30");
     Config loaded;
     CHECK(load(loaded, path.wstring(), &error));
-    CHECK(loaded.language == c.language && loaded.output == c.output && loaded.cap == c.cap);
+    CHECK(loaded.language == c.language && loaded.output == c.output);
     CHECK(loaded.aa_mode == L"off" && std::abs(loaded.sharpness - 1.2f) < 0.001f && loaded.aniso == 4);
     CHECK(loaded.frame_gen == L"fsr3");
+    CHECK(loaded.display_mode == L"fullscreen");
+    CHECK(WritePrivateProfileStringW(L"Graphics", L"Window", L"windowed", path.c_str()));
+    CHECK(load(loaded, path.wstring(), &error) && loaded.display_mode == L"fullscreen");
+    CHECK(WritePrivateProfileStringW(L"Graphics", L"display_mode", nullptr, path.c_str()));
+    CHECK(load(loaded, path.wstring(), &error) && loaded.display_mode == L"windowed");
     wchar_t ini_frame_gen[16];
     CHECK(GetPrivateProfileStringW(L"Graphics", L"frame_gen", L"", ini_frame_gen, 16, path.c_str()) &&
           std::wstring(ini_frame_gen) == L"fsr3");
@@ -99,14 +109,12 @@ int main() {
     CHECK(GetEnvironmentVariableW(L"PS3_AA", env, 128) && std::wstring(env) == L"off");
     CHECK(GetEnvironmentVariableW(L"PS3_ANISO", env, 128) && std::wstring(env) == L"4");
     CHECK(GetEnvironmentVariableW(L"PS3_FRAME_GEN", env, 128) && std::wstring(env) == L"fsr3");
-    CHECK(GetEnvironmentVariableW(L"PS3_FPS_CAP", env, 128) && std::wstring(env) == L"60");
+    CHECK(GetEnvironmentVariableW(L"PS3_FPS_CAP", env, 128) && std::wstring(env) == L"30");
     c.frame_gen = L"invalid";
-    c.cap = L"30";
     apply_environment(c, path.wstring());
     CHECK(!GetEnvironmentVariableW(L"PS3_FRAME_GEN", env, 128));
     CHECK(GetEnvironmentVariableW(L"PS3_FPS_CAP", env, 128) && std::wstring(env) == L"30");
     c.frame_gen = L"fsr3";
-    c.cap = L"60";
     SetEnvironmentVariableW(L"PS3_DEBUG", L"1");
     SetEnvironmentVariableW(L"PAD_REPLAY", L"test.padrec");
     SetEnvironmentVariableW(L"PS3_SAVEDATA_CHOICE", L"BLES00758-PLAYER-DATA-00");
@@ -160,6 +168,20 @@ int main() {
         CHECK(std::abs(sx * ry - sy * rx) < 1e-4f);
     }
 
+    // The left stick keeps the same speed for axial and diagonal travel.
+    constexpr float aim_deadzone = 0.10f;
+    shape_aim_stick(0.08f, 0.04f, aim_deadzone, sx, sy);
+    CHECK(sx == 0.f && sy == 0.f);
+    shape_aim_stick(0.4f, 0.f, aim_deadzone, sx, sy);
+    const float aim_speed = sx;
+    CHECK(aim_speed > 0.20f && aim_speed < 0.30f && sy == 0.f);
+    shape_aim_stick(0.4f / std::sqrt(2.f), 0.4f / std::sqrt(2.f), aim_deadzone, sx, sy);
+    CHECK(std::abs(std::hypot(sx, sy) - aim_speed) < 1e-5f);
+    shape_aim_stick(0.85f, 0.f, aim_deadzone, sx, sy);
+    CHECK(sx < 0.85f);
+    shape_aim_stick(1.f, 0.f, aim_deadzone, sx, sy);
+    CHECK(sx == 1.f && sy == 0.f);
+
     // Sixaxis radial deadzone + smooth response curve + NaN safety
     shape_sixaxis_2d(0.10f, -0.10f, 0.15f, 0.80f, sx, sy);
     CHECK(sx == 0.f && sy == 0.f);
@@ -183,17 +205,22 @@ int main() {
     CHECK(std::abs(reloaded.sixaxis_curve - 0.80f) < 0.001f);
     CHECK(std::abs(reloaded.sixaxis_smoothing - 0.75f) < 0.001f);
 
-    // Backwards compatibility: missing Sixaxis keys fall back to Standard defaults
+    // Fall back to Fast for missing settings while preserving explicit profile and tuning keys.
     auto legacy_path = std::filesystem::temp_directory_path() / L"bakugan-legacy-test.ini";
     std::filesystem::remove(legacy_path);
     CHECK(WritePrivateProfileStringW(L"Player", L"Version", L"1", legacy_path.c_str()));
     CHECK(WritePrivateProfileStringW(L"Input", L"Deadzone", L"0.22", legacy_path.c_str()));
     Config legacy_cfg;
     CHECK(load(legacy_cfg, legacy_path.wstring(), &error));
-    CHECK(legacy_cfg.sixaxis_profile == SixaxisProfile::Standard);
+    CHECK(legacy_cfg.sixaxis_profile == SixaxisProfile::Fast);
     CHECK(legacy_cfg.frame_gen == L"off");
+    CHECK(legacy_cfg.display_mode == L"borderless");
     CHECK(std::abs(legacy_cfg.deadzone - 0.22f) < 0.001f);
-    CHECK(std::abs(legacy_cfg.sixaxis_smoothing - 0.45f) < 0.001f);
+    CHECK(std::abs(legacy_cfg.sixaxis_smoothing - 0.15f) < 0.001f);
+    CHECK(WritePrivateProfileStringW(L"Input", L"SixaxisProfile", L"1", legacy_path.c_str()));
+    CHECK(load(legacy_cfg, legacy_path.wstring(), &error));
+    CHECK(legacy_cfg.sixaxis_profile == SixaxisProfile::Standard);
+    CHECK(legacy_cfg.sixaxis_smoothing == 0.45f && legacy_cfg.deadzone == 0.22f);
     std::filesystem::remove(legacy_path);
 
     SixaxisState state_fast_hz, state_slow_hz;
@@ -230,6 +257,7 @@ int main() {
             CHECK(er.sensors[s] <= 1023);
     }
     Config mode_cfg = defaults();
+    apply_sixaxis_profile(mode_cfg, SixaxisProfile::Standard);
     mode_cfg.motion = MotionMode::Sensors;
     SixaxisState sensors_state;
     float stx = 0.f, sty = 0.f;
@@ -312,6 +340,38 @@ int main() {
                      std::array<float, 3>{0.f, 9.80665f, 0.f},
                      std::array<float, 3>{0.f, -2.0f, 0.f}, mode_cfg, 0.020f, stx, sty, out_a, out_g);
     CHECK(stx == 0.0f && sty == 0.0f); // RightStick mode ignores physical gyro
+
+    // Test the complete report used by the SDL bridge with both sources active.
+    Config hybrid = defaults();
+    const std::array<float, 3> turn_right{0.f, -2.f, 0.f};
+    const auto steady_report = [&](const Config &cfg, const std::array<float, ACTION_COUNT> &input) {
+        SixaxisState state;
+        MotionPulse held;
+        Report report;
+        for (unsigned i = 0; i < 80; ++i)
+            report = make_gamepad_report(input, cfg, true, held_accel, turn_right,
+                                         0.004f, 3000 + i * 4, state, held);
+        return report;
+    };
+    std::array<float, ACTION_COUNT> hybrid_stick{};
+    const auto gyro_alone = steady_report(hybrid, hybrid_stick);
+    CHECK(gyro_alone.rx > 200 && gyro_alone.sensors[0] > 512 && gyro_alone.sensors[3] > 512);
+    hybrid_stick[R_UP] = 0.65f;
+    const auto combined = steady_report(hybrid, hybrid_stick);
+    CHECK(combined.rx > 200 && combined.ry < 70);
+    CHECK(combined.sensors[0] == gyro_alone.sensors[0] && combined.sensors[3] == gyro_alone.sensors[3]);
+    CHECK(combined.sensors[1] < gyro_alone.sensors[1]);
+    hybrid_stick[R_LEFT] = 1.0f;
+    const auto opposite = steady_report(hybrid, hybrid_stick);
+    CHECK(opposite.rx == 0 && opposite.ry < 70);
+    CHECK(opposite.sensors[0] == 0 && opposite.sensors[1] < gyro_alone.sensors[1]);
+    hybrid.motion = MotionMode::Sensors;
+    const auto only_sensors = steady_report(hybrid, hybrid_stick);
+    CHECK(only_sensors.rx == gyro_alone.rx && only_sensors.ry == gyro_alone.ry &&
+          only_sensors.sensors == gyro_alone.sensors);
+    hybrid.motion = MotionMode::RightStick;
+    const auto only_stick = steady_report(hybrid, hybrid_stick);
+    CHECK(only_stick.rx == 0 && only_stick.ry < 70 && only_stick.sensors[3] < 512);
 
     // Mouse leaky virtual stick: captures 1px sweeps, caps forward flicks to avoid jump spikes,
     // turns/counter-steers crisply, and returns smoothly to 0

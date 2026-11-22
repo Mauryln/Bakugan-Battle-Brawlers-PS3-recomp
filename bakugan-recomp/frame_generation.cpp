@@ -7,6 +7,7 @@
 #include <wrl/client.h>
 
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstddef>
@@ -40,16 +41,40 @@ struct FrameGeneration {
     float previous_fov = 0.0f;
     void *previous_depth = nullptr;
     std::uint64_t frame_id = 0;
-    std::uint64_t prepared_frame_id = 0;
-    std::uint64_t dispatches = 0;
+    std::atomic<std::uint64_t> prepared_frame_id{0};
+    std::atomic<std::uint64_t> dispatches{0};
     std::uint64_t native_gaps = 0;
-    std::uint64_t resets = 0;
+    std::atomic<std::uint64_t> resets{0};
     unsigned gap_frames = 0;
-    bool reset_history = false;
+    std::atomic<bool> reset_history{false};
     bool async_compute = true;
     bool context_ready = false;
-    bool enabled = false;
-    bool failed = false;
+    std::atomic<bool> enabled{false};
+    std::atomic<bool> failed{false};
+
+    void reset() {
+        swapchain = {};
+        display = {};
+        scratch.reset();
+        context.reset();
+        motion.Reset();
+        rtv.Reset();
+        last_prepared_time = {};
+        previous_view = {};
+        previous_fov = 0.0f;
+        previous_depth = nullptr;
+        frame_id = 0;
+        prepared_frame_id.store(0, std::memory_order_relaxed);
+        dispatches.store(0, std::memory_order_relaxed);
+        native_gaps = 0;
+        resets.store(0, std::memory_order_relaxed);
+        gap_frames = 0;
+        reset_history.store(false, std::memory_order_relaxed);
+        async_compute = true;
+        context_ready = false;
+        enabled.store(false, std::memory_order_relaxed);
+        failed.store(false, std::memory_order_relaxed);
+    }
 };
 FrameGeneration generation;
 
@@ -163,6 +188,13 @@ FfxErrorCode create_context(ID3D12Device *device) {
     desc.maxUpscaleSize = desc.displaySize = {generation.display.Width, generation.display.Height};
     desc.backBufferFormat = ffxGetSurfaceFormatDX12(generation.display.Format);
     result = ffxFsr3ContextCreate(generation.context.get(), &desc);
+    if (result != FFX_OK && (desc.flags & FFX_FSR3_ENABLE_ASYNC_WORKLOAD_SUPPORT)) {
+        std::fprintf(stderr, "[FRAME GEN] async compute context creation failed (%#x), retrying synchronously\n",
+                     static_cast<unsigned>(result));
+        generation.async_compute = false;
+        desc.flags &= ~FFX_FSR3_ENABLE_ASYNC_WORKLOAD_SUPPORT;
+        result = ffxFsr3ContextCreate(generation.context.get(), &desc);
+    }
     generation.context_ready = result == FFX_OK;
     return result;
 }
@@ -170,18 +202,19 @@ FfxErrorCode create_context(ID3D12Device *device) {
 FfxErrorCode dispatch(const FfxFrameGenerationDispatchDescription *desc, void*) {
     // The proxy owns this mutable descriptor and uses its count to schedule
     // the generated output. A gap still needs the interpolation fence signal.
-    if (generation.prepared_frame_id != desc->frameID) {
+    if (generation.prepared_frame_id.load(std::memory_order_acquire) != desc->frameID) {
         const_cast<FfxFrameGenerationDispatchDescription *>(desc)->numInterpolatedFrames = 0;
         return FFX_OK;
     }
     auto request = *desc;
-    request.reset |= generation.reset_history;
+    request.reset |= generation.reset_history.load(std::memory_order_acquire);
     const FfxErrorCode result = ffxFsr3DispatchFrameGeneration(&request);
     if (result == FFX_OK) {
-        ++generation.dispatches;
-        generation.resets += request.reset;
+        generation.dispatches.fetch_add(1, std::memory_order_relaxed);
+        if (request.reset)
+            generation.resets.fetch_add(1, std::memory_order_relaxed);
     } else {
-        generation.failed = true;
+        generation.failed.store(true, std::memory_order_release);
         log_error("interpolation", result);
     }
     return result;
@@ -196,24 +229,26 @@ FfxErrorCode configure_dispatch(bool enabled, ID3D12Resource *hudless = nullptr)
     if (hudless)
         config.HUDLessColor = ffxGetResourceDX12(hudless, ffxGetResourceDescriptionDX12(hudless),
                                                L"HUD-less scene", FFX_RESOURCE_STATE_COMMON);
-    config.interpolationRect = {0, 0, static_cast<int>(generation.display.Width),
-                               static_cast<int>(generation.display.Height)};
+    const auto content = rsx_d3d12_fit_16_9(generation.display.Width, generation.display.Height);
+    config.interpolationRect = {static_cast<int>(content.x), static_cast<int>(content.y),
+                               static_cast<int>(content.width), static_cast<int>(content.height)};
     config.frameID = generation.frame_id;
     // The proxy releases the previous interpolation before the next Present
     // returns. Its two Prepare slots and the display-indexed HUD-less buffers
     // therefore stay live until the compute queue has consumed them.
     const FfxErrorCode result = ffxFsr3ConfigureFrameGeneration(generation.context.get(), &config);
     if (result == FFX_OK)
-        generation.enabled = enabled;
+        generation.enabled.store(enabled, std::memory_order_release);
     return result;
 }
 
 void skip_frame() {
-    if (!generation.enabled) return;
+    if (!generation.enabled.load(std::memory_order_acquire)) return;
     ++generation.gap_frames;
     // Missing input for one batch should not drain every queue and restart
     // the proxy threads. Prolonged gaps return to native presentation.
-    const bool keep_proxy_pacing = !generation.failed && generation.gap_frames <= INPUT_GAP_FRAMES;
+    const bool keep_proxy_pacing = !generation.failed.load(std::memory_order_acquire) &&
+                                   generation.gap_frames <= INPUT_GAP_FRAMES;
     const FfxErrorCode result = configure_dispatch(keep_proxy_pacing);
     generation.native_gaps += keep_proxy_pacing;
     if (result != FFX_OK)
@@ -236,7 +271,7 @@ void clear_motion_vectors(ID3D12GraphicsCommandList *commands) {
 void record_frame(void *commands, const rsx_d3d12_present_scene *scene) {
     ++generation.frame_id;
     FfxFsr3DispatchFrameGenerationPrepareDescription prepare{};
-    if (generation.failed || !scene || !scene->hudless || !get_camera(*scene, prepare)) {
+    if (generation.failed.load(std::memory_order_acquire) || !scene || !scene->hudless || !get_camera(*scene, prepare)) {
         skip_frame();
         return;
     }
@@ -244,11 +279,14 @@ void record_frame(void *commands, const rsx_d3d12_present_scene *scene) {
     auto *command_list = static_cast<ID3D12GraphicsCommandList *>(commands);
     auto *depth = static_cast<ID3D12Resource *>(scene->depth);
     if (!generation.context_ready) {
+        const auto display = static_cast<ID3D12Resource *>(scene->hudless)->GetDesc();
+        generation.display.Width = static_cast<UINT>(display.Width);
+        generation.display.Height = display.Height;
         ComPtr<ID3D12Device> device;
         const FfxErrorCode result = SUCCEEDED(depth->GetDevice(IID_PPV_ARGS(&device)))
             ? create_context(device.Get()) : FFX_ERROR_NULL_DEVICE;
         if (result != FFX_OK) {
-            generation.failed = true;
+            generation.failed.store(true, std::memory_order_release);
             log_error("context creation", result);
             return;
         }
@@ -266,24 +304,28 @@ void record_frame(void *commands, const rsx_d3d12_present_scene *scene) {
     prepare.renderSize = SCENE_SIZE;
     prepare.motionVectorScale = {static_cast<float>(SCENE_SIZE.width), static_cast<float>(SCENE_SIZE.height)};
     const auto now = Clock::now();
-    const bool consecutive = generation.prepared_frame_id && generation.prepared_frame_id + 1 == generation.frame_id;
+    const std::uint64_t prev_prepared = generation.prepared_frame_id.load(std::memory_order_acquire);
+    const bool consecutive = prev_prepared && prev_prepared + 1 == generation.frame_id;
     prepare.frameTimeDelta = consecutive
         ? std::chrono::duration<float, std::milli>(now - generation.last_prepared_time).count()
         : BASE_FRAME_MS;
-    generation.reset_history = !consecutive || prepare.frameTimeDelta > 3.0f * BASE_FRAME_MS ||
-                               camera_cut(*scene, prepare.cameraFovAngleVertical);
+    const bool reset_hist = !consecutive || prepare.frameTimeDelta > 3.0f * BASE_FRAME_MS ||
+                            camera_cut(*scene, prepare.cameraFovAngleVertical);
+    generation.reset_history.store(reset_hist, std::memory_order_release);
     prepare.frameID = generation.frame_id;
     FfxErrorCode result = ffxFsr3ContextDispatchFrameGenerationPrepare(generation.context.get(), &prepare);
     if (result == FFX_OK) {
+        generation.prepared_frame_id.store(generation.frame_id, std::memory_order_release);
         result = configure_dispatch(true, static_cast<ID3D12Resource *>(scene->hudless));
         if (result == FFX_OK) {
-            generation.prepared_frame_id = generation.frame_id;
             generation.last_prepared_time = now;
             generation.previous_depth = scene->depth;
             generation.previous_fov = prepare.cameraFovAngleVertical;
             for (unsigned i = 0; i < generation.previous_view.size(); ++i)
                 generation.previous_view[i] = scene->view[i];
             generation.gap_frames = 0;
+        } else {
+            generation.prepared_frame_id.store(prev_prepared, std::memory_order_release);
         }
     }
     if (result != FFX_OK) {
@@ -291,7 +333,7 @@ void record_frame(void *commands, const rsx_d3d12_present_scene *scene) {
         const FfxErrorCode disable_result = configure_dispatch(false);
         if (disable_result != FFX_OK)
             log_error("disable", disable_result);
-        generation.failed = true;
+        generation.failed.store(true, std::memory_order_release);
     }
 }
 
@@ -309,7 +351,8 @@ void *create_swapchain(void *window, const void *desc, void *queue, void *factor
     return static_cast<IDXGISwapChain1 *>(ffxGetDX12SwapchainPtr(generation.swapchain));
 }
 
-void drain_swapchain(void*) {
+void prepare_swapchain_resize(void*) {
+    if (!generation.swapchain) return;
     const FfxErrorCode wait_result = ffxWaitForPresents(generation.swapchain);
     if (wait_result != FFX_OK)
         log_error("waiting for proxy presents", wait_result);
@@ -320,13 +363,27 @@ void drain_swapchain(void*) {
         const FfxErrorCode result = ffxFsr3ContextDestroy(generation.context.get());
         if (result != FFX_OK)
             log_error("context destruction", result);
-        else
-            std::fprintf(stderr, "[FRAME GEN] context destroyed after %llu dispatches, %llu resets, %llu short gaps\n",
-                         static_cast<unsigned long long>(generation.dispatches),
-                         static_cast<unsigned long long>(generation.resets),
-                         static_cast<unsigned long long>(generation.native_gaps));
+        generation.context_ready = false;
+        generation.context.reset();
+        generation.scratch.reset();
+        generation.motion.Reset();
+        generation.rtv.Reset();
     }
-    generation = {};
+    generation.prepared_frame_id.store(0, std::memory_order_release);
+    generation.reset_history.store(true, std::memory_order_release);
+    generation.enabled.store(false, std::memory_order_release);
+    generation.gap_frames = 0;
+}
+
+void drain_swapchain(void* swapchain) {
+    const bool had_context = generation.context_ready;
+    prepare_swapchain_resize(swapchain);
+    if (had_context)
+        std::fprintf(stderr, "[FRAME GEN] context destroyed after %llu dispatches, %llu resets, %llu short gaps\n",
+                     static_cast<unsigned long long>(generation.dispatches.load(std::memory_order_relaxed)),
+                     static_cast<unsigned long long>(generation.resets.load(std::memory_order_relaxed)),
+                     static_cast<unsigned long long>(generation.native_gaps));
+    generation.reset();
 }
 }
 
@@ -338,11 +395,13 @@ int bakugan_frame_generation_configure() {
     generation.async_compute = !async || std::string_view(async) != "0";
 
     const rsx_d3d12_swapchain_provider provider{
-        SCENE_COLOR_OFFSET, SCENE_SIZE.width, SCENE_SIZE.height, create_swapchain, record_frame, drain_swapchain
+        SCENE_COLOR_OFFSET, SCENE_SIZE.width, SCENE_SIZE.height,
+        create_swapchain, record_frame, drain_swapchain, prepare_swapchain_resize
     };
     return rsx_d3d12_backend_set_swapchain_provider(&provider);
 }
 
 bool bakugan_frame_generation_active() {
-    return generation.enabled && !generation.failed;
+    return generation.enabled.load(std::memory_order_acquire) &&
+           !generation.failed.load(std::memory_order_acquire);
 }

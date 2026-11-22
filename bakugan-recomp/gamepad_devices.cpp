@@ -143,9 +143,12 @@ static void sample_stick_2d(const Config &config, SDL_Gamepad *pad,
     const Binding by0 = config.gamepad[neg_y], by1 = config.gamepad[pos_y];
     if (is_axis(bx0) && is_axis(bx1) && is_axis(by0) && is_axis(by1)) {
         float sx = 0.f, sy = 0.f;
-        shape_stick_2d(raw_axis_component(bx1, pad) - raw_axis_component(bx0, pad),
-                       raw_axis_component(by1, pad) - raw_axis_component(by0, pad),
-                       config.deadzone, sx, sy);
+        const float x = raw_axis_component(bx1, pad) - raw_axis_component(bx0, pad);
+        const float y = raw_axis_component(by1, pad) - raw_axis_component(by0, pad);
+        if (neg_x == L_LEFT)
+            shape_aim_stick(x, y, config.deadzone, sx, sy);
+        else
+            shape_stick_2d(x, y, config.deadzone, sx, sy);
         out[neg_x] = std::max(0.f, -sx);
         out[pos_x] = std::max(0.f, sx);
         out[neg_y] = std::max(0.f, -sy);

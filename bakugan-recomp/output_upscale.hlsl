@@ -11,7 +11,8 @@ SamplerState point_sampler : register(s1);
 cbuffer FsrConstants : register(b0) {
     uint4 easu0, easu1, easu2, easu3;
     uint4 rcas;
-    uint4 viewport_sizes; // xy = output, zw = input
+    uint4 viewport_sizes; // xy = fitted output, zw = input
+    uint4 viewport_origin;
 };
 
 AF4 FsrEasuRF(AF2 p) { return input_color.GatherRed(clamp_sampler, p); }
@@ -127,18 +128,22 @@ float4 smaa_weight_main(float4 p : SV_Position) : SV_Target {
     return float4(w_top, w_bot, w_left, w_right);
 }
 float4 smaa_blend_main(float4 p : SV_Position) : SV_Target {
-    int2 ip = int2(p.xy);
+    float2 uv = (p.xy - viewport_origin.xy) / float2(viewport_sizes.xy);
+    int2 ip = min(int2(uv * viewport_sizes.zw), int2(viewport_sizes.zw) - 1);
     float4 w = aux_texture.Load(int3(ip, 0));
     if (dot(w, float4(1.0, 1.0, 1.0, 1.0)) < 1e-5)
-        return float4(input_color.Load(int3(ip, 0)).rgb, 1.0);
+        return float4(input_color.SampleLevel(clamp_sampler, uv, 0).rgb, 1.0);
     float2 texel = 1.0 / float2(viewport_sizes.zw);
-    float2 uv = p.xy * texel;
     float2 offset = float2(0.0, 0.0);
     if (max(w.r, w.g) > max(w.b, w.a))
         offset.y = (w.r > w.g ? -w.r : w.g) * texel.y;
     else
         offset.x = (w.b > w.a ? -w.b : w.a) * texel.x;
     return float4(input_color.SampleLevel(clamp_sampler, uv + offset, 0).rgb, 1.0);
+}
+float4 copy_main(float4 p : SV_Position) : SV_Target {
+    float2 uv = (p.xy - viewport_origin.xy) / float2(viewport_sizes.xy);
+    return float4(input_color.SampleLevel(clamp_sampler, uv, 0).rgb, 1.0);
 }
 float4 easu_main(float4 p : SV_Position) : SV_Target {
     float3 color;
@@ -147,6 +152,6 @@ float4 easu_main(float4 p : SV_Position) : SV_Target {
 }
 float4 rcas_main(float4 p : SV_Position) : SV_Target {
     float3 color;
-    FsrRcasF(color.r, color.g, color.b, uint2(p.xy), rcas);
+    FsrRcasF(color.r, color.g, color.b, uint2(p.xy - viewport_origin.xy), rcas);
     return float4(saturate(color), 1);
 }

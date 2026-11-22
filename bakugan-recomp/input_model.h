@@ -34,6 +34,20 @@ inline void shape_stick_2d(float raw_x, float raw_y, float deadzone, float &out_
     out_x = (ux / max_c) * mag;
     out_y = (uy / max_c) * mag;
 }
+// Preserve aiming speed around the whole circle and keep fine control near center.
+inline void shape_aim_stick(float x, float y, float deadzone, float &out_x, float &out_y) {
+    const float radius = std::hypot(x, y);
+    deadzone = std::clamp(deadzone, 0.0f, 0.95f);
+    if (!std::isfinite(radius) || radius <= deadzone) {
+        out_x = out_y = 0.0f;
+        return;
+    }
+    const float travel = std::clamp((radius - deadzone) / (1.0f - deadzone), 0.0f, 1.0f);
+    constexpr float center_gain = 0.70f;
+    const float scale = travel * (center_gain + (1.0f - center_gain) * travel) / radius;
+    out_x = x * scale;
+    out_y = y * scale;
+}
 inline uint16_t sensor(float value) {
     return std::isfinite(value) ? (uint16_t)std::clamp(std::lround(value), 0l, 1023l) : 512;
 }
@@ -220,8 +234,9 @@ inline void step_sixaxis(SixaxisState &s, float raw_tilt_x, float raw_tilt_y, fl
 
     float stick_x = (cfg.motion == MotionMode::Sensors && real_active) ? 0.0f : raw_tilt_x;
     float stick_y = (cfg.motion == MotionMode::Sensors && real_active) ? 0.0f : raw_tilt_y;
-    float combined_x = std::clamp(stick_x + gyro_tilt_x, -1.0f, 1.0f);
-    float combined_y = std::clamp(stick_y + gyro_tilt_y, -1.0f, 1.0f);
+    // Keep gyro correction on each axis while giving the stick control at its end stop.
+    float combined_x = stick_x + (1.0f - std::abs(stick_x)) * gyro_tilt_x;
+    float combined_y = stick_y + (1.0f - std::abs(stick_y)) * gyro_tilt_y;
     float target_x = 0.0f, target_y = 0.0f;
     shape_sixaxis_2d(combined_x, combined_y, tilt_deadzone, cfg.sixaxis_curve * 0.40f, target_x, target_y);
     s.tilt_x = ema_step(s.tilt_x, target_x, dt_sec, tau, 5.0f);
@@ -283,14 +298,19 @@ inline Report make_report_with_tilt(const std::array<float, ACTION_COUNT> &value
     r.rx = stick(values[R_LEFT], values[R_RIGHT]);
     r.ry = stick(values[R_UP], values[R_DOWN]);
 
-    float sx = std::isfinite(tilt_x) ? std::clamp(tilt_x, -1.0f, 1.0f) : 0.0f;
-    float sy = std::isfinite(tilt_y) ? std::clamp(tilt_y, -1.0f, 1.0f) : 0.0f;
-    float stick_s0 = sx * (sx < 0.f ? 512.f : 511.f);
-    float stick_s1 = sy * (sy < 0.f ? 399.f : 624.f);
-    float stick_s3 = sx * 123.f;
-
-    // Physical sensor input (gyro + accelerometer)
-    bool has_real = (mode != MotionMode::RightStick) && real_motion && finite_motion(accel, gyro);
+    const bool has_real = mode != MotionMode::RightStick && real_motion && finite_motion(accel, gyro);
+    // Hybrid contributes the physical stick to the sensor words. The fused tilt also
+    // contains sensor motion, which the filtered accelerometer and gyro already report.
+    if (has_real) {
+        tilt_x = 0.0f;
+        tilt_y = 0.0f;
+        if (mode == MotionMode::Auto) {
+            tilt_x = values[R_RIGHT] - values[R_LEFT];
+            tilt_y = values[R_DOWN] - values[R_UP];
+        }
+    }
+    const float sx = std::isfinite(tilt_x) ? std::clamp(tilt_x, -1.0f, 1.0f) : 0.0f;
+    const float sy = std::isfinite(tilt_y) ? std::clamp(tilt_y, -1.0f, 1.0f) : 0.0f;
     float base_s0 = 512.f, base_s1 = 399.f, base_s2 = 512.f, base_s3 = 512.f;
     if (has_real) {
         float ax = gyro_invert_x ? -accel[0] : accel[0];
@@ -298,16 +318,15 @@ inline Report make_report_with_tilt(const std::array<float, ACTION_COUNT> &value
         base_s1 = 512.f - accel[1] * (113.f / 9.80665f);
         base_s2 = 512.f - accel[2] * (113.f / 9.80665f);
         base_s3 = 512.f + gyro[1] * (180.f / 3.14159265358979323846f) * (123.f / 90.f);
-        r.sensors[0] = sensor(base_s0);
-        r.sensors[1] = sensor(base_s1);
-        r.sensors[2] = sensor(base_s2);
-        r.sensors[3] = sensor(base_s3);
-    } else {
-        r.sensors[0] = sensor(base_s0 + stick_s0);
-        r.sensors[1] = sensor(base_s1 + stick_s1);
-        r.sensors[2] = sensor(base_s2);
-        r.sensors[3] = sensor(base_s3 + stick_s3);
     }
+    const auto apply_tilt = [](float base, float tilt) {
+        base = std::clamp(base, 0.0f, 1023.0f);
+        return sensor(base + tilt * (tilt < 0.f ? base : 1023.f - base));
+    };
+    r.sensors[0] = apply_tilt(base_s0, sx);
+    r.sensors[1] = apply_tilt(base_s1, sy);
+    r.sensors[2] = sensor(base_s2);
+    r.sensors[3] = sensor(base_s3 + sx * 123.f);
     bool press = values[MOTION_THROW] > 0.25f;
     if (press && !pulse.held) {
         pulse.start = now;
@@ -324,6 +343,25 @@ inline Report make_report_with_tilt(const std::array<float, ACTION_COUNT> &value
             pulse.active = false;
     }
     return r;
+}
+inline Report make_gamepad_report(const std::array<float, ACTION_COUNT> &values, const Config &config,
+                                  bool has_sensors, const std::array<float, 3> &accel,
+                                  const std::array<float, 3> &gyro, float dt_sec, uint64_t now,
+                                  SixaxisState &sixaxis, MotionPulse &pulse) {
+    const bool real = has_sensors && config.motion != MotionMode::RightStick && finite_motion(accel, gyro);
+    const float stick_x = values[R_RIGHT] - values[R_LEFT];
+    const float stick_y = values[R_DOWN] - values[R_UP];
+    float tilt_x = 0.0f, tilt_y = 0.0f;
+    std::array<float, 3> filtered_accel{}, filtered_gyro{};
+    step_sixaxis(sixaxis, stick_x, stick_y, 0.0f, real, accel, gyro, config, dt_sec,
+                 tilt_x, tilt_y, filtered_accel, filtered_gyro);
+    Report report = make_report_with_tilt(values, tilt_x, tilt_y, config.motion, real,
+                                          filtered_accel, filtered_gyro, now, pulse);
+    if (real) {
+        report.rx = stick(std::max(0.0f, -tilt_x), std::max(0.0f, tilt_x));
+        report.ry = stick(std::max(0.0f, -tilt_y), std::max(0.0f, tilt_y));
+    }
+    return report;
 }
 inline Report make_report(const std::array<float, ACTION_COUNT> &values, MotionMode mode, bool real_motion,
                           const std::array<float, 3> &accel, const std::array<float, 3> &gyro, uint64_t now,

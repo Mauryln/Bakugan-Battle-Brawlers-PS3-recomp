@@ -2,3 +2,6 @@
 
 // Register the optional output processor before the D3D12 backend starts.
 int bakugan_output_configure();
+
+bool bakugan_output_smaa_active();
+bool bakugan_output_rcas_active();

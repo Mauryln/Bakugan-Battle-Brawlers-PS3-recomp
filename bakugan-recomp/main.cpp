@@ -374,6 +374,23 @@ static void present_timed(void)
 }
 static double s_pump_s = 0.0;
 extern "C" int cellAudioQuit(void);
+static volatile LONG s_shutdown_started = 0;
+
+static void shutdown_subsystems(void)
+{
+#ifdef _WIN32
+    if (InterlockedCompareExchange(&s_shutdown_started, 1, 0) != 0)
+        return;
+    extern void bakugan_shutdown_video();
+    extern void bakugan_input_shutdown();
+    bakugan_shutdown_video();
+    bakugan_input_shutdown();
+    cellAudioQuit();
+    rsx_d3d12_backend_shutdown();
+    timeEndPeriod(1);
+    fflush(NULL);
+#endif
+}
 
 static int pump_timed(void)
 {
@@ -385,14 +402,7 @@ static int pump_timed(void)
 #ifdef _WIN32
     if (r != 0) {
         fprintf(stderr, "[shutdown] window closed; shutting down subsystems\n");
-        extern void bakugan_shutdown_video();
-        extern void bakugan_input_shutdown();
-        bakugan_shutdown_video();
-        bakugan_input_shutdown();
-        cellAudioQuit();
-        rsx_d3d12_backend_shutdown();
-        timeEndPeriod(1);
-        fflush(NULL);
+        shutdown_subsystems();
         ExitProcess(0);
     }
 #endif
@@ -947,9 +957,8 @@ int main(int argc, char** argv)
             set_default("PS3_AA", cfg.aa_mode);
             set_default("PS3_FSR_SHARPNESS", std::to_wstring(cfg.sharpness));
             set_default("PS3_ANISO", std::to_wstring(cfg.aniso));
-            set_default("PS3_WINDOW_MODE", cfg.window);
+            set_default("PS3_WINDOW_MODE", cfg.display_mode);
             set_default("PS3_WINDOW_MONITOR", L"primary");
-            set_default("PS3_FPS_CAP", cfg.cap);
             const bool default_input = !player::has_input_overrides(cfg);
             if (!default_input && !getenv("PS3_PLAYER_CONFIG")) {
                 const std::wstring wpath = player::config_path();
@@ -959,6 +968,8 @@ int main(int argc, char** argv)
         } else {
             fprintf(stderr, "[boot] invalid player.ini; using defaults\n");
         }
+        if (!getenv(PS3_ENV_FPS_CAP))
+            _putenv_s(PS3_ENV_FPS_CAP, PS3_DEFAULT_FPS_CAP);
         _wputenv_s(bakugan::FRAME_GEN_ENV, player::resolve_frame_gen(cfg).c_str());
     }
     if (!getenv("PS3_VERBOSE")) _putenv_s("PS3_VERBOSE", "0");
@@ -1110,6 +1121,7 @@ int main(int argc, char** argv)
 
     int rc = ppu_run(entry, STACK_TOP);
     printf("\n[boot] ppu_run returned %d (entry function unwound)\n", rc);
+    shutdown_subsystems();
 
     /* A title that called sys_process_exit never reaches this line: that path
      * ends in the host exit(). Getting here means the entry function returned

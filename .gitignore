@@ -6,6 +6,7 @@ bakugan-nx/
 iso/
 game/
 gamedata/
+textures_hd/
 analysis/
 diagnostics/
 dist/
@@ -76,6 +77,7 @@ famous-ref/
 !docs/images/*.png
 !docs/img/*.gif
 !bakugan-recomp/assets/game_icon.png
+!bakugan-recomp/assets/launcher/Control.png
 !bakugan-recomp/assets/bakugan.ico
 
 shadercache/

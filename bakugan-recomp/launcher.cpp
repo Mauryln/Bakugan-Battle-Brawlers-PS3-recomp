@@ -44,12 +44,15 @@ enum {
 };
 constexpr UINT WM_APP_REBUILD = WM_APP + 1;
 constexpr int WIDTH = 1000, HEIGHT = 800;
+constexpr int CANVAS_WIDTH = 628, CANVAS_HEIGHT = 396;
 struct Control {
     HWND hwnd;
     int x, y, w, h;
+    bool is_combo = false;
 };
 std::vector<Control> controls;
-HWND window = nullptr, status = nullptr, sensor_status = nullptr, gamepad_canvas = nullptr;
+HWND window = nullptr, status = nullptr, gamepad_canvas = nullptr;
+std::wstring sensor_status;
 HFONT font = nullptr;
 Config config;
 Gamepads pads;
@@ -86,11 +89,10 @@ void apply_ui_language() {
         ui_english = false;
     else
         ui_english = PRIMARYLANGID(GetUserDefaultUILanguage()) != LANG_SPANISH;
-    launcher_theme::set_english(ui_english);
 }
 
 const wchar_t *outputs[] = {L"720p", L"1080p", L"1440p", L"2160p", L"auto", L"native"};
-const wchar_t *windows[] = {L"borderless", L"windowed"};
+const wchar_t *windows[] = {L"windowed", L"borderless", L"fullscreen"};
 const wchar_t *languages[] = {L"auto", L"es", L"en", L"fr", L"de", L"it", L"nl", L"sv"};
 const wchar_t *ui_languages[] = {L"auto", L"es", L"en"};
 
@@ -111,12 +113,15 @@ HWND add(const wchar_t *cls, const wchar_t *text, int id, int x, int y, int w, i
         style = (style & ~BS_TYPEMASK) | BS_OWNERDRAW;
     HWND child = CreateWindowExW(0, cls, text, WS_CHILD | WS_VISIBLE | style, x, y, w, h, window,
                                  (HMENU)(INT_PTR)id, GetModuleHandleW(nullptr), nullptr);
-    controls.push_back({child, x, y, w, h});
+    controls.push_back({child, x, y, w, h, !wcscmp(cls, L"COMBOBOX")});
+    if (!wcscmp(cls, L"BUTTON") && (style & BS_TYPEMASK) == BS_OWNERDRAW)
+        launcher_theme::track_button(child);
     return child;
 }
 
 HWND combo(int id, int x, int y, int w, std::initializer_list<const wchar_t *> items) {
-    HWND child = add(L"COMBOBOX", L"", id, x, y, w, 230, CBS_DROPDOWNLIST | WS_TABSTOP | WS_VSCROLL);
+    HWND child = add(L"COMBOBOX", L"", id, x, y, w, 230,
+                     CBS_DROPDOWNLIST | CBS_OWNERDRAWFIXED | CBS_HASSTRINGS | WS_TABSTOP | WS_VSCROLL);
     for (auto item : items)
         SendMessageW(child, CB_ADDSTRING, 0, (LPARAM)item);
     SendMessageW(child, CB_SETCURSEL, 0, 0);
@@ -170,8 +175,8 @@ void refresh_devices(bool force = false) {
         HWND box = GetDlgItem(window, ID_DEVICE);
         SendMessageW(box, CB_RESETCONTENT, 0, 0);
         SendMessageW(box, CB_ADDSTRING, 0,
-                     (LPARAM)S(L"Automático: primer mando conectado",
-                              L"Automatic: first connected controller"));
+                     (LPARAM)S(L"Auto · Primer mando",
+                              L"Auto · First controller"));
         int index = 0;
         for (size_t i = 0; i < pads.devices().size(); ++i) {
             const auto &d = pads.devices()[i];
@@ -184,8 +189,8 @@ void refresh_devices(bool force = false) {
         if (!config.device_guid.empty() && !index) {
             index = (int)pads.devices().size() + 1;
             SendMessageW(box, CB_ADDSTRING, 0,
-                         (LPARAM)S(L"Mando guardado (desconectado)",
-                                  L"Saved controller (disconnected)"));
+                         (LPARAM)S(L"Mando guardado (inactivo)",
+                                  L"Saved pad (offline)"));
         }
         choose(ID_DEVICE, index);
     }
@@ -200,21 +205,16 @@ void refresh_devices(bool force = false) {
         info = real ? S(L"Giroscopio + Stick R activos", L"Gyroscope + Right stick active")
                     : S(L"Stick R activo (Sin giroscopio)", L"Right stick active (No gyro)");
     }
-    SetWindowTextW(sensor_status, info.c_str());
+    if (info != sensor_status) {
+        sensor_status = std::move(info);
+        update_bindings();
+    }
 }
 
 void read_controls() {
-    Config disk;
-    if (!path.empty() && std::filesystem::exists(path) && load(disk, path)) {
-        config.cap = disk.cap;
-        config.fsr = disk.fsr;
-        config.input = disk.input;
-        config.gyro_invert_x = disk.gyro_invert_x;
-        config.gyro_invert_y = disk.gyro_invert_y;
-    }
     auto index = [](int id, int count) { return std::clamp(selected(id), 0, count - 1); };
     config.output = outputs[index(ID_OUTPUT, 6)];
-    config.window = windows[index(ID_WINDOW, 2)];
+    config.display_mode = windows[index(ID_WINDOW, static_cast<int>(std::size(windows)))];
     config.frame_gen = index(ID_FRAME_GEN, 2) == 1 ? bakugan::FRAME_GEN_FSR3 : bakugan::FRAME_GEN_OFF;
     config.aa_mode = index(ID_AA_MODE, 2) == 1 ? L"off" : L"smaa";
     int sharp_idx = index(ID_SHARPNESS, 4);
@@ -230,10 +230,15 @@ void read_controls() {
     config.ui_language = ui_languages[index(ID_UI_LANG, 3)];
     config.motion = (MotionMode)index(ID_MOTION_MODE, 3);
     config.sixaxis_profile = (SixaxisProfile)index(ID_SIXAXIS_PROFILE, 4);
-    config.gyro_sensitivity = std::clamp(position(ID_GYRO_SENS) / 100.f, 0.1f, 5.0f);
-    config.deadzone = position(ID_DEADZONE) / 100.f;
-    config.sixaxis_smoothing = position(ID_SIXAXIS_SMOOTH) / 100.f;
-    config.mouse_sensitivity = position(ID_SENSITIVITY) / 100.f;
+    const auto read_slider = [](int id, float &value) {
+        const int current = position(id);
+        if (current != std::lround(value * 100.f))
+            value = current / 100.f;
+    };
+    read_slider(ID_GYRO_SENS, config.gyro_sensitivity);
+    read_slider(ID_DEADZONE, config.deadzone);
+    read_slider(ID_SIXAXIS_SMOOTH, config.sixaxis_smoothing);
+    read_slider(ID_SENSITIVITY, config.mouse_sensitivity);
     config.mouse_look = checked(ID_MOUSE_LOOK);
     config.mouse_left_cross = checked(ID_MOUSE_CROSS);
     read_device();
@@ -249,7 +254,7 @@ void sync_sixaxis_sliders() {
 
 void fill_controls() {
     choose(ID_OUTPUT, outputs, config.output);
-    choose(ID_WINDOW, windows, config.window);
+    choose(ID_WINDOW, windows, config.display_mode);
     choose(ID_LANG, languages, config.language);
     choose(ID_UI_LANG, ui_languages, config.ui_language);
     int a = 0;
@@ -259,11 +264,11 @@ void fill_controls() {
     choose(ID_AA_MODE, config.aa_mode == L"off" ? 1 : 0);
     choose(ID_FRAME_GEN, config.frame_gen == bakugan::FRAME_GEN_FSR3 ? 1 : 0);
     int sharp_idx = 3;
-    if (std::abs(config.sharpness - 1.2f) < 0.05f)
+    if (config.sharpness == 1.2f)
         sharp_idx = 0;
-    else if (std::abs(config.sharpness - 0.6f) < 0.05f)
+    else if (config.sharpness == 0.6f)
         sharp_idx = 1;
-    else if (std::abs(config.sharpness - 0.25f) < 0.05f)
+    else if (config.sharpness == 0.25f)
         sharp_idx = 2;
     choose(ID_SHARPNESS, sharp_idx);
     choose(ID_SIXAXIS_PROFILE, (int)config.sixaxis_profile);
@@ -280,16 +285,21 @@ void layout() {
     RECT client;
     GetClientRect(window, &client);
     double scale = std::min((double)client.right / WIDTH, (double)client.bottom / HEIGHT);
-    if (font)
-        DeleteObject(font);
+    HFONT previous_font = font;
     font =
         CreateFontW(-(int)std::lround(15 * scale), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
                     OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
     for (const auto &c : controls) {
+        SendMessageW(c.hwnd, WM_SETFONT, (WPARAM)font, FALSE);
         MoveWindow(c.hwnd, (int)std::lround(c.x * scale), (int)std::lround(c.y * scale),
                    (int)std::lround(c.w * scale), (int)std::lround(c.h * scale), TRUE);
-        SendMessageW(c.hwnd, WM_SETFONT, (WPARAM)font, TRUE);
+        if (c.is_combo) {
+            const int height = static_cast<int>(std::lround(24 * scale));
+            SendMessageW(c.hwnd, CB_SETITEMHEIGHT, -1, height);
+            SendMessageW(c.hwnd, CB_SETITEMHEIGHT, 0, height);
+        }
     }
+    if (previous_font) DeleteObject(previous_font);
 }
 
 void fit_window(UINT dpi, const RECT *suggested = nullptr) {
@@ -308,8 +318,17 @@ void fit_window(UINT dpi, const RECT *suggested = nullptr) {
 }
 
 bool save_settings() {
-    read_controls();
     std::wstring error;
+    Config disk;
+    if (!load(disk, path, &error)) {
+        message(localized(error));
+        return false;
+    }
+    config.fsr = disk.fsr;
+    config.input = disk.input;
+    config.gyro_invert_x = disk.gyro_invert_x;
+    config.gyro_invert_y = disk.gyro_invert_y;
+    read_controls();
     if (!save(config, path, &error)) {
         message(localized(error));
         return false;
@@ -545,32 +564,47 @@ struct ButtonHotspot {
     bool is_circle;
 };
 
-static const ButtonHotspot kButtons[player::ACTION_COUNT] = {
-    {player::SELECT, L"SELECT", L"Seleccionar / Mapa", L"Select / Map", 232.f, 118.f, 40.f, 18.f, false},
-    {player::L3, L"L3", L"Stick izquierdo (pulsar)", L"Left stick click", 199.f, 199.f, 30.f, 30.f, true},
-    {player::R3, L"R3", L"Stick derecho (pulsar)", L"Right stick click", 399.f, 199.f, 30.f, 30.f, true},
-    {player::START, L"START", L"Pausa / Opciones", L"Pause / Start", 356.f, 118.f, 40.f, 18.f, false},
-    {player::UP, L"▲", L"Cruceta arriba", L"D-Pad up", 136.f, 106.f, 26.f, 24.f, false},
-    {player::RIGHT, L"▶", L"Cruceta derecha", L"D-Pad right", 162.f, 128.f, 24.f, 24.f, false},
-    {player::DOWN, L"▼", L"Cruceta abajo", L"D-Pad down", 136.f, 150.f, 26.f, 24.f, false},
-    {player::LEFT, L"◀", L"Cruceta izquierda", L"D-Pad left", 112.f, 128.f, 24.f, 24.f, false},
-    {player::L2, L"L2", L"Gatillo L2 analógico", L"Left trigger L2", 116.f, 18.f, 66.f, 22.f, false},
-    {player::R2, L"R2", L"Gatillo R2 analógico", L"Right trigger R2", 446.f, 18.f, 66.f, 22.f, false},
-    {player::L1, L"L1", L"Botón superior L1", L"Left shoulder L1", 116.f, 46.f, 66.f, 20.f, false},
-    {player::R1, L"R1", L"Botón superior R1", L"Right shoulder R1", 446.f, 46.f, 66.f, 20.f, false},
-    {player::TRIANGLE, L"△", L"Triángulo / Acción superior", L"Triangle / North action", 466.f, 106.f, 26.f, 26.f, true},
-    {player::CIRCLE, L"○", L"Círculo / Cancelar", L"Circle / East action", 492.f, 128.f, 26.f, 26.f, true},
-    {player::CROSS, L"✕", L"Cruz / Aceptar / Salto", L"Cross / South action", 466.f, 150.f, 26.f, 26.f, true},
-    {player::SQUARE, L"□", L"Cuadrado / Ataque", L"Square / West action", 440.f, 128.f, 26.f, 26.f, true},
-    {player::MOTION_THROW, L"SIX", L"Impulso Sixaxis / Lanzar", L"Sixaxis impulse / Throw", 300.f, 114.f, 28.f, 28.f, true},
-    {player::L_UP, L"L▲", L"Stick L arriba", L"Left stick up", 203.f, 175.f, 22.f, 20.f, false},
-    {player::L_RIGHT, L"L▶", L"Stick L derecha", L"Left stick right", 233.f, 204.f, 20.f, 20.f, false},
-    {player::L_DOWN, L"L▼", L"Stick L abajo", L"Left stick down", 203.f, 233.f, 22.f, 20.f, false},
-    {player::L_LEFT, L"L◀", L"Stick L izquierda", L"Left stick left", 175.f, 204.f, 20.f, 20.f, false},
-    {player::R_UP, L"R▲", L"Stick R arriba (Sixaxis)", L"Right stick up (Sixaxis)", 403.f, 175.f, 22.f, 20.f, false},
-    {player::R_RIGHT, L"R▶", L"Stick R derecha (Sixaxis)", L"Right stick right (Sixaxis)", 433.f, 204.f, 20.f, 20.f, false},
-    {player::R_DOWN, L"R▼", L"Stick R abajo (Sixaxis)", L"Right stick down (Sixaxis)", 403.f, 233.f, 22.f, 20.f, false},
-    {player::R_LEFT, L"R◀", L"Stick R izquierda (Sixaxis)", L"Right stick left (Sixaxis)", 375.f, 204.f, 20.f, 20.f, false}
+// Crop the margins of the supplied image. The same transform places the hotspots.
+struct ControllerCrop { float x, y, width, height; };
+constexpr ControllerCrop CONTROLLER_CROP{200, 157, 1120, 702};
+constexpr float CONTROLLER_SCALE = 0.42f;
+constexpr float CONTROLLER_X = (CANVAS_WIDTH - CONTROLLER_CROP.width * CONTROLLER_SCALE) / 2;
+constexpr float CONTROLLER_Y = 5.f;
+
+constexpr ButtonHotspot pad_button(int action, const wchar_t *symbol, const wchar_t *es, const wchar_t *en,
+                                   float image_x, float image_y, float width, float height, bool circle) {
+    return {action, symbol, es, en,
+            CONTROLLER_X + (image_x - CONTROLLER_CROP.x) * CONTROLLER_SCALE - width / 2,
+            CONTROLLER_Y + (image_y - CONTROLLER_CROP.y) * CONTROLLER_SCALE - height / 2,
+            width, height, circle};
+}
+
+constexpr ButtonHotspot kButtons[ACTION_COUNT] = {
+    pad_button(player::SELECT, L"SEL", L"Seleccionar / Mapa", L"Select / Map", 657, 496, 40.f, 18.f, false),
+    pad_button(player::L3, L"L3", L"Stick izquierdo (pulsar)", L"Left stick click", 598, 665, 30.f, 30.f, true),
+    pad_button(player::R3, L"R3", L"Stick derecho (pulsar)", L"Right stick click", 916, 665, 30.f, 30.f, true),
+    pad_button(player::START, L"START", L"Pausa / Opciones", L"Pause / Start", 854, 496, 48.f, 18.f, false),
+    pad_button(player::UP, L"▲", L"Cruceta arriba", L"D-Pad up", 432, 422, 26.f, 24.f, false),
+    pad_button(player::RIGHT, L"▶", L"Cruceta derecha", L"D-Pad right", 507, 500, 24.f, 24.f, false),
+    pad_button(player::DOWN, L"▼", L"Cruceta abajo", L"D-Pad down", 432, 571, 26.f, 24.f, false),
+    pad_button(player::LEFT, L"◀", L"Cruceta izquierda", L"D-Pad left", 358, 500, 24.f, 24.f, false),
+    pad_button(player::L2, L"L2", L"Gatillo L2 analógico", L"Left trigger L2", 441, 194, 48.f, 17.f, false),
+    pad_button(player::R2, L"R2", L"Gatillo R2 analógico", L"Right trigger R2", 1074, 194, 48.f, 17.f, false),
+    pad_button(player::L1, L"L1", L"Botón superior L1", L"Left shoulder L1", 441, 238, 48.f, 17.f, false),
+    pad_button(player::R1, L"R1", L"Botón superior R1", L"Right shoulder R1", 1074, 238, 48.f, 17.f, false),
+    pad_button(player::TRIANGLE, L"△", L"Triángulo / Acción superior", L"Triangle / North action", 1075, 414, 26.f, 26.f, true),
+    pad_button(player::CIRCLE, L"○", L"Círculo / Cancelar", L"Circle / East action", 1163, 499, 26.f, 26.f, true),
+    pad_button(player::CROSS, L"✕", L"Cruz / Aceptar / Salto", L"Cross / South action", 1074, 582, 26.f, 26.f, true),
+    pad_button(player::SQUARE, L"□", L"Cuadrado / Ataque", L"Square / West action", 988, 499, 26.f, 26.f, true),
+    pad_button(player::MOTION_THROW, L"SIX", L"Impulso Sixaxis / Lanzar", L"Sixaxis impulse / Throw", 757, 562, 28.f, 28.f, true),
+    pad_button(player::L_UP, L"▲", L"Stick L arriba", L"Left stick up", 598, 580, 22.f, 20.f, false),
+    pad_button(player::L_RIGHT, L"▶", L"Stick L derecha", L"Left stick right", 688, 665, 20.f, 20.f, false),
+    pad_button(player::L_DOWN, L"▼", L"Stick L abajo", L"Left stick down", 598, 751, 22.f, 20.f, false),
+    pad_button(player::L_LEFT, L"◀", L"Stick L izquierda", L"Left stick left", 508, 665, 20.f, 20.f, false),
+    pad_button(player::R_UP, L"▲", L"Stick R arriba (Sixaxis)", L"Right stick up (Sixaxis)", 916, 580, 22.f, 20.f, false),
+    pad_button(player::R_RIGHT, L"▶", L"Stick R derecha (Sixaxis)", L"Right stick right (Sixaxis)", 1006, 665, 20.f, 20.f, false),
+    pad_button(player::R_DOWN, L"▼", L"Stick R abajo (Sixaxis)", L"Right stick down (Sixaxis)", 916, 751, 22.f, 20.f, false),
+    pad_button(player::R_LEFT, L"◀", L"Stick R izquierda (Sixaxis)", L"Right stick left (Sixaxis)", 826, 665, 20.f, 20.f, false),
 };
 
 struct ConflictResult {
@@ -632,58 +666,28 @@ void draw_gamepad(Gdiplus::Graphics &g, int width, int height) {
     g.SetSmoothingMode(SmoothingModeAntiAlias);
     g.SetTextRenderingHint(TextRenderingHintClearTypeGridFit);
 
-    float sx = width / 628.0f;
-    float sy = height / 396.0f;
-    g.ScaleTransform(sx, sy);
+    g.Clear(Color(255, 15, 14, 17));
+    const float scale = std::min(float(width) / CANVAS_WIDTH, float(height) / CANVAS_HEIGHT);
+    g.ScaleTransform(scale, scale);
 
-    // Canvas background container
-    SolidBrush bg_brush(Color(255, 12, 18, 30));
-    g.FillRectangle(&bg_brush, RectF(0.f, 0.f, 628.f, 396.f));
-    Pen border_pen(Color(255, 38, 56, 82), 1.0f);
-    g.DrawRectangle(&border_pen, RectF(0.5f, 0.5f, 627.f, 395.f));
+    Pen border(Color(255, 65, 49, 55));
+    g.DrawRectangle(&border, RectF(0.5f, 0.5f, CANVAS_WIDTH - 1.f, CANVAS_HEIGHT - 1.f));
 
-    // Gamepad controller body silhouette
-    SolidBrush body_brush(Color(255, 20, 30, 48));
-    Pen body_pen(Color(255, 55, 82, 118), 1.5f);
-
-    // Center bridge
-    g.FillRectangle(&body_brush, RectF(180.f, 82.f, 268.f, 130.f));
-    g.DrawRectangle(&body_pen, RectF(180.f, 82.f, 268.f, 130.f));
-
-    // Left grip
-    PointF left_grip[6] = {
-        PointF(110.f, 78.f), PointF(180.f, 82.f), PointF(180.f, 212.f),
-        PointF(145.f, 282.f), PointF(92.f, 270.f), PointF(90.f, 120.f)
-    };
-    g.FillPolygon(&body_brush, left_grip, 6);
-    g.DrawPolygon(&body_pen, left_grip, 6);
-
-    // Right grip
-    PointF right_grip[6] = {
-        PointF(448.f, 82.f), PointF(518.f, 78.f), PointF(538.f, 120.f),
-        PointF(536.f, 270.f), PointF(483.f, 282.f), PointF(448.f, 212.f)
-    };
-    g.FillPolygon(&body_brush, right_grip, 6);
-    g.DrawPolygon(&body_pen, right_grip, 6);
-
-    // Sticks base wells
-    SolidBrush stick_well(Color(255, 15, 22, 34));
-    Pen stick_well_pen(Color(255, 45, 68, 98), 1.2f);
-    g.FillEllipse(&stick_well, RectF(170.f, 170.f, 88.f, 88.f));
-    g.DrawEllipse(&stick_well_pen, RectF(170.f, 170.f, 88.f, 88.f));
-    g.FillEllipse(&stick_well, RectF(370.f, 170.f, 88.f, 88.f));
-    g.DrawEllipse(&stick_well_pen, RectF(370.f, 170.f, 88.f, 88.f));
-
-    // D-Pad cross plate
-    SolidBrush dpad_base(Color(255, 16, 24, 38));
-    g.FillRectangle(&dpad_base, RectF(134.f, 104.f, 30.f, 72.f));
-    g.FillRectangle(&dpad_base, RectF(110.f, 126.f, 78.f, 28.f));
+    if (auto *picture = launcher_theme::controller_image()) {
+        g.SetInterpolationMode(InterpolationModeHighQualityBicubic);
+        g.SetPixelOffsetMode(PixelOffsetModeHighQuality);
+        ImageAttributes edges;
+        edges.SetWrapMode(WrapModeTileFlipXY);
+        g.DrawImage(picture, RectF(CONTROLLER_X, CONTROLLER_Y, CONTROLLER_CROP.width * CONTROLLER_SCALE,
+                                   CONTROLLER_CROP.height * CONTROLLER_SCALE),
+                    CONTROLLER_CROP.x, CONTROLLER_CROP.y, CONTROLLER_CROP.width, CONTROLLER_CROP.height,
+                    UnitPixel, &edges);
+    }
 
     bool is_gamepad = selected(ID_MAP_MODE) == 1;
     const auto &bindings = is_gamepad ? config.gamepad : config.keyboard;
 
-    Font sym_font(L"Segoe UI", 9.5f, FontStyleBold);
-    Font badge_font(L"Segoe UI", 7.5f, FontStyleRegular);
+    Font sym_font(L"Segoe UI", 12.f, FontStyleBold, UnitPixel);
     StringFormat sf_center;
     sf_center.SetAlignment(StringAlignmentCenter);
     sf_center.SetLineAlignment(StringAlignmentCenter);
@@ -697,15 +701,15 @@ void draw_gamepad(Gdiplus::Graphics &g, int width, int height) {
 
         Color fill_col = is_cap ? Color(255, 95, 75, 20)
                        : is_sel ? Color(255, 70, 52, 16)
-                       : is_hov ? Color(255, 28, 62, 100)
+                       : is_hov ? Color(250, 106, 42, 56)
                        : cr.conflict ? Color(255, 80, 25, 30)
-                       : Color(255, 26, 38, 58);
+                       : Color(230, 35, 30, 36);
 
         Color border_col = is_cap ? Color(255, 238, 193, 97)
                          : is_sel ? Color(255, 238, 193, 97)
                          : cr.conflict ? Color(255, 240, 65, 65)
-                         : is_hov ? Color(255, 75, 170, 255)
-                         : Color(255, 65, 95, 135);
+                         : is_hov ? Color(255, 222, 125, 141)
+                         : Color(255, 100, 75, 82);
 
         float pen_w = (is_sel || is_cap || cr.conflict) ? 2.0f : 1.0f;
         SolidBrush btn_brush(fill_col);
@@ -747,8 +751,8 @@ void draw_gamepad(Gdiplus::Graphics &g, int width, int height) {
     }
 
     // Inspector Panel Card at the bottom (y = 310 .. 386)
-    SolidBrush panel_bg(Color(255, 14, 22, 36));
-    Pen panel_border(Color(255, 42, 64, 94), 1.0f);
+    SolidBrush panel_bg(Color(255, 28, 25, 29));
+    Pen panel_border(Color(255, 68, 53, 59), 1.0f);
     g.FillRectangle(&panel_bg, RectF(12.f, 308.f, 604.f, 78.f));
     g.DrawRectangle(&panel_border, RectF(12.f, 308.f, 604.f, 78.f));
 
@@ -763,7 +767,7 @@ void draw_gamepad(Gdiplus::Graphics &g, int width, int height) {
     // Left info sub-box
     SolidBrush gold_txt(Color(255, 238, 193, 97));
     SolidBrush white_txt(Color(255, 240, 245, 255));
-    SolidBrush dim_txt(Color(255, 160, 180, 205));
+    SolidBrush dim_txt(Color(255, 182, 170, 173));
 
     std::wstring title = std::wstring(cur_b.ps_name) + L" — " + (ui_english ? cur_b.desc_en : cur_b.desc_es);
     g.DrawString(title.c_str(), -1, &head_font, PointF(24.f, 316.f), &gold_txt);
@@ -785,7 +789,7 @@ void draw_gamepad(Gdiplus::Graphics &g, int width, int height) {
         g.DrawRectangle(&cap_pen, status_card);
 
         SolidBrush cap_head(Color(255, 255, 220, 120));
-        g.DrawString(S(L"⏳ PULSA UNA ENTRADA...", L"⏳ PRESS AN INPUT..."), -1, &head_font, PointF(344.f, 320.f), &cap_head);
+        g.DrawString(S(L"Pulsa una entrada", L"Press an input"), -1, &head_font, PointF(344.f, 320.f), &cap_head);
         g.DrawString(S(L"Pulsa una tecla, botón o eje.\nEsc cancela · Supr desasigna.",
                        L"Press a key, button, or axis.\nEsc cancels · Del clears."),
                      -1, &sub_font, PointF(344.f, 340.f), &white_txt);
@@ -796,16 +800,13 @@ void draw_gamepad(Gdiplus::Graphics &g, int width, int height) {
         g.DrawRectangle(&cr_pen, status_card);
 
         SolidBrush cr_head(Color(255, 255, 90, 90));
-        g.DrawString(S(L"⚠️ CONFLICTO DE ASIGNACIÓN", L"⚠️ BINDING CONFLICT"), -1, &head_font, PointF(344.f, 320.f), &cr_head);
+        g.DrawString(S(L"Conflicto de asignación", L"Binding conflict"), -1, &head_font, PointF(344.f, 320.f), &cr_head);
         std::wstring other_name = action_name(cur_cr.other_action, ui_english);
         std::wstring cr_desc = S(L"Coincide con: ", L"Clashes with: ") + other_name;
         g.DrawString(cr_desc.c_str(), -1, &sub_font, PointF(344.f, 342.f), &white_txt);
     } else {
-        SolidBrush ok_head(Color(255, 80, 210, 130));
-        g.DrawString(S(L"✓ ASIGNACIÓN LISTA", L"✓ READY"), -1, &head_font, PointF(344.f, 320.f), &ok_head);
-        g.DrawString(S(L"Haz clic en cualquier botón del\nmando para reasignarlo.",
-                       L"Click any button on the gamepad\nto rebind it."),
-                     -1, &sub_font, PointF(344.f, 340.f), &dim_txt);
+        g.DrawString(L"Sixaxis", -1, &head_font, PointF(344.f, 320.f), &gold_txt);
+        g.DrawString(sensor_status.c_str(), -1, &sub_font, RectF(344.f, 342.f, 260.f, 34.f), nullptr, &dim_txt);
     }
 }
 
@@ -838,12 +839,11 @@ LRESULT CALLBACK canvas_wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_MOUSEMOVE: {
         RECT r;
         GetClientRect(hwnd, &r);
-        float sx = r.right > 0 ? (628.0f / r.right) : 1.0f;
-        float sy = r.bottom > 0 ? (396.0f / r.bottom) : 1.0f;
-        float mx = GET_X_LPARAM(lp) * sx;
-        float my = GET_Y_LPARAM(lp) * sy;
-        int hit = hit_test_button(mx, my);
+        const float scale = std::min(float(r.right) / CANVAS_WIDTH, float(r.bottom) / CANVAS_HEIGHT);
+        const int hit = scale > 0 ? hit_test_button(GET_X_LPARAM(lp) / scale, GET_Y_LPARAM(lp) / scale) : -1;
         if (hit != hover_action) {
+            TRACKMOUSEEVENT tracking{sizeof(tracking), TME_LEAVE, hwnd, 0};
+            TrackMouseEvent(&tracking);
             hover_action = hit;
             InvalidateRect(hwnd, nullptr, FALSE);
         }
@@ -853,11 +853,8 @@ LRESULT CALLBACK canvas_wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_LBUTTONDOWN: {
         RECT r;
         GetClientRect(hwnd, &r);
-        float sx = r.right > 0 ? (628.0f / r.right) : 1.0f;
-        float sy = r.bottom > 0 ? (396.0f / r.bottom) : 1.0f;
-        float mx = GET_X_LPARAM(lp) * sx;
-        float my = GET_Y_LPARAM(lp) * sy;
-        int hit = hit_test_button(mx, my);
+        const float scale = std::min(float(r.right) / CANVAS_WIDTH, float(r.bottom) / CANVAS_HEIGHT);
+        const int hit = scale > 0 ? hit_test_button(GET_X_LPARAM(lp) / scale, GET_Y_LPARAM(lp) / scale) : -1;
         if (hit >= 0) {
             selected_action = hit;
             capture = hit;
@@ -870,6 +867,10 @@ LRESULT CALLBACK canvas_wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
         return 0;
     }
+    case WM_MOUSELEAVE:
+        hover_action = -1;
+        InvalidateRect(hwnd, nullptr, FALSE);
+        return 0;
     case WM_SETCURSOR:
         if (hover_action >= 0) {
             SetCursor(LoadCursor(nullptr, IDC_HAND));
@@ -882,104 +883,90 @@ LRESULT CALLBACK canvas_wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 
 void create_controls() {
     apply_ui_language();
-    label(S(L"Idioma del launcher", L"Launcher language"), 712, 26, 272);
-    combo(ID_UI_LANG, 712, 48, 272,
+    label(S(L"Idioma del launcher", L"Launcher language"), 710, 35, 254);
+    combo(ID_UI_LANG, 710, 57, 254,
           {S(L"Automático (Windows)", L"Automatic (Windows)"), L"Español", L"English"});
 
-    // Panel izquierdo: Pantalla y gráficos
-    add(L"BUTTON", S(L"Pantalla y gráficos", L"Display and graphics"), 0, 16, 146, 302, 558, BS_GROUPBOX);
+    label(S(L"Pantalla y gráficos", L"Display and graphics"), 32, 136, 270);
     label(S(L"Resolución de salida", L"Output resolution"), 32, 170, 270);
-    combo(ID_OUTPUT, 32, 192, 268,
+    combo(ID_OUTPUT, 32, 191, 268,
           {L"1280 × 720", L"1920 × 1080", L"2560 × 1440", L"3840 × 2160",
            S(L"Automática", L"Automatic"), S(L"Resolución del monitor", L"Monitor resolution")});
-    label(S(L"Modo de ventana", L"Window mode"), 32, 226, 270);
-    combo(ID_WINDOW, 32, 248, 268,
-          {S(L"Sin bordes (Borderless)", L"Borderless windowed"), S(L"Ventana", L"Windowed")});
-    label(S(L"Filtrado anisotrópico", L"Anisotropic filtering"), 32, 282, 270);
-    combo(ID_ANISO, 32, 304, 268, {L"1× (Off)", L"2×", L"4×", L"8×", L"16×"});
+    label(S(L"Modo de pantalla", L"Display mode"), 32, 225, 270);
+    combo(ID_WINDOW, 32, 246, 268,
+          {S(L"Ventana", L"Windowed"), S(L"Ventana sin bordes", L"Borderless window"),
+           S(L"Pantalla completa", L"Fullscreen")});
+    label(S(L"Fluidez de imagen", L"Frame generation"), 32, 280, 270);
+    combo(ID_FRAME_GEN, 32, 301, 268,
+          {S(L"30 FPS nativos (recomendado)", L"30 native FPS (recommended)"),
+           S(L"FSR 3.1 · Hasta 60 FPS visuales", L"FSR 3.1 · Up to 60 displayed FPS")});
+    add(L"STATIC", S(L"El juego mantiene 30 FPS nativos. FSR 3.1 interpola en combates compatibles.",
+                     L"The game keeps 30 native FPS. FSR 3.1 interpolates in compatible battles."),
+        0, 32, 339, 268, 72);
 
-    label(S(L"Antialiasing", L"Antialiasing"), 32, 344, 115);
-    combo(ID_AA_MODE, 152, 340, 148,
-          {S(L"SMAA (Rec.)", L"SMAA (Rec.)"),
-           S(L"Desactivado", L"Off")});
-    label(S(L"Nitidez FSR", L"FSR sharpness"), 32, 378, 115);
-    combo(ID_SHARPNESS, 152, 374, 148,
-          {S(L"Baja", L"Low"),
-           S(L"Media (Rec.)", L"Medium (Rec.)"),
-           S(L"Alta", L"High"),
-           S(L"Personalizada", L"Custom")});
+    label(S(L"Filtro anisotrópico", L"Anisotropic filter"), 32, 439, 131);
+    combo(ID_ANISO, 168, 435, 132, {L"1×", L"2×", L"4×", L"8×", L"16×"});
+    label(S(L"Antialiasing", L"Antialiasing"), 32, 473, 131);
+    combo(ID_AA_MODE, 168, 469, 132, {L"SMAA", S(L"Desactivado", L"Off")});
+    label(S(L"Nitidez FSR", L"FSR sharpness"), 32, 507, 131);
+    combo(ID_SHARPNESS, 168, 503, 132,
+          {S(L"Baja", L"Low"), S(L"Media", L"Medium"), S(L"Alta", L"High"), S(L"Personalizada", L"Custom")});
 
-    add(L"BUTTON", S(L"Mantener clic derecho: apuntar", L"Hold right click: aim"), ID_MOUSE_LOOK, 32, 414,
+    label(S(L"Ratón", L"Mouse"), 32, 551, 270);
+    add(L"BUTTON", S(L"Mantener clic derecho: apuntar", L"Hold right click: aim"), ID_MOUSE_LOOK, 32, 573,
         268, 24, BS_AUTOCHECKBOX | WS_TABSTOP);
-    add(L"BUTTON", S(L"Clic izquierdo: Cruz (X)", L"Left click: Cross (X)"), ID_MOUSE_CROSS, 32, 442,
+    add(L"BUTTON", S(L"Clic izquierdo: Cruz (X)", L"Left click: Cross (X)"), ID_MOUSE_CROSS, 32, 600,
         268, 24, BS_AUTOCHECKBOX | WS_TABSTOP);
-    label(S(L"Sensibilidad del ratón", L"Mouse sensitivity"), 32, 476, 270);
-    slider(ID_SENSITIVITY, 28, 498, 274, 5, 200, 50);
+    label(S(L"Sensibilidad del ratón", L"Mouse sensitivity"), 32, 632, 270);
+    slider(ID_SENSITIVITY, 28, 652, 274, 5, 200, 50);
 
-    label(S(L"Perfil Sixaxis", L"Sixaxis profile"), 32, 544, 115);
-    combo(ID_SIXAXIS_PROFILE, 152, 540, 148,
-          {S(L"Suave / Preciso", L"Smooth / Precise"),
-           S(L"Estándar (Rec.)", L"Standard (Rec.)"),
-           S(L"Rápido / Sensible", L"Fast / Responsive"),
-           S(L"Personalizado", L"Custom")});
-    label(S(L"Modo Sixaxis", L"Sixaxis mode"), 32, 578, 115);
-    combo(ID_MOTION_MODE, 152, 574, 148,
-          {S(L"Híbrido (Auto)", L"Hybrid (Auto)"),
-           S(L"Solo sensores", L"Sensors only"),
-           S(L"Solo stick R", L"Right stick only")});
-    label(S(L"Suavizado Sixaxis", L"Sixaxis smoothing"), 32, 612, 270);
-    slider(ID_SIXAXIS_SMOOTH, 28, 634, 274, 0, 100, 45);
-
-    label(S(L"Interpolación", L"Frame generation"), 32, 676, 115);
-    combo(ID_FRAME_GEN, 152, 672, 148,
-          {S(L"Desactivada", L"Off"), L"FSR 3.1 (experimental)"});
-    label(S(L"30 FPS uniformes · FSR1 automático > 720p.",
-            L"Uniform 30 FPS · Auto FSR1 above 720p."), 32, 702, 268);
-
-    // Panel derecho: Idioma y controles interactivos
-    add(L"BUTTON", S(L"Idioma y controles interactivos", L"Language and interactive controls"), 0, 332, 146, 652, 558, BS_GROUPBOX);
-    label(S(L"Idioma", L"Language"), 348, 172, 60);
-    combo(ID_LANG, 412, 168, 226,
-          {S(L"Automático (Windows)", L"Automatic (Windows)"), L"Español", L"English",
+    label(S(L"Controles", L"Controls"), 348, 136, 350);
+    label(S(L"Idioma del juego", L"Game language"), 348, 173, 112);
+    combo(ID_LANG, 465, 169, 163,
+          {S(L"Automático", L"Automatic"), L"Español", L"English",
            L"Français", L"Deutsch", L"Italiano", L"Nederlands", L"Svenska"});
-    label(S(L"Mando", L"Controller"), 654, 172, 60);
-    combo(ID_DEVICE, 718, 168, 250, {S(L"Buscando mandos…", L"Searching for controllers…")});
+    label(S(L"Mando", L"Controller"), 646, 173, 103);
+    combo(ID_DEVICE, 751, 169, 217, {S(L"Buscando mandos…", L"Searching for controllers…")});
+    label(S(L"Perfil Sixaxis", L"Sixaxis profile"), 348, 205, 112);
+    combo(ID_SIXAXIS_PROFILE, 465, 201, 163,
+          {S(L"Suave / Preciso", L"Smooth / Precise"), S(L"Estándar", L"Standard"),
+           S(L"Rápido (por defecto)", L"Fast (default)"), S(L"Personalizado", L"Custom")});
+    label(S(L"Modo Sixaxis", L"Sixaxis mode"), 646, 205, 103);
+    combo(ID_MOTION_MODE, 751, 201, 217,
+          {S(L"Híbrido (Auto)", L"Hybrid (Auto)"), S(L"Solo sensores", L"Sensors only"),
+           S(L"Solo stick R", L"Right stick only")});
 
-    label(S(L"Sensibilidad Sixaxis", L"Sixaxis sensitivity"), 348, 206, 136);
-    slider(ID_GYRO_SENS, 488, 202, 150, 10, 500, 100);
-    label(S(L"Zona muerta", L"Deadzone"), 654, 206, 88);
-    slider(ID_DEADZONE, 746, 202, 114, 2, 50, 15);
-    sensor_status = add(L"STATIC", L"", 0, 866, 204, 102, 24);
+    label(S(L"Sensibilidad Sixaxis", L"Sixaxis sensitivity"), 348, 234, 185);
+    slider(ID_GYRO_SENS, 344, 251, 190, 10, 500, 100);
+    label(S(L"Zona muerta", L"Deadzone"), 560, 234, 185);
+    slider(ID_DEADZONE, 556, 251, 190, 2, 50, 15);
+    label(S(L"Suavizado Sixaxis", L"Sixaxis smoothing"), 774, 234, 194);
+    slider(ID_SIXAXIS_SMOOTH, 770, 251, 198, 0, 100, 45);
 
-    // Mapeo interactivo: selector de dispositivo y restablecer
-    label(S(L"Mapeo a editar", L"Mapping to edit"), 348, 242, 115);
-    combo(ID_MAP_MODE, 468, 238, 260,
-          {S(L"Teclado y ratón (simultáneo)", L"Keyboard & Mouse (simultaneous)"),
-           S(L"Mando (simultáneo)", L"Controller (simultaneous)")});
-    add(L"BUTTON", S(L"Restaurar predeterminados", L"Reset defaults"), ID_DEFAULTS, 740, 238, 228, 28, WS_TABSTOP);
+    label(S(L"Mapeo a editar", L"Mapping to edit"), 348, 281, 110);
+    combo(ID_MAP_MODE, 465, 277, 263,
+          {S(L"Teclado y ratón", L"Keyboard and mouse"), S(L"Mando", L"Controller")});
+    add(L"BUTTON", S(L"Restaurar mapeo", L"Reset mapping"), ID_DEFAULTS, 751, 277, 217, 28, WS_TABSTOP);
 
-    // Canvas interactivo del mando (628 x 396)
-    WNDCLASSW cwc{};
-    cwc.lpfnWndProc = canvas_wndproc;
-    cwc.hInstance = GetModuleHandleW(nullptr);
-    cwc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-    cwc.lpszClassName = L"bakugan_gamepad_canvas";
-    RegisterClassW(&cwc);
+    WNDCLASSW canvas_class{};
+    canvas_class.lpfnWndProc = canvas_wndproc;
+    canvas_class.hInstance = GetModuleHandleW(nullptr);
+    canvas_class.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+    canvas_class.lpszClassName = L"bakugan_gamepad_canvas";
+    RegisterClassW(&canvas_class);
 
-    int canvas_x = 344;
-    int canvas_y = 282;
-    gamepad_canvas = CreateWindowExW(0, cwc.lpszClassName, L"", WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS,
-                                     canvas_x, canvas_y, 628, 396, window,
+    constexpr int canvas_x = 344, canvas_y = 308;
+    gamepad_canvas = CreateWindowExW(0, canvas_class.lpszClassName, L"", WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS,
+                                     canvas_x, canvas_y, CANVAS_WIDTH, CANVAS_HEIGHT, window,
                                      (HMENU)ID_GAMEPAD_CANVAS, GetModuleHandleW(nullptr), nullptr);
-    controls.push_back({gamepad_canvas, canvas_x, canvas_y, 628, 396});
+    controls.push_back({gamepad_canvas, canvas_x, canvas_y, CANVAS_WIDTH, CANVAS_HEIGHT});
 
     status = add(L"STATIC",
-                 S(L"Haz clic en cualquier botón del mando para asignarlo. Teclado y mando funcionan simultáneamente.",
-                   L"Click any button on the controller to bind it. Keyboard and controller work simultaneously."),
-                 0, 24, 724, 620, 56);
-    add(L"BUTTON", S(L"Guardar ajustes", L"Save settings"), ID_SAVE, 660, 730, 150, 38, WS_TABSTOP);
-    add(L"BUTTON", S(L"Jugar", L"Play"), ID_PLAY, 824, 730, 150, 38,
-        BS_DEFPUSHBUTTON | WS_TABSTOP);
+                 S(L"Haz clic en un botón del mando para editar su asignación.",
+                   L"Click a controller button to edit its binding."),
+                 0, 24, 744, 620, 42);
+    add(L"BUTTON", S(L"Guardar ajustes", L"Save settings"), ID_SAVE, 660, 736, 150, 42, WS_TABSTOP);
+    add(L"BUTTON", S(L"Jugar", L"Play"), ID_PLAY, 824, 736, 150, 42, BS_DEFPUSHBUTTON | WS_TABSTOP);
 
     fill_controls();
     SetTimer(window, 1, 16, nullptr);
@@ -1008,13 +995,26 @@ LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     }
     case WM_CTLCOLORSTATIC:
     case WM_CTLCOLORBTN:
+    case WM_CTLCOLORLISTBOX:
         return (LRESULT)launcher_theme::control_color((HWND)lp, (HDC)wp, (HWND)lp == status);
-    case WM_DRAWITEM:
-        if (wp) {
-            launcher_theme::draw_button(*(DRAWITEMSTRUCT *)lp, wp == ID_PLAY);
+    case WM_MEASUREITEM:
+        if (auto *item = reinterpret_cast<MEASUREITEMSTRUCT *>(lp); item->CtlType == ODT_COMBOBOX) {
+            item->itemHeight = 24;
             return TRUE;
         }
         break;
+    case WM_DRAWITEM: {
+        const auto &item = *reinterpret_cast<DRAWITEMSTRUCT *>(lp);
+        if (item.CtlType == ODT_BUTTON) {
+            launcher_theme::draw_button(item, wp == ID_PLAY);
+            return TRUE;
+        }
+        if (item.CtlType == ODT_COMBOBOX) {
+            launcher_theme::draw_combo(item);
+            return TRUE;
+        }
+        break;
+    }
     case WM_CREATE:
         window = hwnd;
         create_controls();

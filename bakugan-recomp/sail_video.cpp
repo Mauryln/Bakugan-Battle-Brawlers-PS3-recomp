@@ -3,6 +3,7 @@
 #include "movie_video.h"
 #include "movie_audio.h"
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <filesystem>
@@ -28,7 +29,41 @@ int32_t cellSailPlayerDestroyDescriptor(uint32_t, uint32_t);
 
 namespace {
 constexpr uint32_t invalid = 0x80610701, invalid_state = 0x80610702;
-std::recursive_mutex sail_mutex;
+std::recursive_timed_mutex sail_mutex;
+std::atomic<bool> shutting_down{false};
+thread_local unsigned sail_lock_depth = 0;
+
+struct SailLock {
+    SailLock() {
+        sail_mutex.lock();
+        ++sail_lock_depth;
+    }
+    ~SailLock() {
+        --sail_lock_depth;
+        sail_mutex.unlock();
+    }
+    SailLock(const SailLock&) = delete;
+    SailLock& operator=(const SailLock&) = delete;
+};
+
+struct SailUnlockGuard {
+    unsigned depth = 0;
+    SailUnlockGuard() : depth(sail_lock_depth) {
+        for (unsigned i = 0; i < depth; ++i) {
+            --sail_lock_depth;
+            sail_mutex.unlock();
+        }
+    }
+    ~SailUnlockGuard() {
+        for (unsigned i = 0; i < depth; ++i) {
+            sail_mutex.lock();
+            ++sail_lock_depth;
+        }
+    }
+    SailUnlockGuard(const SailUnlockGuard&) = delete;
+    SailUnlockGuard& operator=(const SailUnlockGuard&) = delete;
+};
+
 struct Adapter {
     std::array<uint32_t, 3> callbacks{};
     uint32_t arg = 0;
@@ -54,19 +89,22 @@ Player* player(ppu_context* ctx)
 
 uint64_t call(uint32_t opd, uint64_t a=0, uint64_t b=0, uint64_t c=0, uint64_t d=0)
 {
-    return opd ? ppu_guest_call(opd, a, b, c, d, 0, 0, 0, 0) : 0;
+    if (!opd || shutting_down.load(std::memory_order_acquire))
+        return 0;
+    SailUnlockGuard unlock;
+    return ppu_guest_call(opd, a, b, c, d, 0, 0, 0, 0);
 }
 
-void notify(Player& p, uint32_t major, uint32_t minor, uint64_t a=0, uint64_t b=0)
+void notify_cb(uint32_t cb, uint32_t arg, uint32_t major, uint32_t minor, uint64_t a=0, uint64_t b=0)
 {
-    call(p.callback, p.arg, (uint64_t(major) << 32) | minor, a, b);
+    call(cb, arg, (uint64_t(major) << 32) | minor, a, b);
 }
 
-void complete(Player& p, uint32_t command, uint32_t via, uint32_t to, uint64_t token)
+void complete_cb(uint32_t cb, uint32_t arg, uint32_t command, uint32_t via, uint32_t to, uint64_t token)
 {
-    notify(p, 3, 0, via);
-    notify(p, 2, command, 0, token);
-    notify(p, 3, 0, to);
+    notify_cb(cb, arg, 3, 0, via);
+    notify_cb(cb, arg, 2, command, 0, token);
+    notify_cb(cb, arg, 3, 0, to);
 }
 
 std::string guest_string(uint32_t ea)
@@ -104,12 +142,15 @@ void cleanup(Player& p)
     p.video.close();
     p.audio.stop();
     rsx_d3d12_backend_video_frame(nullptr,0,0);
-    if (p.graphics && adapters.count(p.graphics)) {
+    uint32_t makeup_cb = 0, makeup_arg = 0;
+    if (p.graphics && adapters.count(p.graphics) && p.made_up) {
         const Adapter a = adapters.at(p.graphics);
-        if (p.made_up) call(a.callbacks[1], a.arg);
+        makeup_cb = a.callbacks[1];
+        makeup_arg = a.arg;
     }
     p.frame = {}; p.opened = false;
     p.running = p.made_up = false;
+    if (makeup_cb) call(makeup_cb, makeup_arg);
 }
 
 void initialize(ppu_context* c)
@@ -187,16 +228,20 @@ void open_stream(ppu_context* c)
     Adapter a=adapters.at(p->graphics);
     uint32_t scratch=(uint32_t)c->gpr[1]-0x100;
     rc=(int32_t)call(a.callbacks[0],a.arg);
+    p=player(c);
+    if (!p || shutting_down.load(std::memory_order_acquire)) { c->gpr[3]=invalid_state; return; }
     if (!rc) {
         p->made_up=true;
     }
     if (rc) { cleanup(*p); c->gpr[3]=invalid; return; }
     p->opened=true;
-    ++p->session;
+    const uint32_t session = ++p->session;
+    const uint32_t cb = p->callback, arg = p->arg;
+    const uint64_t token = c->gpr[5];
     format(scratch+16,p->frame);
-    call(a.callbacks[2],a.arg,scratch+16,p->session);
     fprintf(stderr,"[video] open %s %ux%u (native plane)\n",p->uri.c_str(),p->frame.width,p->frame.height);
-    complete(*p,2,3,4,c->gpr[5]); c->gpr[3]=0;
+    call(a.callbacks[2],a.arg,scratch+16,session);
+    complete_cb(cb,arg,2,3,4,token); c->gpr[3]=0;
 }
 
 void start(ppu_context* c)
@@ -206,7 +251,9 @@ void start(ppu_context* c)
     p->running=true; p->paused=false;
     p->video.start();
     p->audio.start(movie_path(p->uri).wstring());
-    complete(*p,10,5,6,c->gpr[5]); c->gpr[3]=0;
+    const uint32_t cb = p->callback, arg = p->arg;
+    const uint64_t token = c->gpr[5];
+    complete_cb(cb,arg,10,5,6,token); c->gpr[3]=0;
 }
 
 void stop(ppu_context* c)
@@ -216,7 +263,9 @@ void stop(ppu_context* c)
     p->running=false; p->video.pause(true); p->audio.stop();
     fprintf(stderr,"[video] stop after %u frames: %s\n",p->video.frames(),p->uri.c_str());
     rsx_d3d12_backend_video_frame(nullptr,0,0);
-    complete(*p,11,7,4,c->gpr[4]); c->gpr[3]=0;
+    const uint32_t cb = p->callback, arg = p->arg;
+    const uint64_t token = c->gpr[4];
+    complete_cb(cb,arg,11,7,4,token); c->gpr[3]=0;
 }
 
 Player* adapter_player(uint32_t adapter)
@@ -243,7 +292,8 @@ void get_frame(ppu_context* c)
     // keep running even when asset loading prevents these guest polls.
     if (p->video.take_finished()) {
         p->running=false;
-        notify(*p,3,0,7); notify(*p,3,0,4);
+        const uint32_t cb = p->callback, arg = p->arg;
+        notify_cb(cb,arg,3,0,7); notify_cb(cb,arg,3,0,4);
     }
     // The native plane owns presentation. Do not also submit guest textures:
     // the title's unresolved render-to-texture path remains independently usable.
@@ -254,14 +304,17 @@ void close_stream(ppu_context* c)
 {
     Player* p=player(c);
     if (!p) { c->gpr[3]=invalid; return; }
+    const uint32_t cb = p->callback, arg = p->arg;
+    const uint64_t token = c->gpr[4];
     cleanup(*p);
-    complete(*p,3,8,2,c->gpr[4]); c->gpr[3]=0;
+    complete_cb(cb,arg,3,8,2,token); c->gpr[3]=0;
 }
 
 void finalize(ppu_context* c)
 {
     uint32_t self=(uint32_t)c->gpr[3]; Player* p=player(c);
     if (p) cleanup(*p);
+    p=player(c);
     if (p && p->descriptor!=~0u) cellSailPlayerDestroyDescriptor(self,p->descriptor);
     players.erase(self); c->gpr[3]=(uint32_t)cellSailPlayerFinalize(self);
 }
@@ -272,8 +325,10 @@ void set_paused(ppu_context* c)
     if (!p) { c->gpr[3]=invalid; return; }
     bool paused=c->gpr[4]!=0;
     p->video.pause(paused);
-    p->paused=paused; notify(*p,7,0,paused); c->gpr[3]=0;
+    p->paused=paused;
     p->audio.pause(paused);
+    const uint32_t cb = p->callback, arg = p->arg;
+    notify_cb(cb,arg,7,0,paused); c->gpr[3]=0;
 }
 
 // The title keeps its audio worker active; movie PCM is rendered by waveOut.
@@ -287,7 +342,11 @@ void sound_frame(ppu_context* c)
 template<void (*Fn)(ppu_context*)>
 void serialized(ppu_context* c)
 {
-    std::lock_guard lock(sail_mutex);
+    if (shutting_down.load(std::memory_order_acquire)) {
+        c->gpr[3] = invalid_state;
+        return;
+    }
+    SailLock lock;
     Fn(c);
 }
 } // namespace
@@ -318,14 +377,17 @@ void bakugan_install_video()
 
 void bakugan_shutdown_video()
 {
-    std::lock_guard lock(sail_mutex);
-    for (auto& entry : players) {
-        if (!entry.second) continue;
-        entry.second->video.close();
-        entry.second->audio.stop();
-        entry.second->running = false;
-        entry.second->opened = false;
+    shutting_down.store(true, std::memory_order_release);
+    std::unique_lock<std::recursive_timed_mutex> lock(sail_mutex, std::chrono::milliseconds(500));
+    if (lock.owns_lock()) {
+        for (auto& entry : players) {
+            if (!entry.second) continue;
+            entry.second->video.close();
+            entry.second->audio.stop();
+            entry.second->running = false;
+            entry.second->opened = false;
+        }
+        players.clear();
     }
     rsx_d3d12_backend_video_frame(nullptr, 0, 0);
-    players.clear();
 }
