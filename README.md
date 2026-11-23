@@ -5,7 +5,7 @@
 <p><strong>The PlayStation 3 release (<code>BLES00758</code>), statically recompiled into a native Windows x64 executable.</strong></p>
 
 <p>
-<a href="https://github.com/Mauryln/Bakugan-Battle-Brawlers-PS3-recomp/releases/latest"><img src="https://img.shields.io/badge/release-v1.3.5-blue.svg?style=flat-square" alt="Release: v1.3.5"></a>
+<a href="https://github.com/Mauryln/Bakugan-Battle-Brawlers-PS3-recomp/releases/latest"><img src="https://img.shields.io/badge/release-v1.3.6-blue.svg?style=flat-square" alt="Release: v1.3.6"></a>
 <img src="https://img.shields.io/badge/platform-Windows%20x64-0078D6?style=flat-square" alt="Platform: Windows x64">
 <img src="https://img.shields.io/badge/graphics-Direct3D%2012-107C10?style=flat-square" alt="Graphics: Direct3D 12">
 <img src="https://img.shields.io/badge/title-BLES00758%20(Europe)-c0392b?style=flat-square" alt="Title: BLES00758 (Europe)">
@@ -15,7 +15,7 @@
 
 <p>
 <a href="README.es.md"><strong>Versión en Español</strong></a> · 
-<a href="#whats-new-and-fixes-v135">What's New (v1.3.5)</a> · 
+<a href="#whats-new-and-fixes-v136">What's New (v1.3.6)</a> · 
 <a href="#system-requirements">System Requirements</a> · 
 <a href="#how-to-install-and-play">Installation Guide</a> · 
 <a href="#controls-and-sixaxis">Controls & Sixaxis</a> · 
@@ -51,9 +51,10 @@ The game is **fully playable from start to finish**: story mode, tutorials, batt
 
 ---
 
-## What's New and Fixes (v1.3.5)
+## What's New and Fixes (v1.3.6)
 
-> See the release notes in [docs/RELEASE_1.3.5.md](docs/RELEASE_1.3.5.md) and [docs/RELEASE_1.3.0.md](docs/RELEASE_1.3.0.md).
+> See the release notes in [docs/RELEASE_1.3.6.md](docs/RELEASE_1.3.6.md), [docs/RELEASE_1.3.5.md](docs/RELEASE_1.3.5.md), and [docs/RELEASE_1.3.0.md](docs/RELEASE_1.3.0.md).
+> **v1.3.6** is an optional packaging/hygiene update on top of v1.3.5 that eliminates antivirus false positives (**0/65** on VirusTotal for the release ZIP and **0/70** for `BakuganSetup.exe`).
 
 ### D3D12 Performance & Graphics
 - **AMD FSR 3.1 Frame Generation (Optical Flow)**: Interpolates 30 native FPS to ~60 presented FPS in compatible arenas with **HUD separation (`hudless`)** so menus, cards, and UI elements stay sharp without ghosting.
@@ -70,10 +71,10 @@ The game is **fully playable from start to finish**: story mode, tutorials, batt
 - **Soft-Knee Peak Limiter & De-Click**: Dynamic peak limiting prevents audio clipping and distortion during intense multi-effect battles, paired with orphan slot cleanup and adaptive jitter cushioning.
 - **SPU ACK Prioritization & Clean FMV Teardown**: Prioritized SPU mailbox ACKs avoid stalls during rapid attack bursts, and video/audio threads shut down cleanly during FMV cutscenes and window exit.
 
-### Sixaxis, Launcher v1.3.5 & Installer
+### Sixaxis, Launcher v1.3.6 & Installer
 - **Refined Sixaxis & Analog Controls**: FPS-independent **EMA smoothing**, 2D radial deadzones, calibrated physical gyroscope support without double-tilting, **Hybrid mode** (combining right stick corrections with physical gyro), **Fast** profile as default, and progressive left-stick aiming across diagonals.
-- **Dark Pyrus Launcher v1.3.5**: Bilingual dark Pyrus-themed UI (`BakuganLauncher.exe`) with an interactive controller map (`assets/launcher/Control.png` / Launcher-Picture), faithful `player.ini` persistence, smart cursor visibility/capture management, and an **`Esc`** exit confirmation dialog.
-- **Zero-Dependency Static CRT & Safe Installer**: Built with the **static MSVC runtime (`/MT`)** so no external Visual C++ Redistributable is required. `Installer.cs` (`BakuganSetup.exe`) protects existing save data and `player.ini`, supports in-place upgrades from previous versions without re-copying the ISO, and repairs read-only disc files cleanly.
+- **Dark Pyrus Launcher v1.3.6**: Bilingual dark Pyrus-themed UI (`BakuganLauncher.exe`) with an interactive controller map (`assets/launcher/Control.png` / Launcher-Picture), faithful `player.ini` persistence, smart cursor visibility/capture management, and an **`Esc`** exit confirmation dialog.
+- **Self-Contained Runtime & Clean Native Installer**: Uses the dynamic MSVC runtime (`/MD`) with official **Microsoft-signed** CRT DLLs bundled alongside the executables (no external Visual C++ Redistributable required) and FidelityFX FSR 3.1 in dedicated DLLs. `BakuganSetup.exe` uses native Win32 APIs (`virtdisk.dll` / `IShellLinkW`), protects existing save data and `player.ini`, supports in-place upgrades without re-copying the ISO, and scans **0 detections** on VirusTotal.
 
 ---
 
@@ -87,7 +88,7 @@ The game is **fully playable from start to finish**: story mode, tutorials, batt
 | **Graphics (GPU)** | Direct3D 12 Feature Level 11_0<br>*(NVIDIA GeForce GTX 960 / AMD Radeon RX 460 / Intel Iris Xe)* | Direct3D 12 Feature Level 12_0 (for FSR 3.1 Frame Generation)<br>*(NVIDIA GeForce RTX 2060/3050 / AMD Radeon RX 6600 or better)* |
 | **Storage** | 6 GB available space (HDD supported) | 6 GB available space on SSD |
 | **Audio** | Windows-compatible WASAPI audio device | Stereo / Multi-channel headphones or speakers |
-| **Runtime Dependencies** | **None** (statically linked `/MT`; no VC++ Redistributable needed) | — |
+| **Runtime Dependencies** | **None** (Microsoft-signed `/MD` CRT DLLs bundled; no VC++ Redistributable needed) | — |
 | **Game Media** | Legally owned European retail PS3 disc dump (`BLES00758`) | `.iso` image or extracted `PS3_GAME` folder |
 
 > [!NOTE]
@@ -108,16 +109,16 @@ You must provide your own legally dumped European disc image as an **ISO file (`
 ## How to Install and Play
 
 ### Fresh Installation
-1. Download the complete release archive **`Bakugan-Battle-Brawlers-Recomp-1.3.5-win64.zip`** from the [Latest Release](https://github.com/Mauryln/Bakugan-Battle-Brawlers-PS3-recomp/releases/latest).
+1. Download the complete release archive **`Bakugan-Battle-Brawlers-Recomp-1.3.6-win64.zip`** from the [Latest Release](https://github.com/Mauryln/Bakugan-Battle-Brawlers-PS3-recomp/releases/latest).
 2. Extract the entire ZIP archive into a folder of your choice (keep the `payload` folder beside `BakuganSetup.exe`).
 3. Run **`BakuganSetup.exe`** from the extracted directory.
 4. Select your **European Disc ISO (`BLES00758`)** or extracted `PS3_GAME` folder.
 5. Choose your installation directory and shortcut preferences (Desktop / Start Menu), then click **Install**.
 6. Launch the game from the shortcut or **`BakuganLauncher.exe`**, adjust graphics/controls, and click **Play**.
 
-### Updating from a Previous Version (v1.2.0 / v1.3.0)
+### Updating from a Previous Version (v1.2.0 / v1.3.0 / v1.3.5)
 1. Close the game and `BakuganLauncher.exe`.
-2. Extract the v1.3.5 ZIP archive and run **`BakuganSetup.exe`**.
+2. Extract the v1.3.6 ZIP archive and run **`BakuganSetup.exe`**.
 3. Select your existing installation folder and **leave the ISO field blank**. The installer updates the binaries and launcher assets while reusing your decrypted game data and preserving your saves and `player.ini`.
 
 ---
