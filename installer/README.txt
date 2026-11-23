@@ -1,7 +1,7 @@
 Bakugan: Battle Brawlers (BLES00758) - Port nativo para Windows x64
 ====================================================================
 
-Versión 1.3.5 - Windows x64
+Versión 1.3.6 - Windows x64
 
 QUÉ ES
 ------

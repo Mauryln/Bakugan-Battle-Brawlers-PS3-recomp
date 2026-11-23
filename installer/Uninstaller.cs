@@ -1,9 +1,14 @@
 using System;
-using System.Diagnostics;
 using System.Globalization;
 using System.IO;
+using System.Reflection;
 using System.Windows.Forms;
 using Microsoft.Win32;
+
+[assembly: AssemblyTitle("Bakugan: Battle Brawlers Uninstaller")]
+[assembly: AssemblyDescription("Uninstaller for Bakugan: Battle Brawlers Recomp")]
+[assembly: AssemblyCompany("Bakugan Recomp")]
+[assembly: AssemblyProduct("Bakugan: Battle Brawlers")]
 
 namespace BakuganUninstaller
 {
@@ -31,7 +36,8 @@ namespace BakuganUninstaller
             foreach (string a in args)
                 if (a == "/S" || a == "--silent") silent = true;
 
-            string installDir = Path.GetDirectoryName(Application.ExecutablePath);
+            string selfPath = Path.GetFullPath(Application.ExecutablePath);
+            string installDir = Path.GetDirectoryName(selfPath);
             if (!silent)
             {
                 DialogResult r = MessageBox.Show(
@@ -51,11 +57,14 @@ namespace BakuganUninstaller
             {
                 RemoveShortcuts();
                 try { Registry.CurrentUser.DeleteSubKeyTree(UninstallKey, false); } catch { }
-                ScheduleDelete(installDir);
+                RemoveInstalledFiles(installDir, selfPath);
                 if (!silent)
                     MessageBox.Show(
-                        Loc.T("Desinstalación iniciada. La carpeta se eliminará en unos segundos.",
-                              "Uninstallation started. The folder will be removed in a few seconds."),
+                        Loc.T(
+                            "Desinstalación completada. Todos los archivos del juego y accesos directos fueron eliminados.\n\n" +
+                            "Puedes borrar manualmente esta carpeta si deseas quitar también Uninstall.exe:\n" + installDir,
+                            "Uninstallation complete. All game files and shortcuts have been removed.\n\n" +
+                            "You may delete this folder manually if you also want to remove Uninstall.exe:\n" + installDir),
                         "Bakugan: Battle Brawlers", MessageBoxButtons.OK, MessageBoxIcon.Information);
             }
             catch (Exception ex)
@@ -76,7 +85,7 @@ namespace BakuganUninstaller
             if (Directory.Exists(menu)) Directory.Delete(menu, true);
         }
 
-        private static void ScheduleDelete(string dir)
+        private static void RemoveInstalledFiles(string dir, string selfPath)
         {
             if (string.IsNullOrEmpty(dir) || !Directory.Exists(dir)) return;
             string full = Path.GetFullPath(dir).TrimEnd('\\');
@@ -86,22 +95,28 @@ namespace BakuganUninstaller
                 string.Equals(full, windows.TrimEnd('\\'), StringComparison.OrdinalIgnoreCase))
                 throw new Exception(Loc.T("Ruta de instalación no segura: ", "Unsafe installation path: ") + full);
 
-            /* The uninstaller is running from inside the folder, so it cannot
-             * remove its own directory. A short-lived batch waits for this
-             * process to exit and then deletes the tree. */
-            string bat = Path.Combine(Path.GetTempPath(), "bakugan-uninstall-" +
-                                      Process.GetCurrentProcess().Id + ".cmd");
-            File.WriteAllText(bat,
-                "@echo off\r\n" +
-                "chcp 65001 >nul\r\n" +
-                "ping -n 4 127.0.0.1 >nul\r\n" +
-                "rmdir /s /q \"" + full + "\"\r\n" +
-                "del \"%~f0\"\r\n", System.Text.Encoding.UTF8);
-            var psi = new ProcessStartInfo("cmd.exe", "/c \"" + bat + "\"");
-            psi.UseShellExecute = false;
-            psi.CreateNoWindow = true;
-            psi.WindowStyle = ProcessWindowStyle.Hidden;
-            Process.Start(psi);
+            foreach (string subDir in Directory.GetDirectories(full))
+            {
+                ClearReadOnlyAttributes(subDir);
+                Directory.Delete(subDir, true);
+            }
+            foreach (string file in Directory.GetFiles(full))
+            {
+                if (string.Equals(Path.GetFullPath(file), selfPath, StringComparison.OrdinalIgnoreCase))
+                    continue;
+                File.SetAttributes(file, FileAttributes.Normal);
+                File.Delete(file);
+            }
+        }
+
+        private static void ClearReadOnlyAttributes(string dir)
+        {
+            foreach (string file in Directory.GetFiles(dir, "*", SearchOption.AllDirectories))
+            {
+                FileAttributes attrs = File.GetAttributes(file);
+                if ((attrs & FileAttributes.ReadOnly) != 0)
+                    File.SetAttributes(file, attrs & ~FileAttributes.ReadOnly);
+            }
         }
     }
 }

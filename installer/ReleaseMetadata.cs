@@ -6,5 +6,5 @@ using System.Reflection;
 
 internal static class ReleaseMetadata
 {
-    internal const string Version = "1.3.5";
+    internal const string Version = "1.3.6";
 }

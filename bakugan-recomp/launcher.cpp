@@ -462,7 +462,7 @@ void poll_capture() {
     SDL_Gamepad *pad = device ? device->handle : nullptr;
     bool gamepad = selected(ID_MAP_MODE) == 1, held = false;
     for (int key = 1; key < 256; ++key)
-        if (GetAsyncKeyState(key) & 0x8000)
+        if (GetKeyState(key) & 0x8000)
             held = true;
     if (gamepad && pad) {
         for (int b = 0; b < SDL_GAMEPAD_BUTTON_COUNT; ++b)
@@ -477,11 +477,11 @@ void poll_capture() {
             capture_armed = true;
         return;
     }
-    if (GetAsyncKeyState(VK_ESCAPE) & 0x8000) {
+    if (GetKeyState(VK_ESCAPE) & 0x8000) {
         finish_capture({}, true);
         return;
     }
-    if (GetAsyncKeyState(VK_DELETE) & 0x8000) {
+    if (GetKeyState(VK_DELETE) & 0x8000) {
         finish_capture({});
         return;
     }
@@ -503,7 +503,7 @@ void poll_capture() {
     } else {
         const int mouse[] = {VK_LBUTTON, VK_MBUTTON, VK_RBUTTON, VK_XBUTTON1, VK_XBUTTON2};
         for (int i = 0; i < 5; ++i)
-            if (GetAsyncKeyState(mouse[i]) & 0x8000) {
+            if (GetKeyState(mouse[i]) & 0x8000) {
                 finish_capture({BindingKind::Mouse, i + 1});
                 return;
             }
@@ -511,7 +511,7 @@ void poll_capture() {
             if (key == VK_LSHIFT || key == VK_RSHIFT || key == VK_LCONTROL || key == VK_RCONTROL ||
                 key == VK_LMENU || key == VK_RMENU)
                 continue;
-            if (GetAsyncKeyState(key) & 0x8000) {
+            if (GetKeyState(key) & 0x8000) {
                 finish_capture({BindingKind::Key, key});
                 return;
             }

@@ -3,7 +3,7 @@ param([string]$BuildDir, [switch]$Preview)
 
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
-$version = '1.3.5'
+$version = '1.3.6'
 $stamp = Get-Date -Format 'yyyyMMdd-HHmmssfff'
 $rel = Join-Path $root "diagnostics\release-$version-$stamp"
 & (Join-Path $PSScriptRoot 'build.ps1') -BuildDir $BuildDir -OutputDir $rel

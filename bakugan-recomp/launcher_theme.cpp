@@ -116,7 +116,7 @@ void paint(HWND window, HDC dc) {
     int saved = SaveDC(dc);
     SetBkMode(dc, TRANSPARENT);
     draw_text(dc, L"Bakugan: Battle Brawlers", area(36, 32, 676, 74), int(34 * scale), FW_BOLD, TEXT);
-    draw_text(dc, L"v1.3.5", area(38, 74, 676, 99), int(15 * scale), FW_SEMIBOLD, GOLD);
+    draw_text(dc, L"v1.3.6", area(38, 74, 676, 99), int(15 * scale), FW_SEMIBOLD, GOLD);
     RestoreDC(dc, saved);
 }
 

@@ -28,9 +28,9 @@ set(FFX_FSR3 ON)
 set(FFX_FSR3UPSCALER ON)
 set(FFX_FI ON)
 set(FFX_OF ON)
-set(FFX_BUILD_AS_DLL OFF)
+set(FFX_BUILD_AS_DLL ON)
 set(FFX_AUTO_COMPILE_SHADERS ON)
-set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
 add_subdirectory("${fidelityfx_sdk}" "${fidelityfx_BINARY_DIR}" EXCLUDE_FROM_ALL)
 
 set(_ffx_targets
@@ -44,7 +44,10 @@ foreach(_target IN LISTS _ffx_targets)
     foreach(_config DEBUG RELEASE RELWITHDEBINFO MINSIZEREL)
         set_property(TARGET ${_target} PROPERTY ARCHIVE_OUTPUT_DIRECTORY_${_config}
             "${fidelityfx_BINARY_DIR}/lib")
+        set_property(TARGET ${_target} PROPERTY RUNTIME_OUTPUT_DIRECTORY_${_config}
+            "${CMAKE_BINARY_DIR}")
     endforeach()
+    install(FILES "$<TARGET_FILE:${_target}>" DESTINATION bin)
 endforeach()
 if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
     # AMD's backend uses MSVC's warning set with /WX.
@@ -55,7 +58,8 @@ endif()
 add_library(bakugan_fidelityfx STATIC fidelityfx_boot_report.cpp ../../frame_generation.cpp)
 target_include_directories(bakugan_fidelityfx PRIVATE
     "${PS3RECOMP_DIR}/include" "${PS3RECOMP_DIR}/libs/video")
-target_link_libraries(bakugan_fidelityfx PRIVATE ffx_fsr3_x64 ffx_backend_dx12_x64)
+target_link_libraries(bakugan_fidelityfx PRIVATE
+    ffx_fsr3_x64 ffx_opticalflow_x64 ffx_frameinterpolation_x64 ffx_backend_dx12_x64)
 
 set(_ffx_license "${fidelityfx_sdk}/LICENSE.txt")
 configure_file("${_ffx_license}" "${CMAKE_BINARY_DIR}/licenses/FidelityFX-SDK.txt" COPYONLY)

@@ -110,11 +110,16 @@ void Gamepads::close(bool quit_subsystem) {
     initialized = false;
 }
 float binding_strength(Binding b, SDL_Gamepad *pad, bool keyboard, float deadzone) {
+#ifdef BAKUGAN_LAUNCHER_BUILD
+    auto key_down = [](int code) { return (GetKeyState(code) & 0x8000) != 0; };
+#else
+    auto key_down = [](int code) { return (GetAsyncKeyState(code) & 0x8000) != 0; };
+#endif
     if (b.kind == BindingKind::Key)
-        return keyboard && (GetAsyncKeyState(b.code) & 0x8000) ? 1.f : 0.f;
+        return keyboard && key_down(b.code) ? 1.f : 0.f;
     if (b.kind == BindingKind::Mouse) {
         const int vk[] = {0, VK_LBUTTON, VK_MBUTTON, VK_RBUTTON, VK_XBUTTON1, VK_XBUTTON2};
-        return keyboard && b.code > 0 && b.code < 6 && (GetAsyncKeyState(vk[b.code]) & 0x8000) ? 1.f : 0.f;
+        return keyboard && b.code > 0 && b.code < 6 && key_down(vk[b.code]) ? 1.f : 0.f;
     }
     if (!pad)
         return 0;

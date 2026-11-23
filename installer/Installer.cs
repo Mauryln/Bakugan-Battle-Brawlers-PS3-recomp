@@ -1,13 +1,22 @@
 using System;
+using System.Collections.Generic;
 using System.ComponentModel;
-using System.Diagnostics;
 using System.Drawing;
 using System.Globalization;
 using System.IO;
+using System.Reflection;
 using System.Runtime.InteropServices;
+using System.Runtime.InteropServices.ComTypes;
 using System.Text;
+using System.Threading;
 using System.Windows.Forms;
 using Microsoft.Win32;
+using Microsoft.Win32.SafeHandles;
+
+[assembly: AssemblyTitle("Bakugan: Battle Brawlers Setup")]
+[assembly: AssemblyDescription("Installer for Bakugan: Battle Brawlers Recomp")]
+[assembly: AssemblyCompany("Bakugan Recomp")]
+[assembly: AssemblyProduct("Bakugan: Battle Brawlers")]
 
 namespace BakuganInstaller
 {
@@ -164,52 +173,155 @@ namespace BakuganInstaller
 
     internal static class Iso
     {
-        internal static string RunPowerShell(string command)
+        private const uint VirtualStorageTypeDeviceIso = 1;
+        private static readonly Guid VirtualStorageTypeVendorMicrosoft =
+            new Guid("EC984AEC-A0F9-47E9-901F-71415A66345B");
+
+        private const uint VirtualDiskAccessAttachRo = 0x00010000;
+        private const uint VirtualDiskAccessDetach = 0x00040000;
+        private const uint VirtualDiskAccessGetInfo = 0x00080000;
+        private const uint AttachVirtualDiskFlagReadOnly = 0x00000001;
+
+        private static SafeFileHandle activeHandle;
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct VirtualStorageType
         {
-            var psi = new ProcessStartInfo("powershell.exe",
-                "-NoProfile -NonInteractive -ExecutionPolicy Bypass -Command \"" + command.Replace("\"", "\\\"") + "\"");
-            psi.UseShellExecute = false;
-            psi.CreateNoWindow = true;
-            psi.RedirectStandardOutput = true;
-            psi.RedirectStandardError = true;
-            using (var p = Process.Start(psi))
-            {
-                string output = p.StandardOutput.ReadToEnd().Trim();
-                string error = p.StandardError.ReadToEnd().Trim();
-                p.WaitForExit();
-                if (p.ExitCode != 0)
-                    throw new Exception("PowerShell failed: " + (error.Length > 0 ? error : output));
-                return output;
-            }
+            public uint DeviceId;
+            public Guid VendorId;
         }
 
-        private static string Quote(string path) { return path.Replace("'", "''"); }
+        [DllImport("virtdisk.dll", CharSet = CharSet.Unicode)]
+        private static extern uint OpenVirtualDisk(
+            ref VirtualStorageType virtualStorageType,
+            string path,
+            uint virtualDiskAccessMask,
+            uint flags,
+            IntPtr parameters,
+            out SafeFileHandle handle);
+
+        [DllImport("virtdisk.dll")]
+        private static extern uint AttachVirtualDisk(
+            SafeFileHandle virtualDiskHandle,
+            IntPtr securityDescriptor,
+            uint flags,
+            uint providerSpecificFlags,
+            IntPtr parameters,
+            IntPtr overlapped);
+
+        [DllImport("virtdisk.dll")]
+        private static extern uint DetachVirtualDisk(
+            SafeFileHandle virtualDiskHandle,
+            uint flags,
+            uint providerSpecificFlags);
+
+        [DllImport("virtdisk.dll", CharSet = CharSet.Unicode)]
+        private static extern uint GetVirtualDiskPhysicalPath(
+            SafeFileHandle virtualDiskHandle,
+            ref uint diskPathSizeInBytes,
+            StringBuilder diskPath);
+
+        private static string GetPhysicalPath(SafeFileHandle handle)
+        {
+            uint sizeBytes = 520;
+            var sb = new StringBuilder(260);
+            uint rc = GetVirtualDiskPhysicalPath(handle, ref sizeBytes, sb);
+            return rc == 0 ? sb.ToString() : null;
+        }
+
+        private static HashSet<string> GetCdRomLetters()
+        {
+            var letters = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (DriveInfo drive in DriveInfo.GetDrives())
+            {
+                if (drive.DriveType == DriveType.CDRom)
+                    letters.Add(drive.Name.Substring(0, 1));
+            }
+            return letters;
+        }
+
+        private static string FindPs3CdRomLetter()
+        {
+            foreach (DriveInfo drive in DriveInfo.GetDrives())
+            {
+                if (drive.DriveType != DriveType.CDRom || !drive.IsReady)
+                    continue;
+                string root = drive.Name;
+                if (Directory.Exists(Path.Combine(root, "PS3_GAME")))
+                    return root.Substring(0, 1);
+            }
+            return null;
+        }
 
         public static string Mount(string iso, out bool alreadyMounted)
         {
-            string attached = RunPowerShell(
-                "$i = Get-DiskImage -ImagePath '" + Quote(iso) + "' -ErrorAction SilentlyContinue; " +
-                "if ($i -and $i.Attached) { '1' } else { '0' }");
-            alreadyMounted = attached == "1";
-            string command =
-                "$i = Get-DiskImage -ImagePath '" + Quote(iso) + "' -ErrorAction SilentlyContinue; " +
-                "if (-not $i -or -not $i.Attached) { $i = Mount-DiskImage -ImagePath '" + Quote(iso) + "' -PassThru }; " +
-                "$v = $i | Get-Volume; if (-not $v -or -not $v.DriveLetter) { throw 'The ISO has no drive letter' }; " +
-                "$v.DriveLetter";
-            string letter = RunPowerShell(command).Trim();
-            if (letter.Length != 1)
-                throw new Exception("Could not mount ISO: " + letter);
-            return letter;
+            var storageType = new VirtualStorageType
+            {
+                DeviceId = VirtualStorageTypeDeviceIso,
+                VendorId = VirtualStorageTypeVendorMicrosoft
+            };
+            SafeFileHandle handle;
+            uint access = VirtualDiskAccessAttachRo | VirtualDiskAccessGetInfo | VirtualDiskAccessDetach;
+            uint rc = OpenVirtualDisk(ref storageType, Path.GetFullPath(iso), access, 0, IntPtr.Zero, out handle);
+            if (rc != 0 || handle == null || handle.IsInvalid)
+                throw new Exception("Could not open ISO image (Win32 error " + rc + ")");
+
+            HashSet<string> before = GetCdRomLetters();
+            string physical = GetPhysicalPath(handle);
+            alreadyMounted = !string.IsNullOrEmpty(physical);
+            if (!alreadyMounted)
+            {
+                rc = AttachVirtualDisk(handle, IntPtr.Zero, AttachVirtualDiskFlagReadOnly, 0, IntPtr.Zero, IntPtr.Zero);
+                if (rc != 0)
+                {
+                    handle.Dispose();
+                    throw new Exception("Could not mount ISO image (Win32 error " + rc + ")");
+                }
+                activeHandle = handle;
+            }
+            else
+            {
+                handle.Dispose();
+                activeHandle = null;
+            }
+
+            for (int attempt = 0; attempt < 50; attempt++)
+            {
+                if (!alreadyMounted)
+                {
+                    foreach (DriveInfo drive in DriveInfo.GetDrives())
+                    {
+                        if (drive.DriveType != DriveType.CDRom)
+                            continue;
+                        string letter = drive.Name.Substring(0, 1);
+                        if (!before.Contains(letter) && drive.IsReady)
+                            return letter;
+                    }
+                }
+                else
+                {
+                    string existing = FindPs3CdRomLetter();
+                    if (!string.IsNullOrEmpty(existing))
+                        return existing;
+                }
+                Thread.Sleep(100);
+            }
+
+            Unmount(iso, alreadyMounted);
+            throw new Exception("The mounted ISO did not receive a drive letter.");
         }
 
         public static void Unmount(string iso, bool alreadyMounted)
         {
-            if (alreadyMounted) return;
-            try
+            if (alreadyMounted)
+                return;
+            SafeFileHandle h = activeHandle;
+            activeHandle = null;
+            if (h != null && !h.IsInvalid)
             {
-                RunPowerShell("Dismount-DiskImage -ImagePath '" + Quote(iso) + "' | Out-Null");
+                try { DetachVirtualDisk(h, 0, 0); } catch { }
+                try { h.Dispose(); } catch { }
             }
-            catch { }
         }
     }
 
@@ -550,21 +662,56 @@ namespace BakuganInstaller
 
     internal static class Shortcut
     {
+        [ComImport]
+        [Guid("00021401-0000-0000-C000-000000000046")]
+        private class ShellLink
+        {
+        }
+
+        [ComImport]
+        [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+        [Guid("000214F9-0000-0000-C000-000000000046")]
+        private interface IShellLinkW
+        {
+            void GetPath([Out, MarshalAs(UnmanagedType.LPWStr)] StringBuilder file, int maxPath, IntPtr findData, uint flags);
+            void GetIDList(out IntPtr idList);
+            void SetIDList(IntPtr idList);
+            void GetDescription([Out, MarshalAs(UnmanagedType.LPWStr)] StringBuilder name, int maxName);
+            void SetDescription([MarshalAs(UnmanagedType.LPWStr)] string name);
+            void GetWorkingDirectory([Out, MarshalAs(UnmanagedType.LPWStr)] StringBuilder dir, int maxPath);
+            void SetWorkingDirectory([MarshalAs(UnmanagedType.LPWStr)] string dir);
+            void GetArguments([Out, MarshalAs(UnmanagedType.LPWStr)] StringBuilder args, int maxPath);
+            void SetArguments([MarshalAs(UnmanagedType.LPWStr)] string args);
+            void GetHotkey(out short hotkey);
+            void SetHotkey(short hotkey);
+            void GetShowCmd(out int showCmd);
+            void SetShowCmd(int showCmd);
+            void GetIconLocation([Out, MarshalAs(UnmanagedType.LPWStr)] StringBuilder iconPath, int iconPathLen, out int iconIndex);
+            void SetIconLocation([MarshalAs(UnmanagedType.LPWStr)] string iconPath, int iconIndex);
+            void SetRelativePath([MarshalAs(UnmanagedType.LPWStr)] string pathRel, uint reserved);
+            void Resolve(IntPtr hwnd, uint flags);
+            void SetPath([MarshalAs(UnmanagedType.LPWStr)] string file);
+        }
+
         public static void Create(string folder, string target, string workDir,
                                   string name = "Bakugan Battle Brawlers",
                                   string description = "Bakugan: Battle Brawlers")
         {
             Directory.CreateDirectory(folder);
-            string link = Path.Combine(folder, name + ".lnk");
-            string command =
-                "$w = New-Object -ComObject WScript.Shell; " +
-                "$s = $w.CreateShortcut('" + link.Replace("'", "''") + "'); " +
-                "$s.TargetPath = '" + target.Replace("'", "''") + "'; " +
-                "$s.WorkingDirectory = '" + workDir.Replace("'", "''") + "'; " +
-                "$s.IconLocation = '" + target.Replace("'", "''") + ",0'; " +
-                "$s.Description = '" + description.Replace("'", "''") + "'; " +
-                "$s.Save()";
-            Iso.RunPowerShell(command);
+            string linkPath = Path.Combine(folder, name + ".lnk");
+            var link = (IShellLinkW)new ShellLink();
+            try
+            {
+                link.SetPath(target);
+                link.SetWorkingDirectory(workDir);
+                link.SetIconLocation(target, 0);
+                link.SetDescription(description);
+                ((IPersistFile)link).Save(linkPath, false);
+            }
+            finally
+            {
+                Marshal.FinalReleaseComObject(link);
+            }
         }
     }
 

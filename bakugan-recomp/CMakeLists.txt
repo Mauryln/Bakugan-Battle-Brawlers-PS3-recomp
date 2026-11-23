@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.23)
 project(BakuganRecomp
-    VERSION 1.3.5
+    VERSION 1.3.6
     LANGUAGES C CXX
     DESCRIPTION "Bakugan: Battle Brawlers (BLES00758) native port - ps3recomp"
 )
@@ -12,7 +12,7 @@ set(CMAKE_C_STANDARD 17)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
 
 # Prefer Ninja if available
 if(NOT CMAKE_GENERATOR MATCHES "Ninja" AND NOT DEFINED ENV{CMAKE_GENERATOR})
@@ -227,6 +227,10 @@ endif()
 # Keep version information even when there is no locally generated icon.
 if(WIN32 AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/app.rc")
     target_sources(${PROJECT_NAME} PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/app.rc")
+    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/assets/bakugan.ico")
+        set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/app.rc"
+            PROPERTIES OBJECT_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/assets/bakugan.ico")
+    endif()
     # GUI subsystem: no console window. main() is kept as the entry point.
     set_target_properties(${PROJECT_NAME} PROPERTIES WIN32_EXECUTABLE TRUE)
     target_link_options(${PROJECT_NAME} PRIVATE /ENTRY:mainCRTStartup)
@@ -287,12 +291,19 @@ if(WIN32)
     target_link_libraries(${PROJECT_NAME} PRIVATE "${BAKUGAN_SDL3_LIBRARY}")
     bakugan_copy_sdl3(${PROJECT_NAME})
     add_executable(BakuganLauncher WIN32 launcher.cpp launcher_theme.cpp player_config.cpp gamepad_devices.cpp)
-    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/app.rc")
+    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/launcher.rc")
+        target_sources(BakuganLauncher PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/launcher.rc")
+        if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/assets/bakugan.ico")
+            set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/launcher.rc"
+                PROPERTIES OBJECT_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/assets/bakugan.ico")
+        endif()
+    elseif(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/app.rc")
         target_sources(BakuganLauncher PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/app.rc")
     endif()
+    target_compile_definitions(BakuganLauncher PRIVATE BAKUGAN_LAUNCHER_BUILD=1)
     target_include_directories(BakuganLauncher PRIVATE "${BAKUGAN_SDL3_ROOT}/include")
     target_link_libraries(BakuganLauncher PRIVATE
-        user32 comdlg32 gdi32 gdiplus comctl32 "${BAKUGAN_SDL3_LIBRARY}" bakugan_fidelityfx)
+        user32 comdlg32 gdi32 gdiplus comctl32 "${BAKUGAN_SDL3_LIBRARY}")
     bakugan_copy_sdl3(BakuganLauncher)
     add_custom_target(bakugan_launcher_assets
         COMMAND "${CMAKE_COMMAND}" -E copy_directory
