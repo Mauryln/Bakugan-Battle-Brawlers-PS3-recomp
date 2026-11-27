@@ -23,26 +23,17 @@ Debe empezar por `7F 45 4C 46` (`\x7fELF`) y no por `SCE\0`. En este dump mide
 
 ## Cómo generarlo desde tu propio dump
 
-### Opción A: ya tienes el `game` extraído
+### Opción A: ya tienes el `EBOOT.elf` o `game` extraído
 
-Si el proyecto ya arranca, usa directamente
-`game\PS3_GAME\USRDIR\EBOOT.elf`. El instalador tiene un campo para ese archivo.
+Si el proyecto ya arranca o ya tienes un `EBOOT.elf` descifrado en tu carpeta de trabajo (`game\PS3_GAME\USRDIR\EBOOT.elf`), puedes indicarlo en modo silencioso con `--eboot <ruta>`.
 
-### Opción B: RPCS3 una sola vez
+### Opción B: herramientas externas del usuario (respaldo manual)
 
-1. Abre tu ISO/dump con el RPCS3 portable de `tools/rpcs3/rpcs3.exe`.
-2. Arranca el juego una vez y deja que RPCS3 descifre el EBOOT.
-3. Usa la opción de RPCS3 para volcar el `EBOOT.BIN` descifrado (o toma el
-   `EBOOT.BIN` que deja en su `dev_bdvd`).
-4. Si el resultado sigue siendo un SELF (`SCE\0`), quita el contenedor:
+Si tu `EBOOT.BIN` es un SELF retail cifrado y no usas un módulo local `keys\key_vault.cs`:
 
-```powershell
-unself EBOOT.BIN EBOOT.elf
-```
-
-`unself` forma parte de ps3tools. Si avisa que el archivo está cifrado, primero
-hay que descifrarlo con la clave del disco (IRD de tu propio dump) mediante
-`ps3dec` u otra herramienta equivalente; el proyecto no incluye claves.
+1. Descifra el `EBOOT.BIN` de tu propio dump con una herramienta externa del usuario (`ps3dec`, `unself` de ps3tools, etc.) hasta obtener el ELF desencriptado.
+2. Verifica que el archivo resultante empieza por `7F 45 4C 46`.
+3. Pasa ese archivo al instalador mediante `--eboot <ruta>` o colócalo como `EBOOT.elf` junto a `USRDIR\EBOOT.BIN` antes de instalar.
 
 ### Opción C: PS3 con CFW/multiman
 
@@ -61,26 +52,19 @@ Si empieza por `53 43 45 00` (`SCE\0`) todavía es un SELF, no un ELF.
 
 ## Instalador
 
-`BakuganSetup.exe` copia los datos de la ISO e intenta extraer el ELF
-automáticamente:
+`BakuganSetup.exe` copia los datos de la ISO o carpeta (`PS3_GAME`) e intenta extraer el ELF automáticamente:
 
 - `EBOOT.BIN` que empieza por `7F 45 4C 46`: se copia tal cual.
 - fSELF de debug (`key_revision 0x8000`): se desenvuelve sin claves.
 - SELF retail con segmentos planos: se desenvuelve si la entropía del primer
   segmento indica texto plano (por debajo de 7,5 bits/byte).
-- Cualquier otro SELF: el instalador incluye un **RPCS3 portable mínimo** y
-  ejecuta `rpcs3.exe --decrypt EBOOT.BIN`. RPCS3 usa su propia base de claves, así
-  que una ISO retail normal no pide claves al usuario. Probado con la ISO de este
-  proyecto: el ELF generado es idéntico al `EBOOT.elf` ya existente (mismo
-  SHA-256).
-- Si RPCS3 falla, pide el `EBOOT.elf` de respaldo.
+- Cualquier otro SELF: `SelfExtract` intenta el descifrado nativo en C# (AES-256-CBC / AES-128-CTR / zlib) únicamente si se compiló un módulo local `keys\key_vault.cs` (no incluido en el repositorio público); en caso contrario, indica el fallo y en modo CLI acepta `--eboot <ruta>` como respaldo silencioso si ya tienes un `EBOOT.elf`. No se incluye ningún emulador ni ejecutable externo en el instalador.
 
 También se puede probar la extracción sin instalar:
 
 ```powershell
 BakuganSetup.exe --iso "D:\juego.iso" --extract-elf --out "C:\dump\EBOOT.elf"
+BakuganSetup.exe --folder "D:\dump\PS3_GAME" --extract-elf --out "C:\out\EBOOT.elf"
 ```
 
-RPCS3 se distribuye bajo GPLv2; el instalador sólo incluye el ejecutable y sus
-DLLs, sin firmware, juegos ni claves del proyecto. Fuente:
-<https://github.com/RPCS3/rpcs3>.
+El instalador y el juego instalado son **100 % nativos**, sin ningún emulador ni claves distribuidas en el repositorio público.

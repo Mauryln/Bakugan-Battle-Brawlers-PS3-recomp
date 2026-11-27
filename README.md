@@ -2,10 +2,10 @@
 
 # Bakugan: Battle Brawlers — Native PS3 Recompilation for Windows
 
-<p><strong>The PlayStation 3 release (<code>BLES00758</code>), statically recompiled into a native Windows x64 executable.</strong></p>
+<p><strong>The PlayStation 3 release (<code>BLES00758</code>), statically recompiled into a native Windows x64 executable — 100% native execution with zero emulators.</strong></p>
 
 <p>
-<a href="https://github.com/Mauryln/Bakugan-Battle-Brawlers-PS3-recomp/releases/latest"><img src="https://img.shields.io/badge/release-v1.3.6-blue.svg?style=flat-square" alt="Release: v1.3.6"></a>
+<a href="https://github.com/Mauryln/Bakugan-Battle-Brawlers-PS3-recomp/releases/latest"><img src="https://img.shields.io/badge/release-v1.4.0-blue.svg?style=flat-square" alt="Release: v1.4.0"></a>
 <img src="https://img.shields.io/badge/platform-Windows%20x64-0078D6?style=flat-square" alt="Platform: Windows x64">
 <img src="https://img.shields.io/badge/graphics-Direct3D%2012-107C10?style=flat-square" alt="Graphics: Direct3D 12">
 <img src="https://img.shields.io/badge/title-BLES00758%20(Europe)-c0392b?style=flat-square" alt="Title: BLES00758 (Europe)">
@@ -15,7 +15,7 @@
 
 <p>
 <a href="README.es.md"><strong>Versión en Español</strong></a> · 
-<a href="#whats-new-and-fixes-v136">What's New (v1.3.6)</a> · 
+<a href="#whats-new-and-fixes-v140">What's New (v1.4.0)</a> · 
 <a href="#system-requirements">System Requirements</a> · 
 <a href="#how-to-install-and-play">Installation Guide</a> · 
 <a href="#controls-and-sixaxis">Controls & Sixaxis</a> · 
@@ -51,10 +51,10 @@ The game is **fully playable from start to finish**: story mode, tutorials, batt
 
 ---
 
-## What's New and Fixes (v1.3.6)
+## What's New and Fixes (v1.4.0)
 
-> See the release notes in [docs/RELEASE_1.3.6.md](docs/RELEASE_1.3.6.md), [docs/RELEASE_1.3.5.md](docs/RELEASE_1.3.5.md), and [docs/RELEASE_1.3.0.md](docs/RELEASE_1.3.0.md).
-> **v1.3.6** is an optional packaging/hygiene update on top of v1.3.5 that eliminates antivirus false positives (**0/65** on VirusTotal for the release ZIP and **0/70** for `BakuganSetup.exe`).
+> See the release notes in [docs/RELEASE_1.4.0.md](docs/RELEASE_1.4.0.md), [docs/RELEASE_1.3.6.md](docs/RELEASE_1.3.6.md), [docs/RELEASE_1.3.5.md](docs/RELEASE_1.3.5.md), and [docs/RELEASE_1.3.0.md](docs/RELEASE_1.3.0.md).
+> **v1.4.0** adds SDL3 controller rumble & Sixaxis calibration, Xbox/Nintendo UI button prompts, synchronized FMV A/V playback, unpacked `PS3_GAME` folder install support, and native C# `SelfExtract` handling in a zero-emulator installer package.
 
 ### D3D12 Performance & Graphics
 - **AMD FSR 3.1 Frame Generation (Optical Flow)**: Interpolates 30 native FPS to ~60 presented FPS in compatible arenas with **HUD separation (`hudless`)** so menus, cards, and UI elements stay sharp without ghosting.
@@ -71,10 +71,10 @@ The game is **fully playable from start to finish**: story mode, tutorials, batt
 - **Soft-Knee Peak Limiter & De-Click**: Dynamic peak limiting prevents audio clipping and distortion during intense multi-effect battles, paired with orphan slot cleanup and adaptive jitter cushioning.
 - **SPU ACK Prioritization & Clean FMV Teardown**: Prioritized SPU mailbox ACKs avoid stalls during rapid attack bursts, and video/audio threads shut down cleanly during FMV cutscenes and window exit.
 
-### Sixaxis, Launcher v1.3.6 & Installer
-- **Refined Sixaxis & Analog Controls**: FPS-independent **EMA smoothing**, 2D radial deadzones, calibrated physical gyroscope support without double-tilting, **Hybrid mode** (combining right stick corrections with physical gyro), **Fast** profile as default, and progressive left-stick aiming across diagonals.
-- **Dark Pyrus Launcher v1.3.6**: Bilingual dark Pyrus-themed UI (`BakuganLauncher.exe`) with an interactive controller map (`assets/launcher/Control.png` / Launcher-Picture), faithful `player.ini` persistence, smart cursor visibility/capture management, and an **`Esc`** exit confirmation dialog.
-- **Self-Contained Runtime & Clean Native Installer**: Uses the dynamic MSVC runtime (`/MD`) with official **Microsoft-signed** CRT DLLs bundled alongside the executables (no external Visual C++ Redistributable required) and FidelityFX FSR 3.1 in dedicated DLLs. `BakuganSetup.exe` uses native Win32 APIs (`virtdisk.dll` / `IShellLinkW`), protects existing save data and `player.ini`, supports in-place upgrades without re-copying the ISO, and scans **0 detections** on VirusTotal.
+### Sixaxis, Launcher v1.4.0 & Installer
+- **Refined Sixaxis & Analog Controls**: FPS-independent **EMA smoothing**, 2D radial deadzones, calibrated physical gyroscope support without double-tilting, **Hybrid mode** (combining right stick corrections with physical gyro), **Standard** profile as default, and progressive left-stick aiming across diagonals.
+- **Dark Pyrus Launcher v1.4.0**: Bilingual dark Pyrus-themed UI (`BakuganLauncher.exe`) with an interactive controller map (`assets/launcher/Control.png`), SDL3 actuator vibration strength control, Xbox/Nintendo/PlayStation button-prompt style selector (`assets/button_prompts/`), faithful `player.ini` persistence, smart cursor visibility/capture management, and an **`Esc`** exit confirmation dialog.
+- **Self-Contained Native Runtime & Installer**: Uses the dynamic MSVC runtime (`/MD`) with official **Microsoft-signed** CRT DLLs bundled alongside the executables (no external Visual C++ Redistributable required) and FidelityFX FSR 3.1 in dedicated DLLs. `BakuganSetup.exe` uses native Win32 APIs (`virtdisk.dll` / `IShellLinkW`), supports both `.iso` images and extracted `PS3_GAME` folders, performs native C# `SelfExtract` extraction (with zero emulator binaries anywhere in the installer or installed directory and an optional `--eboot` CLI fallback), and protects saves and `player.ini`.
 
 ---
 
@@ -109,17 +109,17 @@ You must provide your own legally dumped European disc image as an **ISO file (`
 ## How to Install and Play
 
 ### Fresh Installation
-1. Download the complete release archive **`Bakugan-Battle-Brawlers-Recomp-1.3.6-win64.zip`** from the [Latest Release](https://github.com/Mauryln/Bakugan-Battle-Brawlers-PS3-recomp/releases/latest).
-2. Extract the entire ZIP archive into a folder of your choice (keep the `payload` folder beside `BakuganSetup.exe`).
+1. Download the complete release archive **`Bakugan-Battle-Brawlers-Recomp-1.4.0-win64.zip`** from the [Latest Release](https://github.com/Mauryln/Bakugan-Battle-Brawlers-PS3-recomp/releases/latest).
+2. Extract the entire ZIP archive into a folder of your choice (keep `payload` beside `BakuganSetup.exe`).
 3. Run **`BakuganSetup.exe`** from the extracted directory.
-4. Select your **European Disc ISO (`BLES00758`)** or extracted `PS3_GAME` folder.
-5. Choose your installation directory and shortcut preferences (Desktop / Start Menu), then click **Install**.
+4. Select your **European Disc ISO (`BLES00758`)** or extracted **`PS3_GAME`** folder (using **ISO...** or **Folder...**).
+5. Choose your installation directory and shortcut preferences (Desktop / Start Menu), then click **Install / Update**. `BakuganSetup.exe` copies the game data and extracts `EBOOT.elf` natively via `SelfExtract` (zero emulator binaries).
 6. Launch the game from the shortcut or **`BakuganLauncher.exe`**, adjust graphics/controls, and click **Play**.
 
-### Updating from a Previous Version (v1.2.0 / v1.3.0 / v1.3.5)
+### Updating from a Previous Version (v1.2.0 / v1.3.x)
 1. Close the game and `BakuganLauncher.exe`.
-2. Extract the v1.3.6 ZIP archive and run **`BakuganSetup.exe`**.
-3. Select your existing installation folder and **leave the ISO field blank**. The installer updates the binaries and launcher assets while reusing your decrypted game data and preserving your saves and `player.ini`.
+2. Extract the v1.4.0 ZIP archive and run **`BakuganSetup.exe`**.
+3. Select your existing installation folder and **leave the ISO / folder field blank**. The installer updates the binaries and launcher assets while reusing your decrypted game data and preserving your saves and `player.ini`.
 
 ---
 
@@ -150,7 +150,7 @@ The input bridge supports up to **7 simultaneous ports** across Keyboard, Mouse,
 
 ### Sixaxis Motion Implementation
 
-Three motion input methods work seamlessly and can be tuned in `BakuganLauncher.exe` (with the **Fast** profile active by default):
+Three motion input methods work seamlessly and can be tuned in `BakuganLauncher.exe` (with the **Standard** profile active by default):
 
 - **Mouse Steering**: Natural mouse tilt with FPS-independent EMA smoothing, radial deadzone, and automatic return-to-center physics. Cursor capture adapts cleanly to menus, overlays, and Alt-Tab.
 - **Right Analog Stick**: Smooth 360° ball steering for standard controllers, plus progressive aiming response on the left stick.
@@ -160,7 +160,7 @@ Three motion input methods work seamlessly and can be tuned in `BakuganLauncher.
 
 ## Technical Details
 
-- **Ahead-of-Time Static Recompilation**: 15,682 PPU functions and 1,331 SPU functions compiled to native x64 code with LLVM `clang-cl` `/O2` and static CRT (`/MT`).
+- **Ahead-of-Time Static Recompilation**: 15,682 PPU functions and 1,331 SPU functions compiled to native x64 code with LLVM `clang-cl` `/O2` and dynamic CRT (`/MD`) with official Microsoft-signed CRT DLLs bundled. No PS3 emulator is bundled or executed at runtime.
 - **SIMD-Accelerated SPU Paths**: SSE4.1 / AVX2 SPU helpers and SSSE3 / SSE-float MultiStream audio kernels.
 - **Direct3D 12 HLE**: Custom RSX command buffer translator with parallel vertex upload workers, SRV dirty tracking, unified shader disk cache (`fp_v4`/`vs_v1`), SMAA, AMD FSR 1.0, and AMD FSR 3.1 Frame Generation with HUD separation.
 - **Low-Latency WASAPI Audio**: Multi-stream mixing with soft-knee peak limiting, adaptive jitter buffering, and prioritized SPU ACKs.
@@ -174,10 +174,8 @@ This port would not exist without the open-source emulation and recompilation co
 
 - **PS3Recomp Team & Ned Heller ([sp00nznet](https://github.com/sp00nznet) / [arnold9401](https://github.com/arnold9401))**:  
   Heartfelt thanks to the creators of the **[PS3Recomp](https://github.com/arnold9401/ps3recomp)** static recompilation framework. Their research into PPU/SPU translation and PS3 HLE runtime design made this native Windows port achievable.
-- **RPCS3 Developers ([rpcs3.net](https://rpcs3.net))**:  
-  For their PS3 emulator and portable decryption utilities used for disc asset extraction.
 - **libsdl-org ([SDL3](https://github.com/libsdl-org/SDL))**:  
-  For cross-platform controller enumeration and physical motion sensor handling.
+  For cross-platform controller enumeration, actuator rumble, and physical motion sensor handling.
 - **AMD FidelityFX**:  
   For official FSR 1.0 (EASU + RCAS) and FSR 3.1 Frame Generation (Optical Flow).
 
