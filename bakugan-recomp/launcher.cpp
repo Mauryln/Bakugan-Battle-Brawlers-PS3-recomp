@@ -1059,8 +1059,8 @@ void create_controls() {
     combo(ID_DEVICE, 751, 169, 217, {S(L"Buscando mandos…", L"Searching for controllers…")});
     label(S(L"Perfil Sixaxis", L"Sixaxis profile"), 348, 205, 112);
     combo(ID_SIXAXIS_PROFILE, 465, 201, 163,
-          {S(L"Suave / Preciso", L"Smooth / Precise"), S(L"Estándar", L"Standard"),
-           S(L"Rápido (por defecto)", L"Fast (default)"), S(L"Personalizado", L"Custom")});
+          {S(L"Suave / Preciso", L"Smooth / Precise"), S(L"Estándar (por defecto)", L"Standard (default)"),
+           S(L"Rápido", L"Fast"), S(L"Personalizado", L"Custom")});
     label(S(L"Modo Sixaxis", L"Sixaxis mode"), 646, 205, 103);
     combo(ID_MOTION_MODE, 751, 201, 217,
           {S(L"Híbrido (Auto)", L"Hybrid (Auto)"), S(L"Solo sensores", L"Sensors only"),
@@ -1073,11 +1073,11 @@ void create_controls() {
           {S(L"Teclado y ratón", L"Keyboard and mouse"), S(L"Mando", L"Controller")});
 
     label(S(L"Sensibilidad Sixaxis", L"Sixaxis sensitivity"), 348, 265, 143);
-    slider(ID_GYRO_SENS, 344, 282, 147, 10, 500, 140);
+    slider(ID_GYRO_SENS, 344, 282, 147, 10, 500, 100);
     label(S(L"Zona muerta", L"Deadzone"), 507, 265, 143);
-    slider(ID_DEADZONE, 503, 282, 147, 2, 50, 10);
+    slider(ID_DEADZONE, 503, 282, 147, 2, 50, 15);
     label(S(L"Suavizado Sixaxis", L"Sixaxis smoothing"), 666, 265, 143);
-    slider(ID_SIXAXIS_SMOOTH, 662, 282, 147, 0, 100, 15);
+    slider(ID_SIXAXIS_SMOOTH, 662, 282, 147, 0, 100, 45);
     add(L"STATIC", S(L"Vibración: 80%", L"Vibration: 80%"), ID_VIBRATION_LABEL, 825, 265, 143, 22);
     slider(ID_VIBRATION, 821, 282, 147, 0, 100, 80);
 

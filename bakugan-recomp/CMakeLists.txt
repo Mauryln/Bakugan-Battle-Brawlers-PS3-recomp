@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.23)
 project(BakuganRecomp
-    VERSION 1.3.6
+    VERSION 1.4.0
     LANGUAGES C CXX
     DESCRIPTION "Bakugan: Battle Brawlers (BLES00758) native port - ps3recomp"
 )
@@ -289,6 +289,7 @@ if(WIN32)
     set_source_files_properties(input_bridge.cpp player_config.cpp gamepad_devices.cpp
         PROPERTIES INCLUDE_DIRECTORIES "${BAKUGAN_SDL3_ROOT}/include")
     target_link_libraries(${PROJECT_NAME} PRIVATE "${BAKUGAN_SDL3_LIBRARY}")
+    target_link_options(${PROJECT_NAME} PRIVATE /RELEASE)
     bakugan_copy_sdl3(${PROJECT_NAME})
     add_executable(BakuganLauncher WIN32 launcher.cpp launcher_theme.cpp player_config.cpp gamepad_devices.cpp)
     if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/launcher.rc")
@@ -304,6 +305,7 @@ if(WIN32)
     target_include_directories(BakuganLauncher PRIVATE "${BAKUGAN_SDL3_ROOT}/include")
     target_link_libraries(BakuganLauncher PRIVATE
         user32 comdlg32 gdi32 gdiplus comctl32 "${BAKUGAN_SDL3_LIBRARY}")
+    target_link_options(BakuganLauncher PRIVATE /RELEASE)
     bakugan_copy_sdl3(BakuganLauncher)
     add_custom_target(bakugan_launcher_assets
         COMMAND "${CMAKE_COMMAND}" -E copy_directory
@@ -312,6 +314,15 @@ if(WIN32)
         VERBATIM)
     add_dependencies(BakuganLauncher bakugan_launcher_assets)
     install(DIRECTORY assets/launcher DESTINATION bin/assets)
+    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/assets/button_prompts")
+        add_custom_target(bakugan_button_prompt_assets
+            COMMAND "${CMAKE_COMMAND}" -E copy_directory
+                    "${CMAKE_CURRENT_SOURCE_DIR}/assets/button_prompts"
+                    "$<TARGET_FILE_DIR:${PROJECT_NAME}>/assets/button_prompts"
+            VERBATIM)
+        add_dependencies(${PROJECT_NAME} bakugan_button_prompt_assets)
+        install(DIRECTORY assets/button_prompts DESTINATION bin/assets)
+    endif()
     install(TARGETS BakuganLauncher RUNTIME DESTINATION bin)
     install(FILES "${BAKUGAN_SDL3_ROOT}/lib/x64/SDL3.dll" DESTINATION bin)
     install(FILES "${BAKUGAN_SDL3_ROOT}/LICENSE.txt" DESTINATION bin/licenses RENAME SDL3.txt)

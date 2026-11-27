@@ -23,8 +23,8 @@ int main() {
     auto c = defaults();
     CHECK(c.frame_gen == L"off");
     CHECK(c.motion == MotionMode::Auto);
-    CHECK(c.sixaxis_profile == SixaxisProfile::Fast);
-    CHECK(c.deadzone == 0.10f && c.gyro_sensitivity == 1.40f && c.sixaxis_smoothing == 0.15f);
+    CHECK(c.sixaxis_profile == SixaxisProfile::Standard);
+    CHECK(c.deadzone == 0.15f && c.gyro_sensitivity == 1.00f && c.sixaxis_smoothing == 0.45f);
     CHECK(c.vibration_strength == 80);
     CHECK(c.button_prompts == L"auto");
     CHECK(!has_input_overrides(c));
@@ -345,24 +345,24 @@ int main() {
     CHECK(std::abs(reloaded.sixaxis_curve - 0.80f) < 0.001f);
     CHECK(std::abs(reloaded.sixaxis_smoothing - 0.75f) < 0.001f);
 
-    // Fall back to Fast for missing settings while preserving explicit profile and tuning keys.
+    // Fall back to Standard for missing settings while preserving explicit profile and tuning keys.
     auto legacy_path = std::filesystem::temp_directory_path() / L"bakugan-legacy-test.ini";
     std::filesystem::remove(legacy_path);
     CHECK(WritePrivateProfileStringW(L"Player", L"Version", L"1", legacy_path.c_str()));
     CHECK(WritePrivateProfileStringW(L"Input", L"Deadzone", L"0.22", legacy_path.c_str()));
     Config legacy_cfg;
     CHECK(load(legacy_cfg, legacy_path.wstring(), &error));
-    CHECK(legacy_cfg.sixaxis_profile == SixaxisProfile::Fast);
+    CHECK(legacy_cfg.sixaxis_profile == SixaxisProfile::Standard);
     CHECK(legacy_cfg.vibration_strength == 80);
     CHECK(legacy_cfg.button_prompts == L"auto");
     CHECK(legacy_cfg.frame_gen == L"off");
     CHECK(legacy_cfg.display_mode == L"borderless");
     CHECK(std::abs(legacy_cfg.deadzone - 0.22f) < 0.001f);
-    CHECK(std::abs(legacy_cfg.sixaxis_smoothing - 0.15f) < 0.001f);
-    CHECK(WritePrivateProfileStringW(L"Input", L"SixaxisProfile", L"1", legacy_path.c_str()));
+    CHECK(std::abs(legacy_cfg.sixaxis_smoothing - 0.45f) < 0.001f);
+    CHECK(WritePrivateProfileStringW(L"Input", L"SixaxisProfile", L"2", legacy_path.c_str()));
     CHECK(load(legacy_cfg, legacy_path.wstring(), &error));
-    CHECK(legacy_cfg.sixaxis_profile == SixaxisProfile::Standard);
-    CHECK(legacy_cfg.sixaxis_smoothing == 0.45f && legacy_cfg.deadzone == 0.22f);
+    CHECK(legacy_cfg.sixaxis_profile == SixaxisProfile::Fast);
+    CHECK(legacy_cfg.sixaxis_smoothing == 0.15f && legacy_cfg.deadzone == 0.22f);
     std::filesystem::remove(legacy_path);
 
     SixaxisState state_fast_hz, state_slow_hz;
@@ -758,8 +758,8 @@ int main() {
                 CHECK(diag_rep.sensors[s] <= 1023);
         }
         CHECK(diag_rep.rx == 255 && diag_rep.ry == 0);
-        CHECK(diag_rep.sensors[0] == 670 && diag_rep.sensors[1] == 59 &&
-              diag_rep.sensors[2] == 354 && diag_rep.sensors[3] == 684);
+        CHECK(diag_rep.sensors[0] == 625 && diag_rep.sensors[1] == 59 &&
+              diag_rep.sensors[2] == 399 && diag_rep.sensors[3] == 635);
 
         for (int i = 0; i < 160; ++i) {
             step_mouse_virtual_stick(vx, vy, 0, 0, mcfg.mouse_sensitivity, 0.010f);
