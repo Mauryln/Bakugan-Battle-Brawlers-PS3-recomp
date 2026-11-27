@@ -1,29 +1,33 @@
 Bakugan: Battle Brawlers (BLES00758) - Port nativo para Windows x64
 ====================================================================
 
-Versión 1.3.6 - Windows x64
+Versión 1.4.0 - Windows x64
 
 QUÉ ES
 ------
-Recompilación estática del juego de PS3 (PPU/SPU) con un runtime HLE que usa
-D3D12, WASAPI y SDL3. El jugador aporta su propia ISO del disco.
+Recompilación estática del juego de PS3 (PPU/SPU) a código nativo de Windows
+x64 con runtime HLE sobre D3D12, WASAPI y SDL3. El juego en ejecución corre
+100 % nativo sin emuladores; el jugador aporta su propia copia del juego.
 
 REQUISITOS
 ----------
 - Windows 10/11 x64 con Direct3D 12.
-- Tu propia ISO o dump del juego (BLES00758). Es un título sólo en disco.
-- ~2 GB libres para los datos del juego y ~175 MB para el instalador.
+- Tu propia ISO o carpeta extraída del juego (BLES00758). Es un título sólo en disco.
+- ~2 GB libres para los datos del juego y ~100 MB para el instalador.
 
 INSTALACIÓN
 -----------
-1. Extrae todo el ZIP y ejecuta BakuganSetup.exe junto a la carpeta payload.
-2. Selecciona tu ISO.
+1. Extrae todo el ZIP y ejecuta BakuganSetup.exe junto a payload.
+2. Selecciona tu archivo .iso o tu carpeta extraída del juego (que contenga
+   PS3_GAME o directamente PS3_GAME\).
 3. Elige la carpeta de instalación.
 4. Marca/desmarca el icono de escritorio y el acceso del menú Inicio.
-5. Pulsa Instalar.
+5. Pulsa Instalar / Actualizar.
 
-El instalador copia los datos de PS3_GAME y extrae y descifra EBOOT.elf
-automáticamente con el RPCS3 portable incluido.
+El instalador copia los datos de PS3_GAME y extrae EBOOT.elf nativamente
+mediante SelfExtract en C# (sin incluir ningún emulador en el instalador ni
+en la carpeta final del juego). En modo silencioso acepta además `--eboot <ruta>`
+como respaldo opcional por línea de comandos.
 
 El juego compila y guarda su caché de shaders en el primer uso. El paquete
 incluye los shaders de FSR1 y la biblioteca SDL3.
@@ -85,8 +89,6 @@ CRÉDITOS
 --------
 Gracias a ps3recomp (Ned Heller / sp00nznet) por el toolkit de recompilación
 PPU/SPU y el runtime HLE: https://github.com/sp00nznet/ps3recomp (MIT).
-RPCS3 portable (GPLv2) incluido únicamente para `rpcs3.exe --decrypt`.
-Fuente: https://github.com/RPCS3/rpcs3
-SDL3, FSR1 y el resto de componentes mantienen sus licencias.
+SDL3, FSR1, FSR 3.1 y el resto de componentes mantienen sus licencias.
 Bakugan: Battle Brawlers es propiedad de sus titulares. No se distribuye ningún
-asset, código, clave ni lift del juego.
+código ni dump del disco del juego.

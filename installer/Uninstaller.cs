@@ -9,6 +9,7 @@ using Microsoft.Win32;
 [assembly: AssemblyDescription("Uninstaller for Bakugan: Battle Brawlers Recomp")]
 [assembly: AssemblyCompany("Bakugan Recomp")]
 [assembly: AssemblyProduct("Bakugan: Battle Brawlers")]
+[assembly: AssemblyCopyright("Copyright (c) Bakugan Recomp Contributors (MIT)")]
 
 namespace BakuganUninstaller
 {
@@ -85,15 +86,18 @@ namespace BakuganUninstaller
             if (Directory.Exists(menu)) Directory.Delete(menu, true);
         }
 
-        private static void RemoveInstalledFiles(string dir, string selfPath)
+        internal static void RemoveInstalledFiles(string dir, string selfPath)
         {
-            if (string.IsNullOrEmpty(dir) || !Directory.Exists(dir)) return;
+            if (string.IsNullOrEmpty(dir)) return;
             string full = Path.GetFullPath(dir).TrimEnd('\\');
+            if (full.Length == 2 && full[1] == ':') full += '\\';
             string root = Path.GetPathRoot(full);
             string windows = Environment.GetFolderPath(Environment.SpecialFolder.Windows);
-            if (string.Equals(full, root.TrimEnd('\\'), StringComparison.OrdinalIgnoreCase) ||
-                string.Equals(full, windows.TrimEnd('\\'), StringComparison.OrdinalIgnoreCase))
+            if (string.Equals(full.TrimEnd('\\'), root.TrimEnd('\\'), StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(full.TrimEnd('\\'), windows.TrimEnd('\\'), StringComparison.OrdinalIgnoreCase) ||
+                OverlapsSaveDirectory(full))
                 throw new Exception(Loc.T("Ruta de instalación no segura: ", "Unsafe installation path: ") + full);
+            if (!Directory.Exists(full)) return;
 
             foreach (string subDir in Directory.GetDirectories(full))
             {
@@ -102,11 +106,32 @@ namespace BakuganUninstaller
             }
             foreach (string file in Directory.GetFiles(full))
             {
-                if (string.Equals(Path.GetFullPath(file), selfPath, StringComparison.OrdinalIgnoreCase))
+                if (!string.IsNullOrEmpty(selfPath) &&
+                    string.Equals(Path.GetFullPath(file), Path.GetFullPath(selfPath), StringComparison.OrdinalIgnoreCase))
                     continue;
                 File.SetAttributes(file, FileAttributes.Normal);
                 File.Delete(file);
             }
+        }
+
+        private static bool OverlapsSaveDirectory(string dir)
+        {
+            string localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+            if (string.IsNullOrEmpty(localAppData))
+                localAppData = Environment.GetEnvironmentVariable("LOCALAPPDATA") ?? "";
+            if (string.IsNullOrEmpty(localAppData))
+                return false;
+            string saveRoot = Path.GetFullPath(Path.Combine(localAppData, "BakuganRecomp"))
+                .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            string full = Path.GetFullPath(dir).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            if (full.Length == 2 && full[1] == ':')
+                full += Path.DirectorySeparatorChar;
+            string sep = Path.DirectorySeparatorChar.ToString();
+            string savePrefix = saveRoot + sep;
+            string fullPrefix = full.EndsWith(sep, StringComparison.Ordinal) ? full : full + sep;
+            return string.Equals(full, saveRoot, StringComparison.OrdinalIgnoreCase) ||
+                   full.StartsWith(savePrefix, StringComparison.OrdinalIgnoreCase) ||
+                   saveRoot.StartsWith(fullPrefix, StringComparison.OrdinalIgnoreCase);
         }
 
         private static void ClearReadOnlyAttributes(string dir)

@@ -17,6 +17,7 @@ using Microsoft.Win32.SafeHandles;
 [assembly: AssemblyDescription("Installer for Bakugan: Battle Brawlers Recomp")]
 [assembly: AssemblyCompany("Bakugan Recomp")]
 [assembly: AssemblyProduct("Bakugan: Battle Brawlers")]
+[assembly: AssemblyCopyright("Copyright (c) Bakugan Recomp Contributors (MIT)")]
 
 namespace BakuganInstaller
 {
@@ -49,7 +50,7 @@ namespace BakuganInstaller
             }
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
-            Application.Run(new InstallerForm());
+            Application.Run(new InstallerForm(options));
         }
 
         private static int SilentRun(Options o)
@@ -72,12 +73,53 @@ namespace BakuganInstaller
             }
         }
 
+        private static void ExtractElfForInspect(Options o, string elf, string bin, StringBuilder log)
+        {
+            string target = string.IsNullOrEmpty(o.Out)
+                ? Path.Combine(Path.GetDirectoryName(Application.ExecutablePath), "EBOOT.elf")
+                : o.Out;
+            if (Installer.IsValidElf(elf))
+            {
+                File.Copy(elf, target, true);
+                log.AppendLine("ELF extracted: " + target + " (existing EBOOT.elf)");
+                return;
+            }
+            string reason = "";
+            bool ok = File.Exists(bin) && SelfExtract.TryExtract(bin, target, out reason);
+            if (!ok && Installer.IsValidElf(o.Eboot))
+            {
+                File.Copy(o.Eboot, target, true);
+                reason = "EBOOT.elf fallback";
+                ok = true;
+            }
+            if (!ok)
+                throw new Exception("Could not extract EBOOT.elf: " + reason);
+            log.AppendLine("ELF extracted: " + target + " (" + reason + ")");
+        }
+
         private static void InspectIso(Options o, StringBuilder log)
         {
-            if (string.IsNullOrEmpty(o.Iso) || !File.Exists(o.Iso))
-                throw new Exception("ISO not found: " + o.Iso);
+            string sourceInput = Installer.NormalizeSourcePath(o.Iso);
+            if (string.IsNullOrEmpty(sourceInput))
+                throw new Exception("ISO or game folder not specified.");
+            if (Directory.Exists(sourceInput))
+            {
+                string ps3GameDir, discSfb, reason;
+                if (!Installer.ResolveDirectorySource(sourceInput, out ps3GameDir, out discSfb, out reason))
+                    throw new Exception(reason);
+                string ud = Path.Combine(ps3GameDir, "USRDIR");
+                string elf = Path.Combine(ud, "EBOOT.elf");
+                string bin = Path.Combine(ud, "EBOOT.BIN");
+                log.AppendLine("FOLDER OK: " + ps3GameDir + " (sfb=" + (!string.IsNullOrEmpty(discSfb)) +
+                               ", elf=" + File.Exists(elf) + ", bin=" + File.Exists(bin) + ")");
+                if (o.ExtractElf)
+                    ExtractElfForInspect(o, elf, bin, log);
+                return;
+            }
+            if (!File.Exists(sourceInput))
+                throw new Exception("ISO or game folder not found: " + sourceInput);
             bool already;
-            string letter = Iso.Mount(o.Iso, out already);
+            string letter = Iso.Mount(sourceInput, out already);
             try
             {
                 string root = letter + ":\\";
@@ -88,36 +130,11 @@ namespace BakuganInstaller
                     throw new Exception("PS3_GAME\\USRDIR\\EBOOT.BIN not found in ISO");
                 log.AppendLine("ISO OK: " + root + " (elf=" + File.Exists(elf) + ", bin=" + File.Exists(bin) + ")");
                 if (o.ExtractElf)
-                {
-                    string target = string.IsNullOrEmpty(o.Out)
-                        ? Path.Combine(Path.GetDirectoryName(Application.ExecutablePath), "EBOOT.elf")
-                        : o.Out;
-                    string reason = "";
-                    bool ok = SelfExtract.TryExtract(bin, target, out reason);
-                    if (!ok)
-                    {
-                        string exeDir = Path.GetDirectoryName(Application.ExecutablePath);
-                        string rpcs3Elf = null, rpcs3Reason = "";
-                        ok = Rpcs3Decrypt.TryDecrypt(bin, Path.Combine(exeDir, ".decrypt"),
-                            Path.Combine(exeDir, "payload", "rpcs3"), out rpcs3Elf, out rpcs3Reason);
-                        if (ok)
-                        {
-                            File.Copy(rpcs3Elf, target, true);
-                            reason = "RPCS3 --decrypt";
-                        }
-                        else
-                        {
-                            reason = reason + " " + rpcs3Reason;
-                        }
-                    }
-                    if (!ok)
-                        throw new Exception("Could not extract EBOOT.elf: " + reason);
-                    log.AppendLine("ELF extracted: " + target + " (" + reason + ")");
-                }
+                    ExtractElfForInspect(o, elf, bin, log);
             }
             finally
             {
-                Iso.Unmount(o.Iso, already);
+                Iso.Unmount(sourceInput, already);
             }
         }
 
@@ -141,7 +158,7 @@ namespace BakuganInstaller
             for (int i = 0; i < args.Length; i++)
             {
                 string a = args[i];
-                if (a == "--iso" && i + 1 < args.Length) o.Iso = args[++i];
+                if ((a == "--iso" || a == "--folder") && i + 1 < args.Length) o.Iso = args[++i];
                 else if (a == "--dir" && i + 1 < args.Length) o.Dir = args[++i];
                 else if (a == "--eboot" && i + 1 < args.Length) o.Eboot = args[++i];
                 else if (a == "--out" && i + 1 < args.Length) o.Out = args[++i];
@@ -153,20 +170,6 @@ namespace BakuganInstaller
             }
             if (string.IsNullOrEmpty(o.Dir))
                 o.Dir = Installer.DefaultInstallDirectory();
-            if (string.IsNullOrEmpty(o.Eboot))
-            {
-                string exeDir = Path.GetDirectoryName(Application.ExecutablePath);
-                string[] guesses = {
-                    Path.Combine(exeDir, "game", "PS3_GAME", "USRDIR", "EBOOT.elf"),
-                    Path.Combine(exeDir, "..", "game", "PS3_GAME", "USRDIR", "EBOOT.elf"),
-                    Path.Combine(exeDir, "..", "..", "game", "PS3_GAME", "USRDIR", "EBOOT.elf"),
-                    Path.Combine(Environment.CurrentDirectory, "game", "PS3_GAME", "USRDIR", "EBOOT.elf")
-                };
-                foreach (string guess in guesses)
-                {
-                    if (Installer.IsValidElf(guess)) { o.Eboot = Path.GetFullPath(guess); break; }
-                }
-            }
             return o;
         }
     }
@@ -382,6 +385,139 @@ namespace BakuganInstaller
                                 "Programs", "BakuganRecomp");
         }
 
+        internal static string NormalizeSourcePath(string path)
+        {
+            if (string.IsNullOrWhiteSpace(path))
+                return "";
+            return path.Trim().Trim('"').Trim();
+        }
+
+        private static string NormalizeDirPath(string path)
+        {
+            string full = Path.GetFullPath(path).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            if (full.Length == 2 && full[1] == ':')
+                full += Path.DirectorySeparatorChar;
+            return full;
+        }
+
+        internal static bool PathsOverlap(string pathA, string pathB)
+        {
+            if (string.IsNullOrWhiteSpace(pathA) || string.IsNullOrWhiteSpace(pathB))
+                return false;
+            try
+            {
+                string a = NormalizeDirPath(pathA);
+                string b = NormalizeDirPath(pathB);
+                string sep = Path.DirectorySeparatorChar.ToString();
+                string aPrefix = a.EndsWith(sep, StringComparison.Ordinal) ? a : a + sep;
+                string bPrefix = b.EndsWith(sep, StringComparison.Ordinal) ? b : b + sep;
+                return string.Equals(a, b, StringComparison.OrdinalIgnoreCase) ||
+                       b.StartsWith(aPrefix, StringComparison.OrdinalIgnoreCase) ||
+                       a.StartsWith(bPrefix, StringComparison.OrdinalIgnoreCase);
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        internal static bool ResolveDirectorySource(string inputPath, out string ps3GameDir,
+                                                    out string discSfbPath, out string reason)
+        {
+            ps3GameDir = null;
+            discSfbPath = null;
+            reason = null;
+
+            string normalized = NormalizeSourcePath(inputPath);
+            if (string.IsNullOrEmpty(normalized) || !Directory.Exists(normalized))
+            {
+                reason = Loc.T(
+                    "La carpeta seleccionada no existe.",
+                    "The selected folder does not exist.");
+                return false;
+            }
+
+            string full;
+            try
+            {
+                full = NormalizeDirPath(normalized);
+            }
+            catch
+            {
+                reason = Loc.T("La ruta de origen no es válida.", "The source path is invalid.");
+                return false;
+            }
+
+            string candidateGame = Path.Combine(full, "PS3_GAME");
+            if (Directory.Exists(candidateGame))
+            {
+                ps3GameDir = candidateGame;
+                string sfb = Path.Combine(full, "PS3_DISC.SFB");
+                if (File.Exists(sfb))
+                    discSfbPath = sfb;
+            }
+            else if (string.Equals(Path.GetFileName(full), "PS3_GAME", StringComparison.OrdinalIgnoreCase) ||
+                     Directory.Exists(Path.Combine(full, "USRDIR")))
+            {
+                ps3GameDir = full;
+                string parent = Path.GetDirectoryName(full);
+                if (!string.IsNullOrEmpty(parent))
+                {
+                    string sfb = Path.Combine(parent, "PS3_DISC.SFB");
+                    if (File.Exists(sfb))
+                        discSfbPath = sfb;
+                }
+            }
+            else
+            {
+                reason = Loc.T(
+                    "La carpeta seleccionada no es válida o no corresponde a Bakugan: Battle Brawlers (PS3 BLES00758). " +
+                    "Debe contener PS3_GAME\\USRDIR\\EBOOT.BIN (o ser directamente la carpeta PS3_GAME).",
+                    "The selected folder is invalid or does not match Bakugan: Battle Brawlers (PS3 BLES00758). " +
+                    "It must contain PS3_GAME\\USRDIR\\EBOOT.BIN (or be the PS3_GAME folder directly).");
+                return false;
+            }
+
+            string ud = Path.Combine(ps3GameDir, "USRDIR");
+            string elf = Path.Combine(ud, "EBOOT.elf");
+            string bin = Path.Combine(ud, "EBOOT.BIN");
+            if (!Directory.Exists(ps3GameDir) || (!File.Exists(elf) && !File.Exists(bin)))
+            {
+                reason = Loc.T(
+                    "La carpeta seleccionada no es válida o no corresponde a Bakugan: Battle Brawlers (PS3 BLES00758). " +
+                    "No contiene la estructura PS3_GAME\\USRDIR\\EBOOT.BIN.",
+                    "The selected folder is invalid or does not match Bakugan: Battle Brawlers (PS3 BLES00758). " +
+                    "It does not contain PS3_GAME\\USRDIR\\EBOOT.BIN.");
+                return false;
+            }
+
+            return true;
+        }
+
+        public static bool IsUnsafeSourceOverlap(string sourceDir, string installDir, out string reason)
+        {
+            reason = null;
+            string normalized = NormalizeSourcePath(sourceDir);
+            if (string.IsNullOrEmpty(normalized) || !Directory.Exists(normalized) || string.IsNullOrWhiteSpace(installDir))
+                return false;
+
+            bool overlap = PathsOverlap(normalized, installDir);
+            if (!overlap)
+            {
+                string ps3GameDir, discSfbPath, resolveReason;
+                if (ResolveDirectorySource(normalized, out ps3GameDir, out discSfbPath, out resolveReason))
+                    overlap = PathsOverlap(ps3GameDir, installDir);
+            }
+            if (overlap)
+            {
+                reason = Loc.T(
+                    "La carpeta de origen del juego no puede coincidir ni solaparse con la carpeta de instalación (evita copia recursiva o sobrescritura).",
+                    "The source game folder cannot match or overlap the installation folder (prevents recursive copy or self-overwrite).");
+                return true;
+            }
+            return false;
+        }
+
         public static bool IsUnsafeInstallDirectory(string dir, out string reason)
         {
             reason = null;
@@ -394,7 +530,7 @@ namespace BakuganInstaller
             string full;
             try
             {
-                full = Path.GetFullPath(dir).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+                full = NormalizeDirPath(dir);
             }
             catch
             {
@@ -409,11 +545,7 @@ namespace BakuganInstaller
             {
                 string saveRoot = Path.GetFullPath(Path.Combine(localAppData, "BakuganRecomp"))
                     .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-                string savePrefix = saveRoot + Path.DirectorySeparatorChar;
-                string fullPrefix = full + Path.DirectorySeparatorChar;
-                if (string.Equals(full, saveRoot, StringComparison.OrdinalIgnoreCase) ||
-                    full.StartsWith(savePrefix, StringComparison.OrdinalIgnoreCase) ||
-                    saveRoot.StartsWith(fullPrefix, StringComparison.OrdinalIgnoreCase))
+                if (PathsOverlap(full, saveRoot))
                 {
                     reason = Loc.T(
                         "No se puede instalar en '" + saveRoot + "' (ni en una carpeta que la contenga) porque ahí se guardan tus partidas y ajustes (player.ini), y Uninstall.exe borraría tus partidas.\n\n" +
@@ -489,10 +621,25 @@ namespace BakuganInstaller
                     "(Bakugan-Battle-Brawlers-Recomp-" + ReleaseVersion + "-win64.zip) into a folder before running BakuganSetup.exe."));
             }
 
-            bool reuseGame = string.IsNullOrWhiteSpace(o.Iso) && CanReuseGame(o.Dir);
-            if (!reuseGame && !File.Exists(o.Iso))
-                throw new Exception(Loc.T("Selecciona una ISO válida para instalar o reparar el juego.",
-                                          "Select a valid ISO to install or repair the game."));
+            string sourceInput = NormalizeSourcePath(o.Iso);
+            bool reuseGame = string.IsNullOrWhiteSpace(sourceInput) && CanReuseGame(o.Dir);
+            bool isFolder = !reuseGame && !string.IsNullOrEmpty(sourceInput) && Directory.Exists(sourceInput);
+            bool isFile = !reuseGame && !isFolder && !string.IsNullOrEmpty(sourceInput) && File.Exists(sourceInput);
+            if (!reuseGame && !isFolder && !isFile)
+                throw new Exception(Loc.T("Selecciona una ISO o carpeta del juego válida para instalar o reparar el juego.",
+                                          "Select a valid ISO or game folder to install or repair the game."));
+
+            string folderSource = null;
+            string folderSfb = null;
+            if (isFolder)
+            {
+                string overlapReason;
+                if (IsUnsafeSourceOverlap(sourceInput, o.Dir, out overlapReason))
+                    throw new Exception(overlapReason);
+                string folderReason;
+                if (!ResolveDirectorySource(sourceInput, out folderSource, out folderSfb, out folderReason))
+                    throw new Exception(folderReason);
+            }
 
             Directory.CreateDirectory(o.Dir);
             Status(0, Loc.T("Copiando archivos del programa...", "Copying application files..."));
@@ -500,6 +647,12 @@ namespace BakuganInstaller
             CountTree(payload);
             CopyTree(payload, o.Dir, 0, 30);
             try { File.Delete(Path.Combine(o.Dir, "shadercache", "fp_v2.cache")); } catch { }
+            try
+            {
+                string legacyRpcs3 = Path.Combine(o.Dir, "rpcs3");
+                if (Directory.Exists(legacyRpcs3)) Directory.Delete(legacyRpcs3, true);
+            }
+            catch { }
             log.AppendLine("payload copied to " + o.Dir);
 
             if (reuseGame)
@@ -508,103 +661,97 @@ namespace BakuganInstaller
                 return;
             }
 
+            if (isFolder)
+            {
+                InstallGameFromSource(folderSource, folderSfb, o.Dir, o.Eboot, log);
+                log.AppendLine("game source: folder (" + folderSource + ")");
+                return;
+            }
+
             bool already;
-            string letter = Iso.Mount(o.Iso, out already);
+            string letter = Iso.Mount(sourceInput, out already);
             try
             {
                 string source = Path.Combine(letter + ":\\", "PS3_GAME");
-                string sourceElf = Path.Combine(source, "USRDIR", "EBOOT.elf");
-                string sourceBin = Path.Combine(source, "USRDIR", "EBOOT.BIN");
-                if (!Directory.Exists(source) || (!File.Exists(sourceElf) && !File.Exists(sourceBin)))
-                {
-                    throw new Exception(Loc.T(
-                        "La imagen ISO seleccionada no es válida o no corresponde a Bakugan: Battle Brawlers (PS3 BLES00758). " +
-                        "No contiene la estructura PS3_GAME\\USRDIR\\EBOOT.BIN.",
-                        "The selected ISO is invalid or does not match Bakugan: Battle Brawlers (PS3 BLES00758). " +
-                        "It does not contain PS3_GAME\\USRDIR\\EBOOT.BIN."));
-                }
-
-                string gameDir = Path.Combine(o.Dir, "game");
-                Directory.CreateDirectory(gameDir);
-                Status(30, Loc.T("Copiando datos del juego...", "Copying game data..."));
-                totalBytes = 0; copiedBytes = 0;
-                CountTree(source);
-                CopyTree(source, Path.Combine(gameDir, "PS3_GAME"), 30, 95);
-
                 string sfb = Path.Combine(letter + ":\\", "PS3_DISC.SFB");
-                if (File.Exists(sfb))
-                    CopyInstallFile(sfb, Path.Combine(gameDir, "PS3_DISC.SFB"), 95, 95);
-
-                /* Retail discs carry an encrypted EBOOT.BIN. The port boots the
-                 * decrypted ELF, which is extracted automatically using RPCS3 or
-                 * the built-in decrypter. Re-installations also validate any
-                 * existing EBOOT.elf and re-extract it if missing or corrupted. */
-                string installedElf = Path.Combine(o.Dir, "game", "PS3_GAME", "USRDIR", "EBOOT.elf");
-                string reason = "";
-                if (!IsValidElf(installedElf))
-                {
-                    MakeInstallFileWritable(installedElf);
-                    bool extracted = false;
-                    if (IsValidElf(sourceElf))
-                    {
-                        CopyInstallFile(sourceElf, installedElf, 95, 95);
-                        extracted = true;
-                        log.AppendLine("EBOOT.elf copied from decrypted ISO");
-                    }
-                    else if (File.Exists(sourceBin))
-                    {
-                        Status(95, Loc.T("Extrayendo EBOOT.elf...", "Extracting EBOOT.elf..."));
-                        extracted = SelfExtract.TryExtract(sourceBin, installedElf, out reason);
-                        if (extracted && IsValidElf(installedElf))
-                        {
-                            log.AppendLine("EBOOT.elf extracted with SelfExtract: " + reason);
-                        }
-                        else
-                        {
-                            Status(96, Loc.T("Descifrando EBOOT.elf con herramientas RPCS3...", "Decrypting EBOOT.elf with RPCS3 tools..."));
-                            string rpcs3Elf = null;
-                            string rpcs3Reason = "";
-                            string rpcs3Dir = Path.Combine(o.Dir, "rpcs3");
-                            string workDir = Path.Combine(o.Dir, ".decrypt");
-                            extracted = Rpcs3Decrypt.TryDecrypt(sourceBin, workDir, rpcs3Dir,
-                                                                out rpcs3Elf, out rpcs3Reason);
-                            if (extracted && IsValidElf(rpcs3Elf))
-                            {
-                                CopyInstallFile(rpcs3Elf, installedElf, 96, 96);
-                                try { Directory.Delete(workDir, true); } catch { }
-                                log.AppendLine("EBOOT.elf extracted with RPCS3: " + rpcs3Reason);
-                            }
-                            else
-                            {
-                                reason = (string.IsNullOrEmpty(reason) ? "" : reason + "; ") +
-                                         (string.IsNullOrEmpty(rpcs3Reason) ? "RPCS3 decryption failed" : rpcs3Reason);
-                            }
-                        }
-                    }
-                    else if (File.Exists(sourceElf))
-                    {
-                        reason = Loc.T("El archivo EBOOT.elf de la ISO está truncado o dañado.",
-                                       "The EBOOT.elf file in the ISO is truncated or corrupted.");
-                    }
-                }
-
-                // Always verify resulting ELF integrity and size (including re-installations)
-                if (!IsValidElf(installedElf))
-                {
-                    throw new Exception(Loc.T(
-                        "No se pudo extraer o descifrar automáticamente un EBOOT.elf válido desde la imagen ISO.\n\n" +
-                        "Causa: " + (string.IsNullOrEmpty(reason) ? "EBOOT.elf ausente, truncado (< 1 MB) o cabecera ELF inválida" : reason) + "\n\n" +
-                        "Asegúrate de seleccionar una copia legal de la versión europea de PS3 (BLES00758) sin corrupción y con suficiente espacio en disco.",
-                        "Could not automatically extract or decrypt a valid EBOOT.elf from the ISO image.\n\n" +
-                        "Cause: " + (string.IsNullOrEmpty(reason) ? "EBOOT.elf missing, truncated (< 1 MB), or invalid ELF header" : reason) + "\n\n" +
-                        "Ensure you select a valid dump of the European PS3 version (BLES00758) without corruption and with sufficient disk space."));
-                }
-                log.AppendLine("game data copied to " + gameDir);
+                InstallGameFromSource(source, sfb, o.Dir, o.Eboot, log);
+                log.AppendLine("game source: ISO (" + sourceInput + ")");
             }
             finally
             {
-                Iso.Unmount(o.Iso, already);
+                Iso.Unmount(sourceInput, already);
             }
+        }
+
+        private static void InstallGameFromSource(string source, string sfb, string installDir,
+                                                  string fallbackEboot, StringBuilder log)
+        {
+            string sourceElf = Path.Combine(source, "USRDIR", "EBOOT.elf");
+            string sourceBin = Path.Combine(source, "USRDIR", "EBOOT.BIN");
+            if (!Directory.Exists(source) || (!File.Exists(sourceElf) && !File.Exists(sourceBin)))
+            {
+                throw new Exception(Loc.T(
+                    "El origen seleccionado no es válido o no corresponde a Bakugan: Battle Brawlers (PS3 BLES00758). " +
+                    "No contiene la estructura PS3_GAME\\USRDIR\\EBOOT.BIN.",
+                    "The selected source is invalid or does not match Bakugan: Battle Brawlers (PS3 BLES00758). " +
+                    "It does not contain PS3_GAME\\USRDIR\\EBOOT.BIN."));
+            }
+
+            string gameDir = Path.Combine(installDir, "game");
+            Directory.CreateDirectory(gameDir);
+            Status(30, Loc.T("Copiando datos del juego...", "Copying game data..."));
+            totalBytes = 0; copiedBytes = 0;
+            CountTree(source);
+            CopyTree(source, Path.Combine(gameDir, "PS3_GAME"), 30, 95);
+
+            if (!string.IsNullOrEmpty(sfb) && File.Exists(sfb))
+                CopyInstallFile(sfb, Path.Combine(gameDir, "PS3_DISC.SFB"), 95, 95);
+
+            /* Retail discs carry an encrypted EBOOT.BIN. The port boots the
+             * decrypted ELF, extracted natively during install via SelfExtract
+             * (or via the optional --eboot CLI fallback), with no emulator bundled. */
+            string installedElf = Path.Combine(installDir, "game", "PS3_GAME", "USRDIR", "EBOOT.elf");
+            string reason = "";
+            if (!IsValidElf(installedElf))
+            {
+                MakeInstallFileWritable(installedElf);
+                if (IsValidElf(sourceElf))
+                {
+                    CopyInstallFile(sourceElf, installedElf, 95, 95);
+                    log.AppendLine("EBOOT.elf copied from decrypted source");
+                }
+                else if (File.Exists(sourceBin))
+                {
+                    Status(95, Loc.T("Extrayendo EBOOT.elf...", "Extracting EBOOT.elf..."));
+                    bool extracted = SelfExtract.TryExtract(sourceBin, installedElf, out reason);
+                    if (extracted && IsValidElf(installedElf))
+                        log.AppendLine("EBOOT.elf extracted with SelfExtract: " + reason);
+                }
+                else if (File.Exists(sourceElf))
+                {
+                    reason = Loc.T("El archivo EBOOT.elf del origen está truncado o dañado.",
+                                   "The EBOOT.elf file in the source is truncated or corrupted.");
+                }
+
+                if (!IsValidElf(installedElf) && IsValidElf(fallbackEboot))
+                {
+                    CopyInstallFile(fallbackEboot, installedElf, 96, 96);
+                    log.AppendLine("EBOOT.elf copied from --eboot fallback: " + fallbackEboot);
+                }
+            }
+
+            // Always verify resulting ELF integrity and size (including re-installations)
+            if (!IsValidElf(installedElf))
+            {
+                throw new Exception(Loc.T(
+                    "No se pudo extraer automáticamente un EBOOT.elf válido desde la ISO o carpeta seleccionada.\n\n" +
+                    "Causa: " + (string.IsNullOrEmpty(reason) ? "EBOOT.elf ausente, truncado (< 1 MB) o cabecera ELF inválida" : reason) + "\n\n" +
+                    "Asegúrate de haber descomprimido todo el ZIP (con la carpeta 'payload' junto a BakuganSetup.exe) y de usar una copia válida de PS3 (BLES00758).",
+                    "Could not automatically extract a valid EBOOT.elf from the selected ISO or folder.\n\n" +
+                    "Cause: " + (string.IsNullOrEmpty(reason) ? "EBOOT.elf missing, truncated (< 1 MB), or invalid ELF header" : reason) + "\n\n" +
+                    "Ensure you extracted the complete ZIP (with the 'payload' folder beside BakuganSetup.exe) and selected a valid European PS3 copy (BLES00758)."));
+            }
+            log.AppendLine("game data copied to " + gameDir);
         }
 
         public static void CountTree(string path)
@@ -723,16 +870,23 @@ namespace BakuganInstaller
         private readonly CheckBox startMenu = new CheckBox();
         private readonly Button install = new Button();
         private readonly Button browseIso = new Button();
+        private readonly Button browseFolder = new Button();
         private readonly Button browseDir = new Button();
         private readonly ProgressBar bar = new ProgressBar();
         private readonly Label status = new Label();
         private readonly BackgroundWorker worker = new BackgroundWorker();
         private readonly StringBuilder log = new StringBuilder();
+        private readonly string initialEboot;
 
-        public InstallerForm()
+        public InstallerForm() : this(null)
         {
+        }
+
+        public InstallerForm(Options initial)
+        {
+            SuspendLayout();
             Text = Loc.T("Bakugan: Battle Brawlers - Instalador", "Bakugan: Battle Brawlers - Installer");
-            ClientSize = new Size(560, 328);
+            ClientSize = new Size(572, 336);
             FormBorderStyle = FormBorderStyle.FixedDialog;
             MaximizeBox = false;
             StartPosition = FormStartPosition.CenterScreen;
@@ -740,17 +894,23 @@ namespace BakuganInstaller
 
             var l1 = new Label
             {
-                Text = Loc.T("ISO del juego (BLES00758). Opcional al actualizar:",
-                             "Game ISO (BLES00758). Optional when updating:"),
+                Text = Loc.T("ISO o carpeta del juego (PS3_GAME, BLES00758). Opcional al actualizar:",
+                             "Game ISO or folder (PS3_GAME, BLES00758). Optional when updating:"),
                 Location = new Point(18, 18),
                 AutoSize = true
             };
             iso.Location = new Point(18, 42);
-            iso.Width = 430;
-            browseIso.Text = Loc.T("Examinar...", "Browse...");
-            browseIso.Location = new Point(456, 40);
-            browseIso.Width = 86;
+            iso.Width = 350;
+            browseIso.Text = "ISO...";
+            browseIso.Location = new Point(376, 40);
+            browseIso.Size = new Size(86, 28);
+            browseIso.UseVisualStyleBackColor = true;
             browseIso.Click += delegate { BrowseIso(); };
+            browseFolder.Text = Loc.T("Carpeta...", "Folder...");
+            browseFolder.Location = new Point(468, 40);
+            browseFolder.Size = new Size(86, 28);
+            browseFolder.UseVisualStyleBackColor = true;
+            browseFolder.Click += delegate { BrowseFolder(); };
 
             var l2 = new Label
             {
@@ -759,11 +919,12 @@ namespace BakuganInstaller
                 AutoSize = true
             };
             dir.Location = new Point(18, 110);
-            dir.Width = 430;
+            dir.Width = 444;
             dir.Text = Installer.DefaultInstallDirectory();
             browseDir.Text = Loc.T("Examinar...", "Browse...");
-            browseDir.Location = new Point(456, 108);
-            browseDir.Width = 86;
+            browseDir.Location = new Point(468, 108);
+            browseDir.Size = new Size(86, 28);
+            browseDir.UseVisualStyleBackColor = true;
             browseDir.Click += delegate { BrowseDir(); };
 
             desktop.Text = Loc.T("Crear icono en el escritorio", "Create desktop shortcut");
@@ -772,26 +933,39 @@ namespace BakuganInstaller
             desktop.Checked = true;
 
             startMenu.Text = Loc.T("Añadir al menú Inicio", "Add to Start Menu");
-            startMenu.Location = new Point(18, 182);
+            startMenu.Location = new Point(18, 184);
             startMenu.AutoSize = true;
             startMenu.Checked = true;
 
+            if (initial != null)
+            {
+                string initialSrc = Installer.NormalizeSourcePath(initial.Iso);
+                if (!string.IsNullOrEmpty(initialSrc)) iso.Text = initialSrc;
+                if (!string.IsNullOrWhiteSpace(initial.Dir)) dir.Text = initial.Dir;
+                initialEboot = initial.Eboot;
+                desktop.Checked = initial.Desktop;
+                startMenu.Checked = initial.StartMenu;
+            }
+
             install.Text = Loc.T("Instalar / Actualizar", "Install / Update");
-            install.Location = new Point(388, 276);
-            install.Width = 154;
-            install.Height = 34;
+            install.Location = new Point(400, 284);
+            install.Size = new Size(154, 34);
+            install.UseVisualStyleBackColor = true;
             install.Click += delegate { BeginInstall(); };
 
-            bar.Location = new Point(18, 222);
-            bar.Width = 524;
-            bar.Height = 20;
+            bar.Location = new Point(18, 224);
+            bar.Size = new Size(536, 22);
 
-            status.Location = new Point(18, 252);
+            status.Location = new Point(18, 256);
             status.AutoSize = true;
             status.Text = Loc.T("Listo para instalar.", "Ready to install.");
 
-            Controls.AddRange(new Control[] { l1, iso, browseIso, l2, dir, browseDir,
+            Controls.AddRange(new Control[] { l1, iso, browseIso, browseFolder, l2, dir, browseDir,
                                               desktop, startMenu, bar, status, install });
+            AutoScaleDimensions = new SizeF(96f, 96f);
+            AutoScaleMode = AutoScaleMode.Dpi;
+            ResumeLayout(false);
+            PerformLayout();
 
             worker.WorkerReportsProgress = true;
             worker.DoWork += delegate(object sender, DoWorkEventArgs e)
@@ -838,6 +1012,21 @@ namespace BakuganInstaller
             }
         }
 
+        private void BrowseFolder()
+        {
+            using (var d = new FolderBrowserDialog())
+            {
+                d.Description = Loc.T(
+                    "Selecciona la carpeta del juego (la que contiene PS3_GAME o directamente PS3_GAME):",
+                    "Select the game folder (the folder containing PS3_GAME, or PS3_GAME directly):");
+                d.ShowNewFolderButton = false;
+                string current = Installer.NormalizeSourcePath(iso.Text);
+                if (!string.IsNullOrEmpty(current) && Directory.Exists(current))
+                    d.SelectedPath = current;
+                if (d.ShowDialog(this) == DialogResult.OK) iso.Text = d.SelectedPath;
+            }
+        }
+
         private void BrowseDir()
         {
             using (var d = new FolderBrowserDialog())
@@ -858,13 +1047,46 @@ namespace BakuganInstaller
                                 MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return;
             }
-            bool emptyIso = string.IsNullOrWhiteSpace(iso.Text);
-            if (emptyIso ? !Installer.CanReuseGame(dir.Text) : !File.Exists(iso.Text))
+            string src = Installer.NormalizeSourcePath(iso.Text);
+            if (string.IsNullOrEmpty(src))
+            {
+                if (!Installer.CanReuseGame(dir.Text))
+                {
+                    MessageBox.Show(this,
+                                    Loc.T("Selecciona una ISO o carpeta válida (PS3_GAME), o deja el campo vacío para actualizar una instalación existente.",
+                                          "Select a valid ISO or game folder (PS3_GAME), or leave it blank to update an existing installation."),
+                                    Loc.T("Falta el origen del juego", "Missing Game Source"),
+                                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    return;
+                }
+            }
+            else if (Directory.Exists(src))
+            {
+                string overlapReason;
+                if (Installer.IsUnsafeSourceOverlap(src, dir.Text, out overlapReason))
+                {
+                    MessageBox.Show(this,
+                                    overlapReason,
+                                    Loc.T("Carpeta no permitida", "Disallowed Folder"),
+                                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    return;
+                }
+                string ps3GameDir, discSfb, folderReason;
+                if (!Installer.ResolveDirectorySource(src, out ps3GameDir, out discSfb, out folderReason))
+                {
+                    MessageBox.Show(this,
+                                    folderReason,
+                                    Loc.T("Carpeta de juego no válida", "Invalid Game Folder"),
+                                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    return;
+                }
+            }
+            else if (!File.Exists(src))
             {
                 MessageBox.Show(this,
-                                Loc.T("Selecciona una ISO válida o deja el campo vacío para actualizar una instalación existente.",
-                                      "Select a valid ISO or leave it blank to update an existing installation."),
-                                Loc.T("Falta la ISO", "Missing ISO"),
+                                Loc.T("Selecciona una ISO o carpeta válida (PS3_GAME), o deja el campo vacío para actualizar una instalación existente.",
+                                      "Select a valid ISO or game folder (PS3_GAME), or leave it blank to update an existing installation."),
+                                Loc.T("Origen no encontrado", "Source Not Found"),
                                 MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return;
             }
@@ -872,9 +1094,9 @@ namespace BakuganInstaller
             bar.Value = 0;
             worker.RunWorkerAsync(new Options
             {
-                Iso = iso.Text,
+                Iso = src,
                 Dir = dir.Text,
-                Eboot = null,
+                Eboot = initialEboot,
                 Desktop = desktop.Checked,
                 StartMenu = startMenu.Checked
             });

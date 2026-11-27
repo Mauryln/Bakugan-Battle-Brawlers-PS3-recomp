@@ -52,38 +52,42 @@ if (-not (Test-Path -LiteralPath (Join-Path $launcherAssets 'Control.png') -Path
     throw "Falta $launcherAssets\Control.png. Compila el launcher primero."
 }
 Copy-Item -LiteralPath $launcherAssets -Destination (Join-Path $payload 'assets') -Recurse -Force
+$promptAssets = Join-Path $build 'assets\button_prompts'
+if (-not (Test-Path -LiteralPath (Join-Path $promptAssets 'xbox\a748b20fa470925a.png') -PathType Leaf) -or
+    -not (Test-Path -LiteralPath (Join-Path $promptAssets 'nintendo\a748b20fa470925a.png') -PathType Leaf)) {
+    throw "Falta $promptAssets (xbox/nintendo). Compila el port primero."
+}
+$payloadPrompts = Join-Path $payload 'assets\button_prompts'
+if (Test-Path -LiteralPath $payloadPrompts) {
+    Remove-Item -LiteralPath $payloadPrompts -Recurse -Force
+}
+Copy-Item -LiteralPath $promptAssets -Destination (Join-Path $payload 'assets') -Recurse -Force
 Copy-Item (Join-Path $build 'shaders\fsr1') (Join-Path $payload 'shaders') -Recurse -Force
 Copy-Item (Join-Path $build 'licenses') $payload -Recurse -Force
-Copy-Item (Join-Path $PSScriptRoot 'RPCS3_LICENSE.txt') (Join-Path $payload 'licenses\RPCS3.txt') -Force
-
-# RPCS3 --decrypt helper. Only the top-level executable/DLLs and the portable
-# marker are needed; firmware/caches are not. RPCS3 is GPLv2 and is invoked
-# locally to decrypt the user's own EBOOT.BIN.
-$rpcs3Src = Join-Path $root 'tools\rpcs3'
-if (-not (Test-Path (Join-Path $rpcs3Src 'rpcs3.exe'))) {
-    throw "Falta tools\rpcs3\rpcs3.exe; no se puede incluir el extractor ELF."
+Remove-Item -LiteralPath (Join-Path $payload 'licenses\RPCS3.txt') -Force -ErrorAction SilentlyContinue
+if (Test-Path -LiteralPath (Join-Path $payload 'rpcs3')) {
+    Remove-Item -LiteralPath (Join-Path $payload 'rpcs3') -Recurse -Force
 }
-$rpcs3Dst = Join-Path $payload 'rpcs3'
-New-Item -ItemType Directory -Force -Path $rpcs3Dst, (Join-Path $rpcs3Dst 'log') | Out-Null
-Get-ChildItem $rpcs3Src -File | Where-Object {
-    $_.Extension -eq '.exe' -or $_.Extension -eq '.dll' -or $_.Name -eq 'portable'
-} | Copy-Item -Destination $rpcs3Dst -Force
-Set-Content -Path (Join-Path $rpcs3Dst 'README.txt') -Encoding UTF8 -Value @"
-RPCS3 portable (GPLv2) - https://rpcs3.net - https://github.com/RPCS3/rpcs3
-Se usa únicamente como: rpcs3.exe --decrypt EBOOT.BIN
-No incluye firmware, juegos ni claves de este proyecto.
-"@
+
+if (Test-Path -LiteralPath (Join-Path $outDir 'rpcs3')) {
+    Remove-Item -LiteralPath (Join-Path $outDir 'rpcs3') -Recurse -Force
+}
 
 $icon = Join-Path $root 'bakugan-recomp\assets\bakugan.ico'
 $manifest = Join-Path $PSScriptRoot 'app.manifest'
 $source = Join-Path $PSScriptRoot 'Installer.cs'
 $metadata = Join-Path $PSScriptRoot 'ReleaseMetadata.cs'
 $extract = Join-Path $PSScriptRoot 'SelfExtract.cs'
-$rpcs3 = Join-Path $PSScriptRoot 'Rpcs3Decrypt.cs'
+$setupSources = @($source, $extract, $metadata)
+$localKeyVault = Join-Path $root 'keys\key_vault.cs'
+if (Test-Path -LiteralPath $localKeyVault -PathType Leaf) {
+    Write-Host 'Incluyendo keys\key_vault.cs local (gitignored) para descifrado SELF nativo.'
+    $setupSources += $localKeyVault
+}
 $exe = Join-Path $outDir 'BakuganSetup.exe'
 & $csc /nologo /target:winexe /platform:x64 /optimize+ /debug- /highentropyva+ /langversion:5 /codepage:65001 `
     /win32icon:$icon /win32manifest:$manifest /out:$exe /r:System.dll /r:System.Windows.Forms.dll /r:System.Drawing.dll `
-    $source $extract $rpcs3 $metadata
+    @setupSources
 if ($LASTEXITCODE -ne 0) { throw "csc falló con $LASTEXITCODE" }
 
 $uninstaller = Join-Path $payload 'Uninstall.exe'
