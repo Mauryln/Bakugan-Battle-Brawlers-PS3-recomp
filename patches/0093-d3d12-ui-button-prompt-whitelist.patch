@@ -1,0 +1,640 @@
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index e169665..a6cba47 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -48,6 +48,24 @@
+ #include <d3dcompiler.h>
+ #include "rsx_fp_decompiler.h"
+ #include "rsx_d3d12_depth.h"
++#if __has_include("stb_image.h")
++#include "stb_image.h"
++#define RSX_HAS_STB_IMAGE 1
++#elif __has_include("../codec/stb_image.h")
++#include "../codec/stb_image.h"
++#define RSX_HAS_STB_IMAGE 1
++#else
++#define RSX_HAS_STB_IMAGE 0
++#endif
++#if __has_include("stb_image_write.h")
++#include "stb_image_write.h"
++#define RSX_HAS_STB_IMAGE_WRITE 1
++#elif __has_include("../codec/stb_image_write.h")
++#include "../codec/stb_image_write.h"
++#define RSX_HAS_STB_IMAGE_WRITE 1
++#else
++#define RSX_HAS_STB_IMAGE_WRITE 0
++#endif
+ 
+ /* Link libraries */
+ #pragma comment(lib, "d3d12.lib")
+@@ -188,8 +206,12 @@ typedef struct {
+     ID3D12Resource* up;
+     u64 res_id;         /* unique generation id for SRV dirty check */
+     u32 off, w, h, fmt, mips, pitch; /* current resource shape and guest format */
++    DXGI_FORMAT srv_fmt; /* actual DXGI format of res (differs when RGBA8 replaces DXT) */
+     u32 csum;           /* sparse checksum of the source bytes last uploaded */
+     u32 gen, p0, pn;    /* guest generation and page range of those bytes */
++    u32 prompt_gen;     /* button prompt style generation at last upload */
++    u8  prompt_replaced;
++    u8  prompt_eligible;
+     int cube;           /* resource is a 6-face cube, sampled as TextureCube */
+     u32 key;            /* the ORIGINAL bound offset -- the cache lookup key.
+                          * off is the RESOLVED source after TEX_OFF_BIAS/TEX_REMAP
+@@ -4142,6 +4164,446 @@ static void vp_tex_ht_rebuild(void)
+     }
+ }
+ 
++/* ---------------------------------------------------------------------------
++ * Whitelisted 2D UI button-prompt replacement & UI texture dumper
++ * -----------------------------------------------------------------------*/
++#define UI_PROMPT_MAX_ENTRIES 256u
++#define UI_DUMP_SEEN_MAX      512u
++
++typedef struct {
++    u64  hash;
++    u32  w, h;
++    u8*  rgba;
++    char path[MAX_PATH];
++    int  loaded;
++} UIPromptEntry;
++
++typedef struct {
++    int           scanned;
++    u32           count;
++    UIPromptEntry entries[UI_PROMPT_MAX_ENTRIES];
++} UIPromptWhitelist;
++
++static volatile LONG     s_button_prompt_style = RSX_BUTTON_PROMPTS_PLAYSTATION;
++static volatile LONG     s_button_prompt_gen   = 1;
++static int               s_frame_prompt_style  = RSX_BUTTON_PROMPTS_PLAYSTATION;
++static u32               s_frame_prompt_gen    = 1;
++static UIPromptWhitelist s_ui_prompts[3];
++static u64               s_ui_dump_seen[UI_DUMP_SEEN_MAX];
++static u32               s_ui_dump_seen_n      = 0;
++static int               s_ui_dump_dir_ready   = 0;
++
++void rsx_d3d12_backend_set_button_prompts(int style)
++{
++    if (style < RSX_BUTTON_PROMPTS_PLAYSTATION || style > RSX_BUTTON_PROMPTS_NINTENDO)
++        style = RSX_BUTTON_PROMPTS_PLAYSTATION;
++    if (InterlockedExchange(&s_button_prompt_style, (LONG)style) != (LONG)style)
++        InterlockedIncrement(&s_button_prompt_gen);
++}
++
++int rsx_d3d12_backend_get_button_prompts(void)
++{
++    return (int)InterlockedCompareExchange(&s_button_prompt_style, 0, 0);
++}
++
++static int vpchk_on(void);
++
++static int ui_dir_exists(const char* path)
++{
++    DWORD attr = GetFileAttributesA(path);
++    return attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY) != 0;
++}
++
++static int ui_prompt_find_root(char* out, size_t cap)
++{
++    const char* env_dir = getenv("BAKUGAN_BUTTON_PROMPTS_DIR");
++    if (env_dir && *env_dir && ui_dir_exists(env_dir)) {
++        snprintf(out, cap, "%s", env_dir);
++        return 1;
++    }
++    char exe_dir[MAX_PATH];
++    DWORD len = GetModuleFileNameA(NULL, exe_dir, (DWORD)sizeof exe_dir);
++    if (len > 0 && len < sizeof exe_dir) {
++        char* slash = strrchr(exe_dir, '\\');
++        if (!slash) slash = strrchr(exe_dir, '/');
++        if (slash) {
++            *slash = '\0';
++            static const char* const kRel[] = {
++                "%s\\assets\\button_prompts",
++                "%s\\..\\assets\\button_prompts",
++                "%s\\..\\..\\bakugan-recomp\\assets\\button_prompts",
++            };
++            for (size_t i = 0; i < sizeof kRel / sizeof kRel[0]; i++) {
++                snprintf(out, cap, kRel[i], exe_dir);
++                if (ui_dir_exists(out)) return 1;
++            }
++        }
++    }
++    static const char* const kCwd[] = {
++        "bakugan-recomp\\assets\\button_prompts",
++        "assets\\button_prompts",
++    };
++    for (size_t i = 0; i < sizeof kCwd / sizeof kCwd[0]; i++) {
++        if (ui_dir_exists(kCwd[i])) {
++            snprintf(out, cap, "%s", kCwd[i]);
++            return 1;
++        }
++    }
++    return 0;
++}
++
++static int ui_prompt_parse_hex16(const char* filename, u64* out_hash)
++{
++    if (!filename) return 0;
++    size_t n = strlen(filename);
++    if (n != 20) return 0;
++    if (_stricmp(filename + 16, ".png") != 0) return 0;
++    u64 val = 0;
++    for (size_t i = 0; i < 16; i++) {
++        unsigned char c = (unsigned char)filename[i];
++        u64 digit;
++        if (c >= '0' && c <= '9') digit = (u64)(c - '0');
++        else if (c >= 'a' && c <= 'f') digit = (u64)(c - 'a' + 10);
++        else if (c >= 'A' && c <= 'F') digit = (u64)(c - 'A' + 10);
++        else return 0;
++        val = (val << 4) | digit;
++    }
++    *out_hash = val;
++    return 1;
++}
++
++static void ui_prompt_scan_style(int style)
++{
++    if (style != RSX_BUTTON_PROMPTS_XBOX && style != RSX_BUTTON_PROMPTS_NINTENDO)
++        return;
++    UIPromptWhitelist* wl = &s_ui_prompts[style];
++    if (wl->scanned) return;
++    wl->scanned = 1;
++#if RSX_HAS_STB_IMAGE
++    char root[MAX_PATH];
++    if (!ui_prompt_find_root(root, sizeof root)) return;
++    const char* sub = (style == RSX_BUTTON_PROMPTS_XBOX) ? "xbox" : "nintendo";
++    char dir[MAX_PATH], pattern[MAX_PATH];
++    snprintf(dir, sizeof dir, "%s\\%s", root, sub);
++    if (!ui_dir_exists(dir)) return;
++    snprintf(pattern, sizeof pattern, "%s\\*.png", dir);
++    WIN32_FIND_DATAA fd;
++    HANDLE h = FindFirstFileA(pattern, &fd);
++    if (h == INVALID_HANDLE_VALUE) return;
++    do {
++        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
++        u64 hash = 0;
++        if (!ui_prompt_parse_hex16(fd.cFileName, &hash)) continue;
++        if (wl->count >= UI_PROMPT_MAX_ENTRIES) break;
++        char full[MAX_PATH];
++        snprintf(full, sizeof full, "%s\\%s", dir, fd.cFileName);
++        int pw = 0, ph = 0, pcomp = 0;
++        if (!stbi_info(full, &pw, &ph, &pcomp)) continue;
++        if (pw < 16 || ph < 16 || pw > 1024 || ph > 1024) continue;
++        UIPromptEntry* e = &wl->entries[wl->count++];
++        memset(e, 0, sizeof *e);
++        e->hash = hash;
++        e->w = (u32)pw;
++        e->h = (u32)ph;
++        snprintf(e->path, sizeof e->path, "%s", full);
++    } while (FindNextFileA(h, &fd));
++    FindClose(h);
++    if (wl->count > 0)
++        fprintf(stderr, "[UI_PROMPTS] loaded %u whitelisted atlas(es) from %s\n", wl->count, dir);
++#endif
++}
++
++static int ui_prompt_style_has_size(int style, u32 w, u32 h)
++{
++    if (style != RSX_BUTTON_PROMPTS_XBOX && style != RSX_BUTTON_PROMPTS_NINTENDO)
++        return 0;
++    UIPromptWhitelist* wl = &s_ui_prompts[style];
++    if (!wl->scanned) ui_prompt_scan_style(style);
++    for (u32 i = 0; i < wl->count; i++)
++        if (wl->entries[i].w == w && wl->entries[i].h == h)
++            return 1;
++    return 0;
++}
++
++static const u8* ui_prompt_lookup(int style, u64 hash, u32 w, u32 h)
++{
++    if (style != RSX_BUTTON_PROMPTS_XBOX && style != RSX_BUTTON_PROMPTS_NINTENDO)
++        return NULL;
++    UIPromptWhitelist* wl = &s_ui_prompts[style];
++    if (!wl->scanned) ui_prompt_scan_style(style);
++    for (u32 i = 0; i < wl->count; i++) {
++        UIPromptEntry* e = &wl->entries[i];
++        if (e->hash != hash || e->w != w || e->h != h) continue;
++#if RSX_HAS_STB_IMAGE
++        if (!e->loaded) {
++            e->loaded = 1;
++            FILE* f = fopen(e->path, "rb");
++            if (!f) return NULL;
++            if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return NULL; }
++            long fsz = ftell(f);
++            if (fsz <= 0 || fsz > 16L * 1024L * 1024L || fseek(f, 0, SEEK_SET) != 0) {
++                fclose(f);
++                return NULL;
++            }
++            u8* buf = (u8*)malloc((size_t)fsz);
++            if (!buf) { fclose(f); return NULL; }
++            size_t rd = fread(buf, 1, (size_t)fsz, f);
++            fclose(f);
++            if (rd != (size_t)fsz) { free(buf); return NULL; }
++            int pw = 0, ph = 0, comp = 0;
++            u8* rgba = stbi_load_from_memory(buf, (int)fsz, &pw, &ph, &comp, 4);
++            free(buf);
++            if (!rgba || (u32)pw != w || (u32)ph != h) {
++                if (rgba) stbi_image_free(rgba);
++                return NULL;
++            }
++            e->rgba = rgba;
++        }
++#endif
++        return e->rgba;
++    }
++    return NULL;
++}
++
++static void ui_prompt_whitelist_shutdown(void)
++{
++    for (int s = 0; s < 3; s++) {
++        for (u32 i = 0; i < s_ui_prompts[s].count; i++) {
++            if (s_ui_prompts[s].entries[i].rgba) {
++#if RSX_HAS_STB_IMAGE
++                stbi_image_free(s_ui_prompts[s].entries[i].rgba);
++#endif
++                s_ui_prompts[s].entries[i].rgba = NULL;
++            }
++        }
++        memset(&s_ui_prompts[s], 0, sizeof s_ui_prompts[s]);
++    }
++    s_ui_dump_seen_n = 0;
++    s_ui_dump_dir_ready = 0;
++}
++
++static u64 ui_fnv1a64(u64 hval, const u8* p, size_t n)
++{
++    for (size_t i = 0; i < n; i++) {
++        hval ^= (u64)p[i];
++        hval *= 0x100000001b3ULL;
++    }
++    return hval;
++}
++
++static u64 ui_tex_content_hash(const u8* src, u32 w, u32 h, const rsx_tex_layout* tl)
++{
++    u64 hval = 0xcbf29ce484222325ULL;
++    u8 hdr[12];
++    u32 bf = tl->base_format;
++    hdr[0] = (u8)(w);       hdr[1] = (u8)(w >> 8);
++    hdr[2] = (u8)(w >> 16); hdr[3] = (u8)(w >> 24);
++    hdr[4] = (u8)(h);       hdr[5] = (u8)(h >> 8);
++    hdr[6] = (u8)(h >> 16); hdr[7] = (u8)(h >> 24);
++    hdr[8] = (u8)(bf);      hdr[9] = (u8)(bf >> 8);
++    hdr[10] = (u8)(bf >> 16); hdr[11] = (u8)(bf >> 24);
++    hval = ui_fnv1a64(hval, hdr, sizeof hdr);
++    if (!tl->compressed && !tl->swizzled) {
++        u32 tight = w * tl->bytes_per_texel;
++        for (u32 y = 0; y < h; y++)
++            hval = ui_fnv1a64(hval, src + (size_t)y * tl->row_bytes, tight);
++    } else if (tl->compressed) {
++        u32 tight = ((w + 3u) / 4u) * tl->block_bytes;
++        for (u32 by = 0; by < tl->rows; by++)
++            hval = ui_fnv1a64(hval, src + (size_t)by * tl->row_bytes, tight);
++    } else {
++        hval = ui_fnv1a64(hval, src, tl->face_bytes);
++    }
++    return hval;
++}
++
++static void ui_decode_bc_to_rgba8(u8* dst, const u8* src, u32 w, u32 h, const rsx_tex_layout* tl)
++{
++    u32 bw = (w + 3u) / 4u;
++    u32 bh = (h + 3u) / 4u;
++    int is_bc1 = (tl->fmt == RSX_TEXFMT_BC1);
++    int is_bc2 = (tl->fmt == RSX_TEXFMT_BC2);
++    for (u32 by = 0; by < bh; by++) {
++        const u8* row_ptr = src + (size_t)by * tl->row_bytes;
++        for (u32 bx = 0; bx < bw; bx++) {
++            const u8* blk = row_ptr + (size_t)bx * tl->block_bytes;
++            const u8* cblk = is_bc1 ? blk : (blk + 8);
++            u16 c0 = (u16)(cblk[0] | (cblk[1] << 8));
++            u16 c1 = (u16)(cblk[2] | (cblk[3] << 8));
++            u32 cbits = (u32)cblk[4] | ((u32)cblk[5] << 8) | ((u32)cblk[6] << 16) | ((u32)cblk[7] << 24);
++            u8 rgb[4][4];
++            rgb[0][0] = (u8)(((c0 >> 11) & 31u) * 255u / 31u);
++            rgb[0][1] = (u8)(((c0 >> 5)  & 63u) * 255u / 63u);
++            rgb[0][2] = (u8)((c0 & 31u)         * 255u / 31u);
++            rgb[0][3] = 255u;
++            rgb[1][0] = (u8)(((c1 >> 11) & 31u) * 255u / 31u);
++            rgb[1][1] = (u8)(((c1 >> 5)  & 63u) * 255u / 63u);
++            rgb[1][2] = (u8)((c1 & 31u)         * 255u / 31u);
++            rgb[1][3] = 255u;
++            if (!is_bc1 || c0 > c1) {
++                for (int k = 0; k < 3; k++) {
++                    rgb[2][k] = (u8)((2u * rgb[0][k] + rgb[1][k]) / 3u);
++                    rgb[3][k] = (u8)((rgb[0][k] + 2u * rgb[1][k]) / 3u);
++                }
++                rgb[2][3] = 255u;
++                rgb[3][3] = 255u;
++            } else {
++                for (int k = 0; k < 3; k++) {
++                    rgb[2][k] = (u8)((rgb[0][k] + rgb[1][k]) / 2u);
++                    rgb[3][k] = 0u;
++                }
++                rgb[2][3] = 255u;
++                rgb[3][3] = 0u;
++            }
++            u8 bc3_a[8];
++            u64 bc3_bits = 0;
++            if (!is_bc1 && !is_bc2) {
++                u8 a0 = blk[0], a1 = blk[1];
++                bc3_a[0] = a0; bc3_a[1] = a1;
++                if (a0 > a1) {
++                    for (int k = 1; k <= 6; k++)
++                        bc3_a[k + 1] = (u8)(((7 - k) * (u32)a0 + k * (u32)a1) / 7u);
++                } else {
++                    for (int k = 1; k <= 4; k++)
++                        bc3_a[k + 1] = (u8)(((5 - k) * (u32)a0 + k * (u32)a1) / 5u);
++                    bc3_a[6] = 0u;
++                    bc3_a[7] = 255u;
++                }
++                for (int k = 0; k < 6; k++)
++                    bc3_bits |= ((u64)blk[2 + k]) << (8 * k);
++            }
++            for (u32 py = 0; py < 4u; py++) {
++                u32 dy = by * 4u + py;
++                if (dy >= h) continue;
++                u16 bc2_row = is_bc2 ? (u16)(blk[py * 2u] | (blk[py * 2u + 1u] << 8)) : 0u;
++                for (u32 px = 0; px < 4u; px++) {
++                    u32 dx = bx * 4u + px;
++                    if (dx >= w) continue;
++                    u32 idx = py * 4u + px;
++                    u32 ci = (cbits >> (2u * idx)) & 3u;
++                    u8 a = rgb[ci][3];
++                    if (is_bc2)
++                        a = (u8)(((bc2_row >> (4u * px)) & 0xFu) * 17u);
++                    else if (!is_bc1)
++                        a = bc3_a[(bc3_bits >> (3u * idx)) & 7u];
++                    u8* out = dst + ((size_t)dy * w + dx) * 4u;
++                    out[0] = rgb[ci][0];
++                    out[1] = rgb[ci][1];
++                    out[2] = rgb[ci][2];
++                    out[3] = a;
++                }
++            }
++        }
++    }
++}
++
++static int ui_dump_mode(void)
++{
++    static int mode = -1;
++    if (mode < 0) {
++        const char* e = getenv("BAKUGAN_DUMP_UI_TEX");
++        if (!e || !*e || strcmp(e, "0") == 0) mode = 0;
++        else {
++            int v = atoi(e);
++            mode = (v > 0) ? v : 1;
++        }
++    }
++    return mode;
++}
++
++static void ui_dump_texture_once(u64 ui_hash, const u8* src, u32 w, u32 h,
++                                 u32 fmt, u32 mips, u32 pitch, const rsx_tex_layout* tl)
++{
++#if RSX_HAS_STB_IMAGE_WRITE
++    for (u32 i = 0; i < s_ui_dump_seen_n; i++)
++        if (s_ui_dump_seen[i] == ui_hash) return;
++    if (s_ui_dump_seen_n < UI_DUMP_SEEN_MAX)
++        s_ui_dump_seen[s_ui_dump_seen_n++] = ui_hash;
++
++    if (!s_ui_dump_dir_ready) {
++        CreateDirectoryA("diagnostics", NULL);
++        CreateDirectoryA("diagnostics\\ui_tex_dump", NULL);
++        s_ui_dump_dir_ready = 1;
++    }
++    u8* rgba = (u8*)malloc((size_t)w * h * 4u);
++    if (!rgba) return;
++    if (tl->fmt == RSX_TEXFMT_R8G8B8A8) {
++        rsx_texture_decode(rgba, w * 4u, src, w, h, tl, rsx_texture_argb_is_rgba());
++    } else if (tl->fmt == RSX_TEXFMT_BC1 || tl->fmt == RSX_TEXFMT_BC2 || tl->fmt == RSX_TEXFMT_BC3) {
++        ui_decode_bc_to_rgba8(rgba, src, w, h, tl);
++    } else {
++        free(rgba);
++        return;
++    }
++    char png_path[MAX_PATH];
++    snprintf(png_path, sizeof png_path, "diagnostics\\ui_tex_dump\\%016llx_%ux%u_fmt%02X.png",
++             (unsigned long long)ui_hash, w, h, fmt & 0xFFu);
++    if (stbi_write_png(png_path, (int)w, (int)h, 4, rgba, (int)(w * 4u))) {
++        FILE* mf = fopen("diagnostics\\ui_tex_dump\\manifest.tsv", "ab");
++        if (mf) {
++            fprintf(mf, "%016llx\t%u\t%u\t0x%02X\t%u\t%u\t%s\n",
++                    (unsigned long long)ui_hash, w, h, fmt & 0xFFu, mips, pitch, png_path);
++            fclose(mf);
++        }
++        fprintf(stderr, "[UI_DUMP] %s (%ux%u fmt=0x%02X mips=%u)\n",
++                png_path, w, h, fmt & 0xFFu, mips);
++    }
++    free(rgba);
++#else
++    (void)ui_hash; (void)src; (void)w; (void)h; (void)fmt; (void)mips; (void)pitch; (void)tl;
++#endif
++}
++
++static void ui_upload_rgba8_mips(u8* mapped_base, const u8* rgba, u32 w, u32 h, u32 level_count,
++                                 const D3D12_PLACED_SUBRESOURCE_FOOTPRINT* footprints)
++{
++    for (u32 y = 0; y < h; y++)
++        memcpy(mapped_base + footprints[0].Offset + (size_t)y * footprints[0].Footprint.RowPitch,
++               rgba + (size_t)y * w * 4u, (size_t)w * 4u);
++    if (level_count <= 1u) return;
++
++    u32 cw = w > 1u ? w / 2u : 1u;
++    u32 ch = h > 1u ? h / 2u : 1u;
++    u8* cur = (u8*)malloc((size_t)cw * ch * 4u);
++    u8* nxt = (u8*)malloc((size_t)cw * ch * 4u);
++    if (!cur || !nxt) {
++        free(cur);
++        free(nxt);
++        return;
++    }
++    const u8* src = rgba;
++    u32 sw = w, sh = h;
++    for (u32 mip = 1u; mip < level_count; mip++) {
++        u32 nw = sw > 1u ? sw / 2u : 1u;
++        u32 nh = sh > 1u ? sh / 2u : 1u;
++        u8* dst = (mip & 1u) ? cur : nxt;
++        for (u32 y = 0; y < nh; y++) {
++            u32 y0 = y * 2u;
++            u32 y1 = (y0 + 1u < sh) ? (y0 + 1u) : y0;
++            for (u32 x = 0; x < nw; x++) {
++                u32 x0 = x * 2u;
++                u32 x1 = (x0 + 1u < sw) ? (x0 + 1u) : x0;
++                const u8* p00 = src + ((size_t)y0 * sw + x0) * 4u;
++                const u8* p10 = src + ((size_t)y0 * sw + x1) * 4u;
++                const u8* p01 = src + ((size_t)y1 * sw + x0) * 4u;
++                const u8* p11 = src + ((size_t)y1 * sw + x1) * 4u;
++                u8* q = dst + ((size_t)y * nw + x) * 4u;
++                for (u32 c = 0; c < 4u; c++)
++                    q[c] = (u8)((p00[c] + p10[c] + p01[c] + p11[c] + 2u) >> 2);
++            }
++        }
++        u8* mptr = mapped_base + footprints[mip].Offset;
++        u32 mpitch = footprints[mip].Footprint.RowPitch;
++        for (u32 y = 0; y < nh; y++)
++            memcpy(mptr + (size_t)y * mpitch, dst + (size_t)y * nw * 4u, (size_t)nw * 4u);
++        src = dst;
++        sw = nw;
++        sh = nh;
++    }
++    free(cur);
++    free(nxt);
++}
++
+ static int vp_upload_tex_slot(u32 off, u32 w, u32 h, u32 fmt, int cube, u32 mips, u32 source_pitch)
+ {
+     /* TEX_BUDGET=<n>: cap texture uploads per frame. Off by default -- it was
+@@ -4216,6 +4678,9 @@ static int vp_upload_tex_slot(u32 off, u32 w, u32 h, u32 fmt, int cube, u32 mips
+                 if (c->res && c->key == key_off && c->w == w && c->h == h && c->fmt == fmt
+                     && c->cube == cube && c->mips == level_count && c->pitch == source_pitch) {
+                     if (c->used) return i;                /* already bound this frame */
++                    if (c->prompt_eligible && c->prompt_gen != s_frame_prompt_gen) {
++                        slot = i; break;                  /* button prompt style changed */
++                    }
+                     { static int nocache = -1;            /* TEX_NOCACHE=1: always re-upload */
+                       if (nocache < 0) { const char* e = getenv("TEX_NOCACHE");
+                                          nocache = e ? atoi(e) : 0; }
+@@ -4348,6 +4813,27 @@ static int vp_upload_tex_slot(u32 off, u32 w, u32 h, u32 fmt, int cube, u32 mips
+           fprintf(stderr, "[TEXSRC]    data starts at off%+ld (level0=%u bytes)%c",
+                   start_delta, w * h * bpp, 10); } } }
+     if (slot < 0) slot = freeslot;
++    const int prompt_eligible = !cube && w >= 16u && h >= 16u && w <= 1024u && h <= 1024u &&
++        (basef == 0x85u || basef == 0x86u || basef == 0x87u || basef == 0x88u);
++    const u8* replaced_rgba = NULL;
++    if (prompt_eligible && !vpchk_on()) {
++        const int dump_mode = ui_dump_mode();
++        const u32 dump_limit = (dump_mode >= 2) ? 1024u : 512u;
++        const int want_dump = (dump_mode > 0 && w <= dump_limit && h <= dump_limit);
++        const int want_replace = ui_prompt_style_has_size(s_frame_prompt_style, w, h);
++        if (want_dump || want_replace) {
++            const u64 ui_hash = ui_tex_content_hash(vm_base + off, w, h, &tl);
++            if (want_dump) {
++                ui_dump_texture_once(ui_hash, vm_base + off, w, h, fmt, mips, source_pitch, &tl);
++            }
++            if (want_replace) {
++                replaced_rgba = ui_prompt_lookup(s_frame_prompt_style, ui_hash, w, h);
++                if (replaced_rgba) {
++                    dxfmt = DXGI_FORMAT_R8G8B8A8_UNORM;
++                }
++            }
++        }
++    }
+     VPTexSlot* t = &s_d3d.vp_tex[slot];
+     const int had_res = (t->res != NULL);
+     const int key_changed = had_res &&
+@@ -4376,7 +4862,7 @@ static int vp_upload_tex_slot(u32 off, u32 w, u32 h, u32 fmt, int cube, u32 mips
+      * cube path copies 6 subresources and writes a 6x upload buffer -- which
+      * crashes. */
+     if (t->res && (t->w != w || t->h != h || t->fmt != fmt ||
+-                   t->cube != cube || t->mips != level_count)) {
++                   t->cube != cube || t->mips != level_count || t->srv_fmt != dxfmt)) {
+         t->res->lpVtbl->Release(t->res); t->res = NULL; t->res_id = 0;
+         if (t->up) { t->up->lpVtbl->Release(t->up); t->up = NULL; }
+     }
+@@ -4438,9 +4924,13 @@ static int vp_upload_tex_slot(u32 off, u32 w, u32 h, u32 fmt, int cube, u32 mips
+     const u32 _face_bytes = face_stride;
+     const u32 _nfaces     = cube ? 6u : 1u;
+     const u32 _off0 = off; u8* const _map0 = (u8*)mapped;
+-    vp_decode_texture_subresources(mapped, vm_base + off, levels, level_count,
+-        _nfaces, face_stride, footprints, rsx_texture_argb_is_rgba());
+-    for (u32 _f = 0; _f < _nfaces; _f++) {
++    if (replaced_rgba) {
++        ui_upload_rgba8_mips((u8*)mapped, replaced_rgba, w, h, level_count, footprints);
++    } else {
++        vp_decode_texture_subresources(mapped, vm_base + off, levels, level_count,
++            _nfaces, face_stride, footprints, rsx_texture_argb_is_rgba());
++    }
++    for (u32 _f = 0; _f < _nfaces && !replaced_rgba; _f++) {
+     off    = _off0 + _f * _face_bytes;
+     if (cube && getenv("CUBEDBG")) { u32 _s=0; const u8* _p = vm_base + off;
+         for (u32 _i = 0; _i < _face_bytes; _i += 97) _s = _s*131 + _p[_i];
+@@ -4743,7 +5233,11 @@ static int vp_upload_tex_slot(u32 off, u32 w, u32 h, u32 fmt, int cube, u32 mips
+     /* Only the per-draw SRV window owns bindings. Legacy heap[1+slot]
+      * cache descriptors overlapped DRAW_SRV_BASE once slot reached 31. */
+     t->off = off; t->key = key_off; t->w = w; t->h = h; t->fmt = fmt;
++    t->srv_fmt = dxfmt;
+     t->cube = cube; t->mips = level_count; t->pitch = source_pitch; t->used = 1;
++    t->prompt_gen = s_frame_prompt_gen;
++    t->prompt_replaced = (u8)(replaced_rgba != NULL);
++    t->prompt_eligible = (u8)prompt_eligible;
+     t->csum = TEX_CSUM(vm_base + off, source_bytes);
+     t->gen = upload_gen;
+     t->p0 = off >> 12;
+@@ -6621,6 +7115,8 @@ static void render_frame(void)
+     extern u32 cellGcmResolveLocated(int local, u32 offset);
+     u32 zeta_writer[MAX_DEPTH_SURFACES] = {0};
+     for (int _i = 0; _i < VP_TEX_SLOTS; _i++) s_d3d.vp_tex[_i].used = 0;
++    s_frame_prompt_style = (int)InterlockedCompareExchange(&s_button_prompt_style, 0, 0);
++    s_frame_prompt_gen = (u32)InterlockedCompareExchange(&s_button_prompt_gen, 0, 0);
+     for (u32 _d = 0; _d < s_d3d.draw_count && _d < MAX_DRAWS; _d++) {
+         D3D12DrawRecord* dr = &s_d3d.draws[_d];
+         if (dr->zeta_slot >= 0 && draw_writes_zeta(dr)) zeta_writer[dr->zeta_slot] = _d + 1;
+@@ -6834,17 +7330,13 @@ static void render_frame(void)
+                     if (s_duck_off && dr->tex[_u].off == s_duck_off)
+                         s_duck_raw = dr->tex[_u].raw;
+                     if (ts >= 0) {
+-                        DXGI_FORMAT sf =
+-                            (_bf == 0x85) ? DXGI_FORMAT_R8G8B8A8_UNORM :
+-                            (_bf == 0x8B) ? DXGI_FORMAT_R8G8_UNORM :
+-                            (_bf == 0x86) ? DXGI_FORMAT_BC1_UNORM :
+-                            (_bf == 0x87) ? DXGI_FORMAT_BC2_UNORM :
+-                            (_bf == 0x88) ? DXGI_FORMAT_BC3_UNORM :
+-                                            DXGI_FORMAT_R8_UNORM;
++                        DXGI_FORMAT sf = s_d3d.vp_tex[ts].srv_fmt;
++                        u32 remap = s_d3d.vp_tex[ts].prompt_replaced
++                            ? rsx_remap_to_d3d(dr->tex[_u].ctrl1, 0x85u)
++                            : ((_bf == 0x81) ? 0x1000
++                                             : rsx_remap_to_d3d(dr->tex[_u].ctrl1, _bf));
+                         srv_write_tracked(wslot, s_d3d.vp_tex[ts].res, s_d3d.vp_tex[ts].res_id, sf,
+-                                          (_bf == 0x81) ? 0x1000
+-                                                        : rsx_remap_to_d3d(dr->tex[_u].ctrl1, _bf),
+-                                          _cube);
++                                          remap, _cube);
+                         continue;
+                     }
+                 }
+@@ -10511,7 +11003,12 @@ void rsx_d3d12_backend_shutdown(void)
+         if (s_d3d.vp_tex[i].res) { s_d3d.vp_tex[i].res->lpVtbl->Release(s_d3d.vp_tex[i].res); s_d3d.vp_tex[i].res = NULL; }
+         if (s_d3d.vp_tex[i].up)  { s_d3d.vp_tex[i].up->lpVtbl->Release(s_d3d.vp_tex[i].up);   s_d3d.vp_tex[i].up  = NULL; }
+         s_d3d.vp_tex[i].res_id = 0;
++        s_d3d.vp_tex[i].srv_fmt = DXGI_FORMAT_UNKNOWN;
++        s_d3d.vp_tex[i].prompt_gen = 0;
++        s_d3d.vp_tex[i].prompt_replaced = 0;
++        s_d3d.vp_tex[i].prompt_eligible = 0;
+     }
++    ui_prompt_whitelist_shutdown();
+     vp_release_frame_psos();
+     depth_pool_shutdown();
+ 
+@@ -10717,5 +11214,7 @@ void rsx_d3d12_backend_alias_resolve(u32 dst_off, u32 src_off)
+ { (void)dst_off; (void)src_off; }
+ void rsx_d3d12_backend_depth_resolve_tile(u32 dst, u32 src, u32 w, u32 h, u32 cols)
+ { (void)dst; (void)src; (void)w; (void)h; (void)cols; }
++void rsx_d3d12_backend_set_button_prompts(int style) { (void)style; }
++int  rsx_d3d12_backend_get_button_prompts(void) { return 0; }
+ 
+ #endif /* _WIN32 */
+diff --git a/libs/video/rsx_d3d12_backend.h b/libs/video/rsx_d3d12_backend.h
+index 7c68cb5..d13aeb2 100644
+--- a/libs/video/rsx_d3d12_backend.h
++++ b/libs/video/rsx_d3d12_backend.h
+@@ -137,6 +137,16 @@ void rsx_d3d12_backend_present(void);
+  * owns a copy; callers may release their frame as soon as this returns. */
+ void rsx_d3d12_backend_video_frame(const u8* pixels, u32 width, u32 height);
+ 
++/* Button prompt style for whitelisted 2D UI atlas replacement and host overlay. */
++typedef enum rsx_button_prompt_style {
++    RSX_BUTTON_PROMPTS_PLAYSTATION = 0,
++    RSX_BUTTON_PROMPTS_XBOX = 1,
++    RSX_BUTTON_PROMPTS_NINTENDO = 2
++} rsx_button_prompt_style;
++
++void rsx_d3d12_backend_set_button_prompts(int style);
++int  rsx_d3d12_backend_get_button_prompts(void);
++
+ #ifdef __cplusplus
+ }
+ #endif
