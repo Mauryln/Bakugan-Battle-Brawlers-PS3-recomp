@@ -82,6 +82,20 @@ void log_error(const char *operation, FfxErrorCode result) {
     std::fprintf(stderr, "[FRAME GEN] %s failed (%#x)\n", operation, static_cast<unsigned>(result));
 }
 
+bool av_sync_debug() {
+    static int enabled = -1;
+    if (enabled < 0) {
+        const char *e = std::getenv("BAKUGAN_AV_SYNC_DEBUG");
+        enabled = (e && *e && std::string_view(e) != "0") ? 1 : 0;
+    }
+    return enabled != 0;
+}
+
+double av_sync_sec() {
+    static const auto t0 = Clock::now();
+    return std::chrono::duration<double>(Clock::now() - t0).count();
+}
+
 bool get_camera(const rsx_d3d12_present_scene &scene, FfxFsr3DispatchFrameGenerationPrepareDescription &prepare) {
     const float *p = scene.projection;
     if (!(p[0] > 0.0f && p[5] > 0.0f && p[11] == -1.0f &&
@@ -118,12 +132,14 @@ bool view_is_rigid(const float *view) {
     return true;
 }
 
-bool camera_cut(const rsx_d3d12_present_scene &scene, float fov) {
-    if (scene.depth != generation.previous_depth || std::abs(fov - generation.previous_fov) > 0.20f)
-        return true;
+const char *camera_cut_reason(const rsx_d3d12_present_scene &scene, float fov) {
+    if (scene.depth != generation.previous_depth)
+        return "depth";
+    if (std::abs(fov - generation.previous_fov) > 0.20f)
+        return "fov";
     const float *previous = generation.previous_view.data();
     if (!view_is_rigid(scene.view) || !view_is_rigid(previous))
-        return false;
+        return nullptr;
 
     // A rotation above 45 degrees or a jump of 25 scene units in a single
     // rendered frame is a camera cut in the battle camera sequence.
@@ -136,7 +152,11 @@ bool camera_cut(const rsx_d3d12_present_scene &scene, float fov) {
         const float delta = dot3(previous + 12, previous_axis) - dot3(scene.view + 12, current_axis);
         distance_squared += delta * delta;
     }
-    return relative_rotation_trace < 2.414214f || distance_squared > 25.0f * 25.0f;
+    if (relative_rotation_trace < 2.414214f)
+        return "rot";
+    if (distance_squared > 25.0f * 25.0f)
+        return "dist";
+    return nullptr;
 }
 
 FfxErrorCode create_context(ID3D12Device *device) {
@@ -220,7 +240,7 @@ FfxErrorCode dispatch(const FfxFrameGenerationDispatchDescription *desc, void*) 
     return result;
 }
 
-FfxErrorCode configure_dispatch(bool enabled, ID3D12Resource *hudless = nullptr) {
+FfxErrorCode configure_dispatch(bool enabled, ID3D12Resource *hudless = nullptr, const char *reason = "") {
     FfxFrameGenerationConfig config{};
     config.swapChain = generation.swapchain;
     config.frameGenerationCallback = dispatch;
@@ -233,12 +253,28 @@ FfxErrorCode configure_dispatch(bool enabled, ID3D12Resource *hudless = nullptr)
     config.interpolationRect = {static_cast<int>(content.x), static_cast<int>(content.y),
                                static_cast<int>(content.width), static_cast<int>(content.height)};
     config.frameID = generation.frame_id;
+    const bool prev_enabled = generation.enabled.load(std::memory_order_acquire);
     // The proxy releases the previous interpolation before the next Present
     // returns. Its two Prepare slots and the display-indexed HUD-less buffers
     // therefore stay live until the compute queue has consumed them.
     const FfxErrorCode result = ffxFsr3ConfigureFrameGeneration(generation.context.get(), &config);
-    if (result == FFX_OK)
+    if (result == FFX_OK) {
         generation.enabled.store(enabled, std::memory_order_release);
+        if (av_sync_debug() && prev_enabled != enabled) {
+            std::fprintf(stderr,
+                "[AVSYNC][FG] t=%.3fs frame=%llu active %d->%d reason=%s gap=%u hudless=%d dispatches=%llu resets=%llu native_gaps=%llu\n",
+                av_sync_sec(),
+                static_cast<unsigned long long>(generation.frame_id),
+                prev_enabled ? 1 : 0,
+                enabled ? 1 : 0,
+                reason,
+                generation.gap_frames,
+                hudless ? 1 : 0,
+                static_cast<unsigned long long>(generation.dispatches.load(std::memory_order_relaxed)),
+                static_cast<unsigned long long>(generation.resets.load(std::memory_order_relaxed)),
+                static_cast<unsigned long long>(generation.native_gaps));
+        }
+    }
     return result;
 }
 
@@ -249,7 +285,8 @@ void skip_frame() {
     // the proxy threads. Prolonged gaps return to native presentation.
     const bool keep_proxy_pacing = !generation.failed.load(std::memory_order_acquire) &&
                                    generation.gap_frames <= INPUT_GAP_FRAMES;
-    const FfxErrorCode result = configure_dispatch(keep_proxy_pacing);
+    const FfxErrorCode result = configure_dispatch(keep_proxy_pacing, nullptr,
+                                                   keep_proxy_pacing ? "gap_keep" : "gap_disable");
     generation.native_gaps += keep_proxy_pacing;
     if (result != FFX_OK)
         log_error("configure gap", result);
@@ -309,14 +346,28 @@ void record_frame(void *commands, const rsx_d3d12_present_scene *scene) {
     prepare.frameTimeDelta = consecutive
         ? std::chrono::duration<float, std::milli>(now - generation.last_prepared_time).count()
         : BASE_FRAME_MS;
-    const bool reset_hist = !consecutive || prepare.frameTimeDelta > 3.0f * BASE_FRAME_MS ||
-                            camera_cut(*scene, prepare.cameraFovAngleVertical);
+    const char *cut_reason = nullptr;
+    if (consecutive && prepare.frameTimeDelta <= 3.0f * BASE_FRAME_MS)
+        cut_reason = camera_cut_reason(*scene, prepare.cameraFovAngleVertical);
+    const char *reset_reason = !consecutive ? "nonconsec"
+        : (prepare.frameTimeDelta > 3.0f * BASE_FRAME_MS) ? "dt"
+        : cut_reason;
+    const bool reset_hist = reset_reason != nullptr;
+    if (av_sync_debug() && reset_hist) {
+        std::fprintf(stderr,
+            "[AVSYNC][FG] t=%.3fs frame=%llu history_reset=1 reason=%s dt_ms=%.2f consecutive=%d\n",
+            av_sync_sec(),
+            static_cast<unsigned long long>(generation.frame_id),
+            reset_reason,
+            prepare.frameTimeDelta,
+            consecutive ? 1 : 0);
+    }
     generation.reset_history.store(reset_hist, std::memory_order_release);
     prepare.frameID = generation.frame_id;
     FfxErrorCode result = ffxFsr3ContextDispatchFrameGenerationPrepare(generation.context.get(), &prepare);
     if (result == FFX_OK) {
         generation.prepared_frame_id.store(generation.frame_id, std::memory_order_release);
-        result = configure_dispatch(true, static_cast<ID3D12Resource *>(scene->hudless));
+        result = configure_dispatch(true, static_cast<ID3D12Resource *>(scene->hudless), "prepare");
         if (result == FFX_OK) {
             generation.last_prepared_time = now;
             generation.previous_depth = scene->depth;
@@ -330,7 +381,7 @@ void record_frame(void *commands, const rsx_d3d12_present_scene *scene) {
     }
     if (result != FFX_OK) {
         log_error("prepare or enable", result);
-        const FfxErrorCode disable_result = configure_dispatch(false);
+        const FfxErrorCode disable_result = configure_dispatch(false, nullptr, "error_disable");
         if (disable_result != FFX_OK)
             log_error("disable", disable_result);
         generation.failed.store(true, std::memory_order_release);
@@ -357,7 +408,7 @@ void prepare_swapchain_resize(void*) {
     if (wait_result != FFX_OK)
         log_error("waiting for proxy presents", wait_result);
     if (generation.context_ready) {
-        const FfxErrorCode disable_result = configure_dispatch(false);
+        const FfxErrorCode disable_result = configure_dispatch(false, nullptr, "resize");
         if (disable_result != FFX_OK)
             log_error("disable", disable_result);
         const FfxErrorCode result = ffxFsr3ContextDestroy(generation.context.get());
@@ -404,4 +455,8 @@ int bakugan_frame_generation_configure() {
 bool bakugan_frame_generation_active() {
     return generation.enabled.load(std::memory_order_acquire) &&
            !generation.failed.load(std::memory_order_acquire);
+}
+
+std::uint64_t bakugan_frame_generation_dispatches() {
+    return generation.dispatches.load(std::memory_order_relaxed);
 }

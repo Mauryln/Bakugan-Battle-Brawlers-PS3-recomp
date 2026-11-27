@@ -447,6 +447,18 @@ int main() {
         double next_stall = 10.0;
         CHECK(bakugan::fps_cap_step(10.5, interval, true, &next_stall) == 0.0);
         CHECK(std::abs(next_stall - 10.5) < 1e-9);
+
+        // FSR 3.1 transitions keep phase when base_cap stays 30, and re-anchor only when base_cap changes
+        double next_trans = 11.98;
+        CHECK(!bakugan::fps_cap_reanchor_on_transition(30, 30, 12.0, &next_trans));
+        CHECK(std::abs(next_trans - 11.98) < 1e-9);
+        CHECK(bakugan::fps_cap_reanchor_on_transition(60, 30, 12.0, &next_trans));
+        CHECK(std::abs(next_trans - 12.0) < 1e-9);
+        const double w_after = bakugan::fps_cap_step(12.0, interval, false, &next_trans);
+        CHECK(std::abs(w_after - interval) < 1e-9);
+        CHECK(std::abs(next_trans - (12.0 + interval)) < 1e-9);
+        CHECK(bakugan::fps_cap_reanchor_on_transition(0, 30, 15.0, &next_trans));
+        CHECK(std::abs(next_trans - 15.0) < 1e-9);
     }
 
     // SavedataGdiCache: lazy reuse, bounded capacity, and clean teardown before GdiplusShutdown

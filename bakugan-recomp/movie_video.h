@@ -3,13 +3,15 @@
 #include <memory>
 #include <string>
 
+class MovieAudio;
+
 // Native movie clock and decoding, independent of guest render polling.
 class MovieVideo {
 public:
     MovieVideo();
     ~MovieVideo();
     int32_t open(const std::wstring& path, VideoFrame& format);
-    void start();
+    void start(const MovieAudio* audio_probe = nullptr);
     void pause(bool value);
     void close();
     bool take_finished();

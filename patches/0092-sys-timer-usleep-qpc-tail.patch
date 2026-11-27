@@ -1,0 +1,91 @@
+diff --git a/runtime/syscalls/sys_timer.c b/runtime/syscalls/sys_timer.c
+--- a/runtime/syscalls/sys_timer.c
++++ b/runtime/syscalls/sys_timer.c
+@@ -218,52 +218,52 @@ int64_t sys_timer_usleep(ppu_context* ctx)
+         ppu_log_host_chain("usleep1ms"); } }
+ 
+ #ifdef _WIN32
+-    /* Use high-resolution sleep via waitable timer for better precision */
+-    if (usec >= 1000) {
+-        /* The ordinary timer can round a 1ms guest poll to a scheduler tick,
+-         * especially when Windows 11 ignores timeBeginPeriod for an occluded
+-         * window. Multistream polls three times per audio job: those delays
+-         * then become ~47ms for just 10.7ms of samples. */
+-        HANDLE timer = CreateWaitableTimerExW(NULL, NULL, 0x00000002u,
+-                                             TIMER_ALL_ACCESS); /* HIGH_RESOLUTION, Windows 10 1803+ */
+-        if (!timer) timer = CreateWaitableTimerW(NULL, TRUE, NULL);
+-        if (timer) {
+-            LARGE_INTEGER due;
+-            due.QuadPart = -((LONGLONG)usec * 10); /* 100ns units, negative = relative */
+-            SetWaitableTimer(timer, &due, 0, NULL, NULL, FALSE);
+-            WaitForSingleObject(timer, INFINITE);
+-            CloseHandle(timer);
+-        } else {
+-            Sleep((DWORD)(usec / 1000));
+-        }
+-    } else if (usec > 0) {
+-        /* Sub-millisecond sleep. Sleep()/waitable timers round up to the
+-         * ~0.5-1 ms scheduler quantum, far too coarse for a guest that relies
+-         * on accurate microsecond pacing -- a short usleep() spin waiting on
+-         * another thread to make progress otherwise collapses to a single yield
+-         * and busy-spins at full speed (so the wait is effectively a no-op).
+-         * Busy-wait to a precise QPC deadline, yielding inside the spin
+-         * (SwitchToThread) so a sibling host thread the guest may be waiting on
+-         * still gets the core. Mirrors RPCS3's "Usleep Only" TSC busy-tail. */
++    /* Anchor the deadline before any OS wait so timer jitter stays inside the
++     * budget. Waitable timers alone overshoot by ~0.3-0.5 ms per call, which
++     * slows non-cumulative frame-pacing loops that re-anchor after usleep(). */
++    if (usec > 0) {
+         ensure_qpc_init();
+         LARGE_INTEGER qpc_start, qpc_now;
+         QueryPerformanceCounter(&qpc_start);
++        const uint64_t freq = (uint64_t)s_qpc_freq.QuadPart;
+         const int64_t qpc_deadline = qpc_start.QuadPart +
+-            (int64_t)((usec * (uint64_t)s_qpc_freq.QuadPart) / 1000000ULL);
++            (int64_t)((usec / 1000000ULL) * freq + ((usec % 1000000ULL) * freq) / 1000000ULL);
++        if (usec >= 1000) {
++            /* The ordinary timer can round a 1ms guest poll to a scheduler tick,
++             * especially when Windows 11 ignores timeBeginPeriod for an occluded
++             * window. Multistream polls three times per audio job: those delays
++             * then become ~47ms for just 10.7ms of samples. Keep a short QPC
++             * tail so HIGH_RESOLUTION wakes slightly before the deadline. */
++            const uint64_t tail_us = (usec > 2000ULL) ? 1500ULL : (usec / 2ULL);
++            const uint64_t sleep_us = usec - tail_us;
++            HANDLE timer = CreateWaitableTimerExW(NULL, NULL, 0x00000002u,
++                                                 TIMER_ALL_ACCESS); /* HIGH_RESOLUTION, Windows 10 1803+ */
++            if (!timer) timer = CreateWaitableTimerW(NULL, TRUE, NULL);
++            if (timer) {
++                const uint64_t wait_us = (sleep_us > 900000000000ULL) ? 900000000000ULL : sleep_us;
++                LARGE_INTEGER due;
++                due.QuadPart = -((LONGLONG)wait_us * 10); /* 100ns units, negative = relative */
++                SetWaitableTimer(timer, &due, 0, NULL, NULL, FALSE);
++                WaitForSingleObject(timer, INFINITE);
++                CloseHandle(timer);
++            } else if (sleep_us >= 1000ULL) {
++                Sleep((DWORD)(sleep_us / 1000ULL));
++            }
++        }
++        /* Finish remaining sub-millisecond fraction to the exact QPC deadline,
++         * yielding periodically so sibling host/guest threads still make progress. */
+         unsigned spins = 0;
+-        do {
++        QueryPerformanceCounter(&qpc_now);
++        while (qpc_now.QuadPart < qpc_deadline) {
+             /* Yielding on every poll forces a context switch per 30 us wait --
+-             * thousands a second per thread. That is what pins a whole core and
+-             * starves whichever thread has real work: the loading screen drops
+-             * to 9 fps with no drawing and no I/O at all. Spin on the pause
+-             * hint and yield only every 64th turn, so a sibling the guest is
+-             * waiting on still gets the core. */
++             * thousands a second per thread. Spin on the pause hint and yield
++             * only every 64th turn so sibling threads still get the core. */
+             if ((++spins & 63u) == 0) SwitchToThread();
+ #if defined(__i386__) || defined(__x86_64__)
+             else __builtin_ia32_pause();
+ #endif
+             QueryPerformanceCounter(&qpc_now);
+-        } while (qpc_now.QuadPart < qpc_deadline);
++        }
+     }
+ #else
+     if (usec > 0) {

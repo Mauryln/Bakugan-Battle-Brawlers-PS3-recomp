@@ -6,10 +6,12 @@
 #include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <memory>
 #include <mutex>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 
 extern "C" {
@@ -32,6 +34,16 @@ constexpr uint32_t invalid = 0x80610701, invalid_state = 0x80610702;
 std::recursive_timed_mutex sail_mutex;
 std::atomic<bool> shutting_down{false};
 thread_local unsigned sail_lock_depth = 0;
+
+bool av_sync_debug()
+{
+    static int enabled = -1;
+    if (enabled < 0) {
+        const char* e = std::getenv("BAKUGAN_AV_SYNC_DEBUG");
+        enabled = (e && *e && std::string_view(e) != "0") ? 1 : 0;
+    }
+    return enabled != 0;
+}
 
 struct SailLock {
     SailLock() {
@@ -74,8 +86,8 @@ struct Player {
     bool opened = false;
     bool running = false, paused = false, made_up = false;
     std::string uri;
-    MovieVideo video;
     MovieAudio audio;
+    MovieVideo video;
     VideoFrame frame;
 };
 std::unordered_map<uint32_t, std::unique_ptr<Player>> players;
@@ -249,8 +261,10 @@ void start(ppu_context* c)
     Player* p=player(c);
     if (!p || !p->opened) { c->gpr[3]=invalid_state; return; }
     p->running=true; p->paused=false;
-    p->video.start();
+    if (av_sync_debug())
+        fprintf(stderr,"[AVSYNC][SAIL] start uri=%s %ux%u\n",p->uri.c_str(),p->frame.width,p->frame.height);
     p->audio.start(movie_path(p->uri).wstring());
+    p->video.start(&p->audio);
     const uint32_t cb = p->callback, arg = p->arg;
     const uint64_t token = c->gpr[5];
     complete_cb(cb,arg,10,5,6,token); c->gpr[3]=0;
@@ -261,6 +275,8 @@ void stop(ppu_context* c)
     Player* p=player(c);
     if (!p) { c->gpr[3]=invalid; return; }
     p->running=false; p->video.pause(true); p->audio.stop();
+    if (av_sync_debug())
+        fprintf(stderr,"[AVSYNC][SAIL] stop frames=%u uri=%s\n",p->video.frames(),p->uri.c_str());
     fprintf(stderr,"[video] stop after %u frames: %s\n",p->video.frames(),p->uri.c_str());
     rsx_d3d12_backend_video_frame(nullptr,0,0);
     const uint32_t cb = p->callback, arg = p->arg;
@@ -292,6 +308,8 @@ void get_frame(ppu_context* c)
     // keep running even when asset loading prevents these guest polls.
     if (p->video.take_finished()) {
         p->running=false;
+        if (av_sync_debug())
+            fprintf(stderr,"[AVSYNC][SAIL] finish frames=%u uri=%s\n",p->video.frames(),p->uri.c_str());
         const uint32_t cb = p->callback, arg = p->arg;
         notify_cb(cb,arg,3,0,7); notify_cb(cb,arg,3,0,4);
     }

@@ -18,4 +18,15 @@ inline double fps_cap_step(double now, double interval, bool vsync_on, double* n
     return 0.0;
 }
 
+/* Re-anchor presentation pacing only when the target frame cap actually changes.
+ * Keeping `next` across FSR 3.1 on/off transitions when base_cap stays 30 avoids
+ * injecting an extra full-frame sleep on top of the proxy reconfigure wait.
+ * Returns true when pacing was re-anchored to `now` (skip waiting on this frame). */
+inline bool fps_cap_reanchor_on_transition(int prev_base_cap, int new_base_cap, double now, double* next)
+{
+    if (prev_base_cap == new_base_cap) return false;
+    *next = now;
+    return true;
+}
+
 } // namespace bakugan

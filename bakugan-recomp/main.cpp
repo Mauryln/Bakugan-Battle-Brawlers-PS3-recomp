@@ -258,6 +258,30 @@ static unsigned frame_clock_due_ticks(double now, double* next_tick)
 static double s_wait_s = 0.0; unsigned s_wait_n = 0;
 static double s_pres_s = 0.0; unsigned s_pres_n = 0;
 static double s_qpc_freq2 = 0.0;
+static double s_av_cap_wait_ms = 0.0;
+
+static bool av_sync_debug(void)
+{
+    static int enabled = -1;
+    if (enabled < 0) {
+        const char* e = getenv("BAKUGAN_AV_SYNC_DEBUG");
+        enabled = (e && *e && strcmp(e, "0") != 0) ? 1 : 0;
+    }
+    return enabled != 0;
+}
+
+static double av_sync_now_sec(void)
+{
+#ifdef _WIN32
+    if (s_qpc_freq2 == 0.0) { LARGE_INTEGER f; QueryPerformanceFrequency(&f); s_qpc_freq2 = (double)f.QuadPart; }
+    static LONGLONG t0 = 0;
+    LARGE_INTEGER c; QueryPerformanceCounter(&c);
+    if (t0 == 0) t0 = c.QuadPart;
+    return (double)(c.QuadPart - t0) / s_qpc_freq2;
+#else
+    return 0.0;
+#endif
+}
 
 /* PS3_FPS_CAP=30|60|0 throttles presentation. The guest still ticks at the
  * vblank rate; this only stops the host from drawing more frames than the
@@ -291,20 +315,47 @@ static void fps_cap_wait(void)
 #ifdef _WIN32
     static bool was_interpolating = false;
     interpolating = bakugan_frame_generation_active();
-    if (was_interpolating != interpolating) {
-        next = 0.0;
-        was_interpolating = interpolating;
-    }
 #endif
     const int base_cap = interpolating ? 30 : cap;
-    if (base_cap <= 0) return;
-    if (s_qpc_freq2 == 0.0) { LARGE_INTEGER f; QueryPerformanceFrequency(&f); s_qpc_freq2 = (double)f.QuadPart; }
-    LARGE_INTEGER c; QueryPerformanceCounter(&c);
-    const double now = (double)c.QuadPart / s_qpc_freq2;
+    static int prev_base_cap = -1;
+    double now = 0.0;
+    if (base_cap > 0) {
+        if (s_qpc_freq2 == 0.0) { LARGE_INTEGER f; QueryPerformanceFrequency(&f); s_qpc_freq2 = (double)f.QuadPart; }
+        LARGE_INTEGER c; QueryPerformanceCounter(&c);
+        now = (double)c.QuadPart / s_qpc_freq2;
+    }
+#ifdef _WIN32
+    if (was_interpolating != interpolating) {
+        const bool reanchored = (prev_base_cap >= 0 && base_cap > 0)
+            ? bakugan::fps_cap_reanchor_on_transition(prev_base_cap, base_cap, now, &next)
+            : false;
+        if (base_cap <= 0) next = 0.0;
+        if (av_sync_debug()) {
+            fprintf(stderr,
+                "[AVSYNC][CAP] t=%.3fs interpolating %d->%d reanchor=%d prev_cap=%d base_cap=%d prev_next=%.4f\n",
+                av_sync_now_sec(), was_interpolating ? 1 : 0, interpolating ? 1 : 0,
+                reanchored ? 1 : 0, prev_base_cap, base_cap, next);
+        }
+        was_interpolating = interpolating;
+        prev_base_cap = base_cap;
+        if (reanchored || base_cap <= 0) return;
+    }
+#endif
+    if (base_cap <= 0) {
+        prev_base_cap = base_cap;
+        return;
+    }
+    if (next == 0.0) {
+        next = now;
+        prev_base_cap = base_cap;
+        return;
+    }
+    prev_base_cap = base_cap;
     // When the proxy owns display pacing, cap real frames without reserving
     // the wake margin for a native Present that waits on vertical blank.
     const double remaining = bakugan::fps_cap_step(now, 1.0 / base_cap, vsync_on != 0 && !interpolating, &next);
     if (remaining > 0.0) {
+        LARGE_INTEGER c;
         const double target = now + remaining;
         if (remaining > 0.002) Sleep((DWORD)((remaining - 0.001) * 1000.0));
         for (;;) {
@@ -321,9 +372,57 @@ static void present_timed(void)
     LARGE_INTEGER a, b; QueryPerformanceCounter(&a);
     present_guest_frame();
     QueryPerformanceCounter(&b);
+    const double pres_ms_this = (double)(b.QuadPart - a.QuadPart) / s_qpc_freq2 * 1000.0;
     s_pres_s += (double)(b.QuadPart - a.QuadPart) / s_qpc_freq2;
     s_pres_n++;
     fps_cap_wait();
+    if (av_sync_debug()) {
+        LARGE_INTEGER end; QueryPerformanceCounter(&end);
+        const double t_ms = (double)end.QuadPart * 1000.0 / s_qpc_freq2;
+        static double win_start_ms = 0.0, prev_ms = 0.0;
+        static double win_sum_ms = 0.0, win_max_ms = 0.0, win_pres_ms = 0.0, win_wait0_ms = 0.0;
+        static unsigned win_frames = 0;
+        static uint64_t win_disp0 = 0;
+#ifdef _WIN32
+        const uint64_t disp_now = bakugan_frame_generation_dispatches();
+        const int interp_now = bakugan_frame_generation_active() ? 1 : 0;
+#else
+        const uint64_t disp_now = 0;
+        const int interp_now = 0;
+#endif
+        if (win_start_ms == 0.0) {
+            win_start_ms = t_ms;
+            win_disp0 = disp_now;
+            win_wait0_ms = s_av_cap_wait_ms;
+        }
+        win_pres_ms += pres_ms_this;
+        if (prev_ms > 0.0) {
+            const double dt = t_ms - prev_ms;
+            win_sum_ms += dt;
+            if (dt > win_max_ms) win_max_ms = dt;
+            win_frames++;
+        }
+        prev_ms = t_ms;
+        if (win_frames > 0 && (t_ms - win_start_ms) >= 1000.0) {
+            const double elapsed_s = (t_ms - win_start_ms) / 1000.0;
+            const uint64_t fg_disp_delta = disp_now - win_disp0;
+            const double wait_ms_delta = s_av_cap_wait_ms - win_wait0_ms;
+            const double real_fps = (double)win_frames / elapsed_s;
+            const double est_pres_fps = (double)(win_frames + fg_disp_delta) / elapsed_s;
+            fprintf(stderr,
+                "[AVSYNC][PACE] t=%.3fs real_fps=%.2f est_pres_fps=%.2f fg_disp=%llu mean_ms=%.2f max_ms=%.2f pres_ms=%.2f wait_ms=%.2f interp=%d\n",
+                av_sync_now_sec(), real_fps, est_pres_fps,
+                (unsigned long long)fg_disp_delta,
+                win_sum_ms / win_frames, win_max_ms, win_pres_ms, wait_ms_delta, interp_now);
+            win_start_ms = t_ms;
+            win_frames = 0;
+            win_sum_ms = 0.0;
+            win_max_ms = 0.0;
+            win_pres_ms = 0.0;
+            win_wait0_ms = s_av_cap_wait_ms;
+            win_disp0 = disp_now;
+        }
+    }
     /* Opt-in whole guest-frame intervals, including waits and Present. Keep
      * samples in memory: one summary per 120 frames avoids per-frame logging. */
     static int metrics = -1;
