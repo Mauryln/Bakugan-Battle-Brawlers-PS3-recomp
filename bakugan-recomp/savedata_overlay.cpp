@@ -110,6 +110,7 @@ struct OverlayState {
     rsx_d3d12_output_rect picker_bounds;
     UINT output_width, output_height;
     bool picker_enabled;
+    int prompt_style;
     std::wstring vfs_root;
 } g;
 
@@ -364,7 +365,13 @@ void render_picker(OverlayCanvas& canvas)
                   14 * s, false, rgba(220, 168, 184, 200));
     }
 
-    draw_text(gr, L"\u2191\u2193 Select     Enter Confirm     Esc Cancel",
+    const wchar_t* legend = L"\u2191\u2193 / D-Pad Select     [\u2715] / Enter Confirm     [\u25CB] / Esc Cancel";
+    if (g.prompt_style == RSX_BUTTON_PROMPTS_XBOX) {
+        legend = L"\u2191\u2193 / D-Pad Select     [A] / Enter Confirm     [B] / Esc Cancel";
+    } else if (g.prompt_style == RSX_BUTTON_PROMPTS_NINTENDO) {
+        legend = L"\u2191\u2193 / D-Pad Select     [B] / Enter Confirm     [A] / Esc Cancel";
+    }
+    draw_text(gr, legend,
               RectF(l.px + 28 * s, l.py + l.ph - 50 * s, 680 * s, 24 * s),
               16 * s, false, rgba(210, 210, 220, 230));
     draw_button(gr, RectF(l.ok_x, l.ok_y, l.ok_w, l.ok_h),
@@ -670,6 +677,7 @@ int overlay_initialize(void*, void* device, void*, u32, u32, u32, u32)
         }
     }
 
+    g.prompt_style = rsx_d3d12_backend_get_button_prompts();
     g.ready = 1;
     return 0;
 }
@@ -939,6 +947,11 @@ int overlay_record(void*, void* command_list, void* target, u32, const rsx_d3d12
 
     if (active) {
         poll_pad();
+        const int prompt_style = rsx_d3d12_backend_get_button_prompts();
+        if (prompt_style != g.prompt_style) {
+            g.prompt_style = prompt_style;
+            g.dirty = 1;
+        }
         if (g.icons_dirty) {
             load_icons();
             g.icons_dirty = 0;
@@ -1034,6 +1047,7 @@ int pick_slot(int is_save, const CellSaveDataSlotInfo* slots, int count, int foc
     for (int i = 0; i < g.count; i++) g.slots[i] = slots[i];
     g.sel = (focus >= 0 && focus < g.count) ? focus : 0;
     g.result = 0;
+    g.prompt_style = rsx_d3d12_backend_get_button_prompts();
     g.dirty = 1;
     g.icons_dirty = 1;
     g.pad_primed = 0;

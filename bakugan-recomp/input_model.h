@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <limits>
 namespace player {
 struct Report {
     bool connected = true, sensors_valid = true;
@@ -14,6 +15,30 @@ struct MotionPulse {
     uint64_t start = 0;
     bool held = false, active = false;
 };
+// PS3 Sixaxis full-scale 1G range used by the game's sensor decoder (func_002E3374 / func_002E3930).
+constexpr float SIXAXIS_ONE_G_COUNTS = 113.0f;
+constexpr float SIXAXIS_YAW_COUNTS_PER_90DPS = 123.0f;
+// Vertical throw/shake span on sensors[1] (rest 399 = -1.0G) for CShootControlBakuganTask::func_000E4804
+// (triggers launch on Y < -1.0 && delta_Y < -1.0) with upward slew bounded below func_000C6F90's
+// +1.10G/frame rolling jump threshold (~+0.57G per 33 ms frame).
+constexpr float SIXAXIS_THROW_Y_COUNTS = 340.0f;
+constexpr float SIXAXIS_SENSOR_Y_RISE_RATE = 5.5f;
+// Soften binary DualShock 3 small motor relative to the large motor on modern host gamepads.
+constexpr float SMALL_MOTOR_BALANCE = 0.70f;
+
+inline void scale_rumble_motors(uint16_t raw_lo, uint16_t raw_hi, int strength_pct,
+                                uint16_t &out_lo, uint16_t &out_hi) {
+    const int clamped = std::clamp(strength_pct, 0, 100);
+    if (clamped == 0) {
+        out_lo = 0;
+        out_hi = 0;
+        return;
+    }
+    const float gain = static_cast<float>(clamped) / 100.0f;
+    out_lo = static_cast<uint16_t>(std::clamp(std::lround(raw_lo * gain), 0l, 65535l));
+    out_hi = static_cast<uint16_t>(
+        std::clamp(std::lround(raw_hi * gain * SMALL_MOTOR_BALANCE), 0l, 65535l));
+}
 inline uint8_t stick(float negative, float positive) {
     return (uint8_t)std::clamp(std::lround(128.f - 128.f * negative + 127.f * positive), 0l, 255l);
 }
@@ -100,9 +125,24 @@ inline float ema_step(float current, float target, float dt_sec, float tau_sec, 
         return 0.0f;
     return next;
 }
+inline float step_sensor_y_tilt(float current, float target, float dt_sec) {
+    if (!std::isfinite(current))
+        current = 0.0f;
+    if (!std::isfinite(target))
+        target = 0.0f;
+    target = std::clamp(target, -1.0f, 1.0f);
+    if (!std::isfinite(dt_sec) || dt_sec <= 0.0f || target <= current)
+        return target;
+    const float next = std::min(target, current + SIXAXIS_SENSOR_Y_RISE_RATE * dt_sec);
+    return (std::abs(target) < 1e-5f && std::abs(next) < 5e-4f) ? 0.0f : next;
+}
 struct SixaxisState {
     float tilt_x = 0.0f;
     float tilt_y = 0.0f;
+    float stick_tilt_x = 0.0f;
+    float stick_tilt_y = 0.0f;
+    float sensor_y_tilt = 0.0f;
+    float stick_sensor_y_tilt = 0.0f;
     float roll_angle = 0.0f;
     float pitch_angle = 0.0f;
     float rest_pitch = 0.0f;
@@ -241,6 +281,12 @@ inline void step_sixaxis(SixaxisState &s, float raw_tilt_x, float raw_tilt_y, fl
     shape_sixaxis_2d(combined_x, combined_y, tilt_deadzone, cfg.sixaxis_curve * 0.40f, target_x, target_y);
     s.tilt_x = ema_step(s.tilt_x, target_x, dt_sec, tau, 5.0f);
     s.tilt_y = ema_step(s.tilt_y, target_y, dt_sec, tau, 5.0f);
+    float stick_target_x = 0.0f, stick_target_y = 0.0f;
+    shape_sixaxis_2d(stick_x, stick_y, tilt_deadzone, cfg.sixaxis_curve * 0.40f, stick_target_x, stick_target_y);
+    s.stick_tilt_x = std::clamp(ema_step(s.stick_tilt_x, stick_target_x, dt_sec, tau, 5.0f), -1.0f, 1.0f);
+    s.stick_tilt_y = std::clamp(ema_step(s.stick_tilt_y, stick_target_y, dt_sec, tau, 5.0f), -1.0f, 1.0f);
+    s.sensor_y_tilt = step_sensor_y_tilt(s.sensor_y_tilt, std::clamp(s.tilt_y, -1.0f, 1.0f), dt_sec);
+    s.stick_sensor_y_tilt = step_sensor_y_tilt(s.stick_sensor_y_tilt, s.stick_tilt_y, dt_sec);
     out_tilt_x = std::clamp(s.tilt_x, -1.0f, 1.0f);
     out_tilt_y = std::clamp(s.tilt_y, -1.0f, 1.0f);
     out_accel = s.accel;
@@ -248,36 +294,30 @@ inline void step_sixaxis(SixaxisState &s, float raw_tilt_x, float raw_tilt_y, fl
         out_accel[0] = -out_accel[0];
     out_gyro = s.gyro;
 }
-// Integrate mouse pixel deltas into a leaky virtual stick: captures 1px slow sweeps,
-// turns and counter-steers crisply, holds steady across sweeps, and caps abrupt forward
-// flicks so mouse pushes accelerate smoothly without triggering Sixaxis jump spikes.
+// Integrate mouse pixel deltas into a symmetric leaky virtual stick matching the calibrated
+// +-113-count (1.0G) Sixaxis steering and acceleration/brake range without triggering sensors[1] jumps.
 inline void step_mouse_virtual_stick(float &virt_x, float &virt_y, int raw_dx, int raw_dy,
                                      float sensitivity, float dt_sec) {
     if (!std::isfinite(virt_x)) virt_x = 0.0f;
     if (!std::isfinite(virt_y)) virt_y = 0.0f;
     if (!std::isfinite(dt_sec) || dt_sec <= 0.0f) return;
 
-    float sens = std::clamp(sensitivity, 0.05f, 2.0f);
-    bool moving = (raw_dx != 0 || raw_dy != 0);
-    float decay = std::exp(-dt_sec / (moving ? 0.60f : 0.16f));
+    const float sens = std::clamp(sensitivity, 0.05f, 2.0f);
+    const bool moving = (raw_dx != 0 || raw_dy != 0);
+    const float decay = std::exp(-dt_sec / (moving ? 0.60f : 0.16f));
     virt_x *= decay;
     virt_y *= decay;
 
     if (moving) {
-        float dx = (float)raw_dx;
-        float dy = (float)raw_dy;
-        float gain_x = sens * 0.0125f;
-        float gain_y = sens * 0.0110f;
-        float gx = (dx * virt_x < 0.0f) ? gain_x * 2.8f : gain_x;
-        float gy = (dy * virt_y < 0.0f) ? gain_y * 2.5f : gain_y;
+        constexpr float kBaseGain = 0.0160f;
+        constexpr float kCounterSteerBoost = 2.8f;
+        const float dx = static_cast<float>(raw_dx);
+        const float dy = static_cast<float>(raw_dy);
+        const float gain = sens * kBaseGain;
+        const float gx = (dx * virt_x < 0.0f) ? gain * kCounterSteerBoost : gain;
+        const float gy = (dy * virt_y < 0.0f) ? gain * kCounterSteerBoost : gain;
         virt_x = std::clamp(virt_x + dx * gx, -1.0f, 1.0f);
-
-        float delta_y = dy * gy;
-        if (delta_y < 0.0f) {
-            float max_fwd = 3.8f * dt_sec;
-            delta_y = std::max(delta_y, -max_fwd);
-        }
-        virt_y = std::clamp(virt_y + delta_y, -1.0f, 1.0f);
+        virt_y = std::clamp(virt_y + dy * gy, -1.0f, 1.0f);
     }
 
     if (!moving && std::abs(virt_x) < 0.002f) virt_x = 0.0f;
@@ -286,7 +326,8 @@ inline void step_mouse_virtual_stick(float &virt_x, float &virt_y, int raw_dx, i
 inline Report make_report_with_tilt(const std::array<float, ACTION_COUNT> &values, float tilt_x, float tilt_y,
                                     MotionMode mode, bool real_motion, const std::array<float, 3> &accel,
                                     const std::array<float, 3> &gyro, uint64_t now, MotionPulse &pulse,
-                                    bool gyro_invert_x = false) {
+                                    bool gyro_invert_x = false, float tilt_scale = 1.0f,
+                                    float sensor_y_tilt = std::numeric_limits<float>::quiet_NaN()) {
     Report r;
     for (int a = 0; a < 16; ++a)
         if (values[a] > 0.25f)
@@ -299,18 +340,15 @@ inline Report make_report_with_tilt(const std::array<float, ACTION_COUNT> &value
     r.ry = stick(values[R_UP], values[R_DOWN]);
 
     const bool has_real = mode != MotionMode::RightStick && real_motion && finite_motion(accel, gyro);
-    // Hybrid contributes the physical stick to the sensor words. The fused tilt also
-    // contains sensor motion, which the filtered accelerometer and gyro already report.
-    if (has_real) {
+    if (has_real && mode == MotionMode::Sensors) {
         tilt_x = 0.0f;
         tilt_y = 0.0f;
-        if (mode == MotionMode::Auto) {
-            tilt_x = values[R_RIGHT] - values[R_LEFT];
-            tilt_y = values[R_DOWN] - values[R_UP];
-        }
+        sensor_y_tilt = 0.0f;
     }
     const float sx = std::isfinite(tilt_x) ? std::clamp(tilt_x, -1.0f, 1.0f) : 0.0f;
     const float sy = std::isfinite(tilt_y) ? std::clamp(tilt_y, -1.0f, 1.0f) : 0.0f;
+    const float sy_throw = std::isfinite(sensor_y_tilt) ? std::clamp(sensor_y_tilt, -1.0f, 1.0f) : sy;
+    const float scale = std::isfinite(tilt_scale) ? std::clamp(tilt_scale, 0.1f, 5.0f) : 1.0f;
     float base_s0 = 512.f, base_s1 = 399.f, base_s2 = 512.f, base_s3 = 512.f;
     if (has_real) {
         float ax = gyro_invert_x ? -accel[0] : accel[0];
@@ -319,14 +357,17 @@ inline Report make_report_with_tilt(const std::array<float, ACTION_COUNT> &value
         base_s2 = 512.f - accel[2] * (113.f / 9.80665f);
         base_s3 = 512.f + gyro[1] * (180.f / 3.14159265358979323846f) * (123.f / 90.f);
     }
-    const auto apply_tilt = [](float base, float tilt) {
-        base = std::clamp(base, 0.0f, 1023.0f);
-        return sensor(base + tilt * (tilt < 0.f ? base : 1023.f - base));
+    const auto apply_tilt = [scale](float base, float tilt) {
+        base = std::isfinite(base) ? std::clamp(base, 0.0f, 1023.0f) : 512.0f;
+        const float delta = static_cast<float>(std::lround(tilt * (SIXAXIS_ONE_G_COUNTS * scale)));
+        return sensor(base + delta);
     };
     r.sensors[0] = apply_tilt(base_s0, sx);
-    r.sensors[1] = apply_tilt(base_s1, sy);
-    r.sensors[2] = sensor(base_s2);
-    r.sensors[3] = sensor(base_s3 + sx * 123.f);
+    const float s1_base = std::isfinite(base_s1) ? std::clamp(base_s1, 0.0f, 1023.0f) : 399.0f;
+    const float s1_delta = static_cast<float>(std::lround(sy_throw * SIXAXIS_THROW_Y_COUNTS));
+    r.sensors[1] = sensor(s1_base + s1_delta);
+    r.sensors[2] = apply_tilt(base_s2, sy);
+    r.sensors[3] = sensor(base_s3 + sx * (SIXAXIS_YAW_COUNTS_PER_90DPS * scale));
     bool press = values[MOTION_THROW] > 0.25f;
     if (press && !pulse.held) {
         pulse.start = now;
@@ -335,12 +376,18 @@ inline Report make_report_with_tilt(const std::array<float, ACTION_COUNT> &value
     pulse.held = press;
     if (pulse.active) {
         uint64_t elapsed = now - pulse.start;
-        if (elapsed < 100)
+        if (elapsed < 100) {
+            r.sensors[1] = 59;
             r.sensors[2] = 1023;
-        else if (elapsed < 200)
+        } else if (elapsed < 150) {
+            r.sensors[1] = 229;
             r.sensors[2] = 0;
-        else
+        } else if (elapsed < 200) {
+            r.sensors[1] = 314;
+            r.sensors[2] = 0;
+        } else {
             pulse.active = false;
+        }
     }
     return r;
 }
@@ -355,13 +402,49 @@ inline Report make_gamepad_report(const std::array<float, ACTION_COUNT> &values,
     std::array<float, 3> filtered_accel{}, filtered_gyro{};
     step_sixaxis(sixaxis, stick_x, stick_y, 0.0f, real, accel, gyro, config, dt_sec,
                  tilt_x, tilt_y, filtered_accel, filtered_gyro);
-    Report report = make_report_with_tilt(values, tilt_x, tilt_y, config.motion, real,
-                                          filtered_accel, filtered_gyro, now, pulse);
+    const float sensor_tilt_x = real ? (config.motion == MotionMode::Auto ? sixaxis.stick_tilt_x : 0.0f) : tilt_x;
+    const float sensor_tilt_y = real ? (config.motion == MotionMode::Auto ? sixaxis.stick_tilt_y : 0.0f) : tilt_y;
+    const float sensor_throw_y =
+        real ? (config.motion == MotionMode::Auto ? sixaxis.stick_sensor_y_tilt : 0.0f) : sixaxis.sensor_y_tilt;
+    Report report = make_report_with_tilt(values, sensor_tilt_x, sensor_tilt_y, config.motion, real,
+                                          filtered_accel, filtered_gyro, now, pulse,
+                                          false, config.gyro_sensitivity, sensor_throw_y);
     if (real) {
         report.rx = stick(std::max(0.0f, -tilt_x), std::max(0.0f, tilt_x));
         report.ry = stick(std::max(0.0f, -tilt_y), std::max(0.0f, tilt_y));
     }
     return report;
+}
+inline Report make_keyboard_mouse_report(const std::array<float, ACTION_COUNT> &values,
+                                         float mouse_virt_x, float mouse_virt_y,
+                                         const Config &config, float dt_sec, uint64_t now,
+                                         SixaxisState &sixaxis, MotionPulse &pulse,
+                                         bool active = true) {
+    auto out_values = values;
+    float tilt_x = 0.0f, tilt_y = 0.0f;
+    std::array<float, 3> a{0.0f, 9.80665f, 0.0f}, g{}, filt_a{0.0f, 9.80665f, 0.0f}, filt_g{};
+    if (active) {
+        const float kb_tilt_x = out_values[R_RIGHT] - out_values[R_LEFT];
+        const float kb_tilt_y = out_values[R_DOWN] - out_values[R_UP];
+        const float mx = std::isfinite(mouse_virt_x) ? mouse_virt_x : 0.0f;
+        const float my = std::isfinite(mouse_virt_y) ? mouse_virt_y : 0.0f;
+        const float raw_tilt_x = std::clamp(kb_tilt_x + mx, -1.0f, 1.0f);
+        const float raw_tilt_y = std::clamp(kb_tilt_y + my, -1.0f, 1.0f);
+        step_sixaxis(sixaxis, raw_tilt_x, raw_tilt_y, 0.0f, false, a, g,
+                     config, dt_sec, tilt_x, tilt_y, filt_a, filt_g);
+        out_values[R_LEFT] = std::max(0.0f, -tilt_x);
+        out_values[R_RIGHT] = std::max(0.0f, tilt_x);
+        out_values[R_UP] = std::max(0.0f, -tilt_y);
+        out_values[R_DOWN] = std::max(0.0f, tilt_y);
+    } else {
+        out_values[R_LEFT] = 0.0f;
+        out_values[R_RIGHT] = 0.0f;
+        out_values[R_UP] = 0.0f;
+        out_values[R_DOWN] = 0.0f;
+    }
+    const MotionMode kb_mode = config.motion == MotionMode::Sensors ? MotionMode::Auto : config.motion;
+    return make_report_with_tilt(out_values, tilt_x, tilt_y, kb_mode, false, filt_a, filt_g, now, pulse,
+                                 false, config.gyro_sensitivity, active ? sixaxis.sensor_y_tilt : 0.0f);
 }
 inline Report make_report(const std::array<float, ACTION_COUNT> &values, MotionMode mode, bool real_motion,
                           const std::array<float, 3> &accel, const std::array<float, 3> &gyro, uint64_t now,

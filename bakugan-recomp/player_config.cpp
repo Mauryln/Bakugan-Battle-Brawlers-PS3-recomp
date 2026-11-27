@@ -140,11 +140,13 @@ bool has_input_overrides(const Config& c) {
            c.sixaxis_profile != base.sixaxis_profile ||
            c.sixaxis_curve != base.sixaxis_curve ||
            c.sixaxis_smoothing != base.sixaxis_smoothing ||
+           c.button_prompts != base.button_prompts ||
            !c.device_guid.empty() || !c.device_serial.empty() ||
            c.mouse_look != base.mouse_look || c.mouse_left_cross != base.mouse_left_cross ||
            c.mouse_sensitivity != base.mouse_sensitivity || c.deadzone != base.deadzone ||
            c.gyro_sensitivity != base.gyro_sensitivity || c.gyro_deadzone != base.gyro_deadzone ||
            c.gyro_invert_x != base.gyro_invert_x || c.gyro_invert_y != base.gyro_invert_y ||
+           c.vibration_strength != base.vibration_strength ||
            !std::equal(c.keyboard.begin(), c.keyboard.end(), base.keyboard.begin(), equal_binding) ||
            !std::equal(c.gamepad.begin(), c.gamepad.end(), base.gamepad.begin(), equal_binding);
 }
@@ -278,6 +280,10 @@ bool load(Config &c, const std::wstring &path, std::wstring *error) {
     c.sixaxis_smoothing = input_number(L"SixaxisSmoothing", c.sixaxis_smoothing, 0.0f, 1.0f);
     c.gyro_invert_x = get(L"Input", L"GyroInvertX", L"0", path) != L"0";
     c.gyro_invert_y = get(L"Input", L"GyroInvertY", L"0", path) != L"0";
+    c.vibration_strength = static_cast<int>(std::lround(
+        input_number(L"VibrationStrength", static_cast<float>(c.vibration_strength), 0.0f, 100.0f)));
+    c.button_prompts = normalize_button_prompts(
+        get(L"Input", L"button_prompts", c.button_prompts, path), L"auto");
     auto guid = get(L"Input", L"GUID", L"", path);
     auto serial = get(L"Input", L"Serial", L"", path);
     c.device_guid.assign(guid.begin(), guid.end());
@@ -346,6 +352,8 @@ bool save(const Config &c, const std::wstring &path, std::wstring *error) {
     put(L"Input", L"SixaxisSmoothing", std::to_wstring(c.sixaxis_smoothing));
     put(L"Input", L"GyroInvertX", c.gyro_invert_x ? L"1" : L"0");
     put(L"Input", L"GyroInvertY", c.gyro_invert_y ? L"1" : L"0");
+    put(L"Input", L"VibrationStrength", std::to_wstring(std::clamp(c.vibration_strength, 0, 100)));
+    put(L"Input", L"button_prompts", normalize_button_prompts(c.button_prompts, L"auto"));
     for (int i = 0; i < ACTION_COUNT; ++i) {
         auto k = std::to_wstring(i);
         put(L"Keyboard", k.c_str(), binding_text(c.keyboard[i]));
@@ -392,6 +400,61 @@ std::wstring resolve_frame_gen(const Config &c) {
     return c.frame_gen;
 }
 
+int resolve_vibration_strength(const Config &c) {
+    const int fallback = std::clamp(c.vibration_strength, 0, 100);
+    wchar_t value[32];
+    const DWORD size = GetEnvironmentVariableW(L"PS3_VIBRATION_STRENGTH", value, (DWORD)std::size(value));
+    if (size > 0 && size < std::size(value)) {
+        wchar_t *end = nullptr;
+        const long parsed = wcstol(value, &end, 10);
+        if (end && end != value && !*end)
+            return static_cast<int>(std::clamp(parsed, 0l, 100l));
+    }
+    return fallback;
+}
+
+std::wstring normalize_button_prompts(const std::wstring &value, const std::wstring &fallback) {
+    std::wstring lowered = value;
+    for (auto &ch : lowered)
+        ch = (wchar_t)towlower(ch);
+    return choose(lowered, {L"auto", L"playstation", L"xbox", L"nintendo"}, fallback);
+}
+
+std::wstring resolve_button_prompts(const Config &c) {
+    const std::wstring fallback = normalize_button_prompts(c.button_prompts, L"auto");
+    wchar_t value[32];
+    const DWORD size = GetEnvironmentVariableW(L"PS3_BUTTON_PROMPTS", value, (DWORD)std::size(value));
+    if (size > 0 && size < std::size(value)) {
+        const std::wstring parsed = normalize_button_prompts(value, L"");
+        if (!parsed.empty())
+            return parsed;
+    }
+    return fallback;
+}
+
+ButtonPromptStyle resolve_prompt_style(const std::wstring &setting, ButtonPromptStyle detected) {
+    const std::wstring norm = normalize_button_prompts(setting, L"auto");
+    if (norm == L"xbox")
+        return ButtonPromptStyle::Xbox;
+    if (norm == L"nintendo")
+        return ButtonPromptStyle::Nintendo;
+    if (norm == L"playstation")
+        return ButtonPromptStyle::PlayStation;
+    return detected;
+}
+
+const char *prompt_style_name(ButtonPromptStyle style) {
+    switch (style) {
+    case ButtonPromptStyle::Xbox:
+        return "xbox";
+    case ButtonPromptStyle::Nintendo:
+        return "nintendo";
+    case ButtonPromptStyle::PlayStation:
+    default:
+        return "playstation";
+    }
+}
+
 void apply_environment(const Config &c, const std::wstring &path) {
     auto env = [](const wchar_t *key, const std::wstring &value) {
         SetEnvironmentVariableW(key, value.empty() ? nullptr : value.c_str());
@@ -410,6 +473,8 @@ void apply_environment(const Config &c, const std::wstring &path) {
         choose(c.frame_gen, {bakugan::FRAME_GEN_OFF, bakugan::FRAME_GEN_FSR3}, L""));
     env(L"PS3_ANISO", std::to_wstring(c.aniso));
     env(L"PS3_LOD_BIAS", L"0");
+    env(L"PS3_VIBRATION_STRENGTH", std::to_wstring(std::clamp(c.vibration_strength, 0, 100)));
+    env(L"PS3_BUTTON_PROMPTS", normalize_button_prompts(c.button_prompts, L"auto"));
     env(L"" PS3_ENV_FPS_CAP, L"" PS3_DEFAULT_FPS_CAP);
     env(L"PS3_TICK_HZ", L"");
     env(L"PS3_WINDOW_MODE", c.display_mode);

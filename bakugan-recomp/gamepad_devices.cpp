@@ -64,6 +64,13 @@ void Gamepads::refresh() {
         Device d;
         d.id = ids[i];
         d.handle = handle;
+        SDL_GamepadType gp_type = SDL_GetGamepadType(handle);
+        if (gp_type == SDL_GAMEPAD_TYPE_UNKNOWN || gp_type == SDL_GAMEPAD_TYPE_STANDARD) {
+            SDL_GamepadType real_type = SDL_GetRealGamepadType(handle);
+            if (real_type != SDL_GAMEPAD_TYPE_UNKNOWN)
+                gp_type = real_type;
+        }
+        d.type = gp_type;
         const char *name = SDL_GetGamepadName(handle);
         d.name = name ? name : "Mando";
         const char *serial = SDL_GetGamepadSerial(handle);
@@ -86,6 +93,19 @@ Device *Gamepads::selected(const Config &c) {
             return &d;
     return nullptr; // A different controller must not silently receive this mapping.
 }
+SDL_Gamepad *Gamepads::handle_by_id(SDL_JoystickID id) const {
+    if (!id)
+        return nullptr;
+    for (const auto &d : items)
+        if (d.id == id)
+            return d.handle;
+    return nullptr;
+}
+void Gamepads::stop_all_rumble() {
+    for (const auto &d : items)
+        if (d.handle)
+            SDL_RumbleGamepad(d.handle, 0, 0, 0);
+}
 bool Gamepads::motion(Device *d, std::array<float, 3> &a, std::array<float, 3> &g) {
     a = {0.0f, 9.80665f, 0.0f};
     g = {0.0f, 0.0f, 0.0f};
@@ -102,8 +122,11 @@ bool Gamepads::motion(Device *d, std::array<float, 3> &a, std::array<float, 3> &
     return (got_g || got_a) && finite_motion(a, g);
 }
 void Gamepads::close(bool quit_subsystem) {
-    for (auto &d : items)
+    for (auto &d : items) {
+        if (d.handle)
+            SDL_RumbleGamepad(d.handle, 0, 0, 0);
         SDL_CloseGamepad(d.handle);
+    }
     items.clear();
     if (initialized && quit_subsystem)
         SDL_QuitSubSystem(SDL_INIT_GAMEPAD);
@@ -173,5 +196,23 @@ void read_gamepad_actions(const Config &config, SDL_Gamepad *pad, std::array<flo
     }
     sample_stick_2d(config, pad, L_LEFT, L_RIGHT, L_UP, L_DOWN, out);
     sample_stick_2d(config, pad, R_LEFT, R_RIGHT, R_UP, R_DOWN, out);
+}
+ButtonPromptStyle prompt_style_from_gamepad_type(SDL_GamepadType type) {
+    switch (type) {
+    case SDL_GAMEPAD_TYPE_XBOX360:
+    case SDL_GAMEPAD_TYPE_XBOXONE:
+        return ButtonPromptStyle::Xbox;
+    case SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_PRO:
+    case SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_JOYCON_LEFT:
+    case SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_JOYCON_RIGHT:
+    case SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_JOYCON_PAIR:
+    case SDL_GAMEPAD_TYPE_GAMECUBE:
+        return ButtonPromptStyle::Nintendo;
+    case SDL_GAMEPAD_TYPE_PS3:
+    case SDL_GAMEPAD_TYPE_PS4:
+    case SDL_GAMEPAD_TYPE_PS5:
+    default:
+        return ButtonPromptStyle::PlayStation;
+    }
 }
 } // namespace player

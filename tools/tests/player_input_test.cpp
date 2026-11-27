@@ -22,8 +22,19 @@ int main() {
     using namespace player;
     auto c = defaults();
     CHECK(c.frame_gen == L"off");
+    CHECK(c.motion == MotionMode::Auto);
     CHECK(c.sixaxis_profile == SixaxisProfile::Fast);
     CHECK(c.deadzone == 0.10f && c.gyro_sensitivity == 1.40f && c.sixaxis_smoothing == 0.15f);
+    CHECK(c.vibration_strength == 80);
+    CHECK(c.button_prompts == L"auto");
+    CHECK(!has_input_overrides(c));
+    c.vibration_strength = 60;
+    CHECK(has_input_overrides(c));
+    c.vibration_strength = 80;
+    c.button_prompts = L"xbox";
+    CHECK(has_input_overrides(c));
+    c.button_prompts = L"auto";
+    CHECK(!has_input_overrides(c));
     CHECK(c.gamepad[CROSS].kind == BindingKind::Button && c.gamepad[CROSS].code == SDL_GAMEPAD_BUTTON_SOUTH);
     Binding b;
     CHECK(!parse_binding(L"key:999", b));
@@ -46,6 +57,7 @@ int main() {
     c.device_guid = "test-guid";
     c.device_serial = "serial";
     c.motion = MotionMode::RightStick;
+    c.vibration_strength = 45;
     std::wstring error;
     CHECK(save(c, path.wstring(), &error));
     wchar_t fps[16];
@@ -53,6 +65,15 @@ int main() {
           std::wstring(fps) == L"30");
     Config loaded;
     CHECK(load(loaded, path.wstring(), &error));
+    CHECK(loaded.vibration_strength == 45);
+    CHECK(WritePrivateProfileStringW(L"Input", L"VibrationStrength", L"-5", path.c_str()));
+    CHECK(load(loaded, path.wstring(), &error) && loaded.vibration_strength == 0);
+    CHECK(WritePrivateProfileStringW(L"Input", L"VibrationStrength", L"250", path.c_str()));
+    CHECK(load(loaded, path.wstring(), &error) && loaded.vibration_strength == 100);
+    CHECK(WritePrivateProfileStringW(L"Input", L"VibrationStrength", L"nan", path.c_str()));
+    CHECK(load(loaded, path.wstring(), &error) && loaded.vibration_strength == 80);
+    CHECK(WritePrivateProfileStringW(L"Input", L"VibrationStrength", L"45", path.c_str()));
+    CHECK(load(loaded, path.wstring(), &error) && loaded.vibration_strength == 45);
     CHECK(loaded.language == c.language && loaded.output == c.output);
     CHECK(loaded.aa_mode == L"off" && std::abs(loaded.sharpness - 1.2f) < 0.001f && loaded.aniso == 4);
     CHECK(loaded.frame_gen == L"fsr3");
@@ -101,6 +122,21 @@ int main() {
     CHECK(resolve_frame_gen(c) == L"fsr3");
     SetEnvironmentVariableW(L"PS3_FRAME_GEN", nullptr);
     CHECK(resolve_frame_gen(c) == L"fsr3");
+    SetEnvironmentVariableW(L"PS3_VIBRATION_STRENGTH", nullptr);
+    CHECK(resolve_vibration_strength(c) == 45);
+    SetEnvironmentVariableW(L"PS3_VIBRATION_STRENGTH", L"0");
+    CHECK(resolve_vibration_strength(c) == 0);
+    SetEnvironmentVariableW(L"PS3_VIBRATION_STRENGTH", L"50");
+    CHECK(resolve_vibration_strength(c) == 50);
+    SetEnvironmentVariableW(L"PS3_VIBRATION_STRENGTH", L"100");
+    CHECK(resolve_vibration_strength(c) == 100);
+    SetEnvironmentVariableW(L"PS3_VIBRATION_STRENGTH", L"150");
+    CHECK(resolve_vibration_strength(c) == 100);
+    SetEnvironmentVariableW(L"PS3_VIBRATION_STRENGTH", L"-10");
+    CHECK(resolve_vibration_strength(c) == 0);
+    SetEnvironmentVariableW(L"PS3_VIBRATION_STRENGTH", L"invalid");
+    CHECK(resolve_vibration_strength(c) == 45);
+    SetEnvironmentVariableW(L"PS3_VIBRATION_STRENGTH", nullptr);
     apply_environment(c, path.wstring());
     wchar_t env[128];
     CHECK(!GetEnvironmentVariableW(L"PAD_AUTOPRESS", env, 128));
@@ -110,6 +146,7 @@ int main() {
     CHECK(GetEnvironmentVariableW(L"PS3_ANISO", env, 128) && std::wstring(env) == L"4");
     CHECK(GetEnvironmentVariableW(L"PS3_FRAME_GEN", env, 128) && std::wstring(env) == L"fsr3");
     CHECK(GetEnvironmentVariableW(L"PS3_FPS_CAP", env, 128) && std::wstring(env) == L"30");
+    CHECK(GetEnvironmentVariableW(L"PS3_VIBRATION_STRENGTH", env, 128) && std::wstring(env) == L"45");
     c.frame_gen = L"invalid";
     apply_environment(c, path.wstring());
     CHECK(!GetEnvironmentVariableW(L"PS3_FRAME_GEN", env, 128));
@@ -125,6 +162,83 @@ int main() {
     apply_environment(c, path.wstring());
     CHECK(!GetEnvironmentVariableW(L"PAD_REPLAY", env, 128));
     CHECK(!GetEnvironmentVariableW(L"PS3_SAVEDATA_CHOICE", env, 128));
+    CHECK(GetEnvironmentVariableW(L"PS3_BUTTON_PROMPTS", env, 128) && std::wstring(env) == L"auto");
+
+    // button_prompts config persistence, env precedence, and controller auto-detection
+    {
+        CHECK(normalize_button_prompts(L"AUTO") == L"auto");
+        CHECK(normalize_button_prompts(L"PlayStation") == L"playstation");
+        CHECK(normalize_button_prompts(L"XBOX") == L"xbox");
+        CHECK(normalize_button_prompts(L"NiNtEnDo") == L"nintendo");
+        CHECK(normalize_button_prompts(L"bogus") == L"auto");
+        CHECK(normalize_button_prompts(L"bogus", L"") == L"");
+
+        auto prompt_ini = std::filesystem::temp_directory_path() / L"bakugan-button-prompts-test.ini";
+        std::filesystem::remove(prompt_ini);
+        for (const wchar_t *mode : {L"auto", L"playstation", L"xbox", L"nintendo"}) {
+            Config pc = defaults();
+            pc.button_prompts = mode;
+            CHECK(save(pc, prompt_ini.wstring(), &error));
+            wchar_t ini_prompts[32];
+            CHECK(GetPrivateProfileStringW(L"Input", L"button_prompts", L"", ini_prompts, 32, prompt_ini.c_str()) &&
+                  std::wstring(ini_prompts) == mode);
+            Config plc;
+            CHECK(load(plc, prompt_ini.wstring(), &error) && plc.button_prompts == mode);
+        }
+        CHECK(WritePrivateProfileStringW(L"Input", L"button_prompts", L"XBOX", prompt_ini.c_str()));
+        Config pcase;
+        CHECK(load(pcase, prompt_ini.wstring(), &error) && pcase.button_prompts == L"xbox");
+        CHECK(WritePrivateProfileStringW(L"Input", L"button_prompts", L"invalid_style", prompt_ini.c_str()));
+        CHECK(load(pcase, prompt_ini.wstring(), &error) && pcase.button_prompts == L"auto");
+
+        Config penv = defaults();
+        penv.button_prompts = L"xbox";
+        SetEnvironmentVariableW(L"PS3_BUTTON_PROMPTS", nullptr);
+        CHECK(resolve_button_prompts(penv) == L"xbox");
+        SetEnvironmentVariableW(L"PS3_BUTTON_PROMPTS", L"Nintendo");
+        CHECK(resolve_button_prompts(penv) == L"nintendo");
+        SetEnvironmentVariableW(L"PS3_BUTTON_PROMPTS", L"playstation");
+        CHECK(resolve_button_prompts(penv) == L"playstation");
+        SetEnvironmentVariableW(L"PS3_BUTTON_PROMPTS", L"auto");
+        CHECK(resolve_button_prompts(penv) == L"auto");
+        SetEnvironmentVariableW(L"PS3_BUTTON_PROMPTS", L"unknown");
+        CHECK(resolve_button_prompts(penv) == L"xbox");
+        SetEnvironmentVariableW(L"PS3_BUTTON_PROMPTS", nullptr);
+
+        apply_environment(penv, prompt_ini.wstring());
+        CHECK(GetEnvironmentVariableW(L"PS3_BUTTON_PROMPTS", env, 128) && std::wstring(env) == L"xbox");
+        CHECK(GetEnvironmentVariableW(L"PS3_PLAYER_CONFIG", env, 128));
+        penv.button_prompts = L"auto";
+        apply_environment(penv, prompt_ini.wstring());
+        CHECK(GetEnvironmentVariableW(L"PS3_BUTTON_PROMPTS", env, 128) && std::wstring(env) == L"auto");
+
+        CHECK(resolve_prompt_style(L"auto", ButtonPromptStyle::Xbox) == ButtonPromptStyle::Xbox);
+        CHECK(resolve_prompt_style(L"auto", ButtonPromptStyle::Nintendo) == ButtonPromptStyle::Nintendo);
+        CHECK(resolve_prompt_style(L"auto", ButtonPromptStyle::PlayStation) == ButtonPromptStyle::PlayStation);
+        CHECK(resolve_prompt_style(L"xbox", ButtonPromptStyle::Nintendo) == ButtonPromptStyle::Xbox);
+        CHECK(resolve_prompt_style(L"nintendo", ButtonPromptStyle::Xbox) == ButtonPromptStyle::Nintendo);
+        CHECK(resolve_prompt_style(L"playstation", ButtonPromptStyle::Xbox) == ButtonPromptStyle::PlayStation);
+
+        CHECK(std::string(prompt_style_name(ButtonPromptStyle::PlayStation)) == "playstation");
+        CHECK(std::string(prompt_style_name(ButtonPromptStyle::Xbox)) == "xbox");
+        CHECK(std::string(prompt_style_name(ButtonPromptStyle::Nintendo)) == "nintendo");
+
+        CHECK(prompt_style_from_gamepad_type(SDL_GAMEPAD_TYPE_XBOX360) == ButtonPromptStyle::Xbox);
+        CHECK(prompt_style_from_gamepad_type(SDL_GAMEPAD_TYPE_XBOXONE) == ButtonPromptStyle::Xbox);
+        CHECK(prompt_style_from_gamepad_type(SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_PRO) == ButtonPromptStyle::Nintendo);
+        CHECK(prompt_style_from_gamepad_type(SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_JOYCON_LEFT) == ButtonPromptStyle::Nintendo);
+        CHECK(prompt_style_from_gamepad_type(SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_JOYCON_RIGHT) == ButtonPromptStyle::Nintendo);
+        CHECK(prompt_style_from_gamepad_type(SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_JOYCON_PAIR) == ButtonPromptStyle::Nintendo);
+        CHECK(prompt_style_from_gamepad_type(SDL_GAMEPAD_TYPE_GAMECUBE) == ButtonPromptStyle::Nintendo);
+        CHECK(prompt_style_from_gamepad_type(SDL_GAMEPAD_TYPE_PS3) == ButtonPromptStyle::PlayStation);
+        CHECK(prompt_style_from_gamepad_type(SDL_GAMEPAD_TYPE_PS4) == ButtonPromptStyle::PlayStation);
+        CHECK(prompt_style_from_gamepad_type(SDL_GAMEPAD_TYPE_PS5) == ButtonPromptStyle::PlayStation);
+        CHECK(prompt_style_from_gamepad_type(SDL_GAMEPAD_TYPE_STANDARD) == ButtonPromptStyle::PlayStation);
+        CHECK(prompt_style_from_gamepad_type(SDL_GAMEPAD_TYPE_UNKNOWN) == ButtonPromptStyle::PlayStation);
+
+        std::filesystem::remove(prompt_ini);
+        SetEnvironmentVariableW(L"PS3_BUTTON_PROMPTS", nullptr);
+    }
     std::array<float, ACTION_COUNT> v{};
     std::array<float, 3> a{0, 9.80665f, 0}, g{};
     MotionPulse pulse;
@@ -143,16 +257,42 @@ int main() {
     v[R_DOWN] = 1;
     g[0] = std::numeric_limits<float>::quiet_NaN();
     r = make_report(v, MotionMode::Auto, true, a, g, 1000, pulse);
-    CHECK(r.sensors[0] == 0 && r.sensors[1] == 1023);
+    CHECK(r.sensors[0] == 399 && r.sensors[1] == 739 && r.sensors[2] == 625 && r.sensors[3] == 389);
+    std::array<float, ACTION_COUNT> v_sym{};
+    v_sym[R_RIGHT] = 1.0f;
+    v_sym[R_UP] = 1.0f;
+    r = make_report(v_sym, MotionMode::RightStick, false, a, g, 1000, pulse);
+    CHECK(r.sensors[0] == 625 && r.sensors[1] == 59 && r.sensors[2] == 399 && r.sensors[3] == 635);
+    std::array<float, ACTION_COUNT> v_horiz{};
+    v_horiz[R_RIGHT] = 1.0f;
+    r = make_report(v_horiz, MotionMode::RightStick, false, a, g, 1000, pulse);
+    CHECK(r.sensors[0] == 625 && r.sensors[1] == 399 && r.sensors[2] == 512 && r.sensors[3] == 635);
+    std::array<float, ACTION_COUNT> v_half_pos{}, v_half_neg{};
+    v_half_pos[R_RIGHT] = 0.5f;
+    v_half_pos[R_UP] = 0.5f;
+    v_half_neg[R_LEFT] = 0.5f;
+    v_half_neg[R_DOWN] = 0.5f;
+    auto r_pos = make_report(v_half_pos, MotionMode::RightStick, false, a, g, 1000, pulse);
+    auto r_neg = make_report(v_half_neg, MotionMode::RightStick, false, a, g, 1000, pulse);
+    CHECK(r_pos.sensors[0] == 569 && r_neg.sensors[0] == 455);
+    CHECK(r_pos.sensors[2] == 455 && r_neg.sensors[2] == 569);
+    CHECK(r_pos.sensors[1] == 229 && r_neg.sensors[1] == 569);
     v[MOTION_THROW] = 1;
-    CHECK(make_report(v, MotionMode::RightStick, false, a, g, 1000, pulse).sensors[2] == 1023);
-    CHECK(make_report(v, MotionMode::RightStick, false, a, g, 1100, pulse).sensors[2] == 0);
-    CHECK(make_report(v, MotionMode::RightStick, false, a, g, 1200, pulse).sensors[2] == 512);
-    CHECK(make_report(v, MotionMode::RightStick, false, a, g, 1400, pulse).sensors[2] == 512);
+    const auto pulse0 = make_report(v, MotionMode::RightStick, false, a, g, 1000, pulse);
+    const auto pulse1 = make_report(v, MotionMode::RightStick, false, a, g, 1100, pulse);
+    const auto pulse2 = make_report(v, MotionMode::RightStick, false, a, g, 1150, pulse);
+    const auto pulse3 = make_report(v, MotionMode::RightStick, false, a, g, 1200, pulse);
+    const auto pulse4 = make_report(v, MotionMode::RightStick, false, a, g, 1400, pulse);
+    CHECK(pulse0.sensors[1] == 59 && pulse0.sensors[2] == 1023);
+    CHECK(pulse1.sensors[1] == 229 && pulse1.sensors[2] == 0);
+    CHECK(pulse2.sensors[1] == 314 && pulse2.sensors[2] == 0);
+    CHECK(pulse3.sensors[1] == 739 && pulse3.sensors[2] == 625);
+    CHECK(pulse4.sensors[1] == 739 && pulse4.sensors[2] == 625);
     v[MOTION_THROW] = 0;
     make_report(v, MotionMode::RightStick, false, a, g, 1500, pulse);
     v[MOTION_THROW] = 1;
-    CHECK(make_report(v, MotionMode::RightStick, false, a, g, 1600, pulse).sensors[2] == 1023);
+    const auto pulse_re = make_report(v, MotionMode::RightStick, false, a, g, 1600, pulse);
+    CHECK(pulse_re.sensors[1] == 59 && pulse_re.sensors[2] == 1023);
     float sx = 0.f, sy = 0.f;
     shape_stick_2d(0.10f, -0.10f, 0.15f, sx, sy);
     CHECK(sx == 0.f && sy == 0.f);
@@ -213,6 +353,8 @@ int main() {
     Config legacy_cfg;
     CHECK(load(legacy_cfg, legacy_path.wstring(), &error));
     CHECK(legacy_cfg.sixaxis_profile == SixaxisProfile::Fast);
+    CHECK(legacy_cfg.vibration_strength == 80);
+    CHECK(legacy_cfg.button_prompts == L"auto");
     CHECK(legacy_cfg.frame_gen == L"off");
     CHECK(legacy_cfg.display_mode == L"borderless");
     CHECK(std::abs(legacy_cfg.deadzone - 0.22f) < 0.001f);
@@ -356,45 +498,290 @@ int main() {
     std::array<float, ACTION_COUNT> hybrid_stick{};
     const auto gyro_alone = steady_report(hybrid, hybrid_stick);
     CHECK(gyro_alone.rx > 200 && gyro_alone.sensors[0] > 512 && gyro_alone.sensors[3] > 512);
+
+    // Stick R inside deadzone must hand over cleanly to the gyroscope alone.
+    float dz_rx = 0.0f, dz_ry = 0.0f;
+    shape_stick_2d(0.05f, -0.05f, hybrid.deadzone, dz_rx, dz_ry);
+    std::array<float, ACTION_COUNT> deadzone_stick{};
+    deadzone_stick[R_RIGHT] = std::max(0.0f, dz_rx);
+    deadzone_stick[R_UP] = std::max(0.0f, -dz_ry);
+    const auto gyro_deadzone = steady_report(hybrid, deadzone_stick);
+    CHECK(gyro_deadzone.rx == gyro_alone.rx && gyro_deadzone.ry == gyro_alone.ry &&
+          gyro_deadzone.sensors == gyro_alone.sensors);
+
     hybrid_stick[R_UP] = 0.65f;
     const auto combined = steady_report(hybrid, hybrid_stick);
     CHECK(combined.rx > 200 && combined.ry < 70);
     CHECK(combined.sensors[0] == gyro_alone.sensors[0] && combined.sensors[3] == gyro_alone.sensors[3]);
-    CHECK(combined.sensors[1] < gyro_alone.sensors[1]);
+    CHECK(combined.sensors[1] < gyro_alone.sensors[1] && combined.sensors[2] < gyro_alone.sensors[2]);
+
     hybrid_stick[R_LEFT] = 1.0f;
     const auto opposite = steady_report(hybrid, hybrid_stick);
     CHECK(opposite.rx == 0 && opposite.ry < 70);
-    CHECK(opposite.sensors[0] == 0 && opposite.sensors[1] < gyro_alone.sensors[1]);
+    CHECK(opposite.sensors[0] < 512 && opposite.sensors[0] > 350);
+    CHECK(opposite.sensors[1] < gyro_alone.sensors[1] && opposite.sensors[2] < gyro_alone.sensors[2]);
+
+    std::array<float, ACTION_COUNT> tight_stick{};
+    tight_stick[R_RIGHT] = 1.0f;
+    const auto tight = steady_report(hybrid, tight_stick);
+    const int expected_tight_s0 =
+        static_cast<int>(std::clamp(std::lround(gyro_alone.sensors[0] + 113.0f * hybrid.gyro_sensitivity), 0l, 1023l));
+    CHECK(tight.sensors[0] > gyro_alone.sensors[0] && tight.sensors[0] <= 1023);
+    CHECK(std::abs((int)tight.sensors[0] - expected_tight_s0) <= 1);
+    CHECK(tight.sensors[1] == gyro_alone.sensors[1] && tight.sensors[2] == gyro_alone.sensors[2]);
+
     hybrid.motion = MotionMode::Sensors;
     const auto only_sensors = steady_report(hybrid, hybrid_stick);
     CHECK(only_sensors.rx == gyro_alone.rx && only_sensors.ry == gyro_alone.ry &&
           only_sensors.sensors == gyro_alone.sensors);
+
     hybrid.motion = MotionMode::RightStick;
     const auto only_stick = steady_report(hybrid, hybrid_stick);
-    CHECK(only_stick.rx == 0 && only_stick.ry < 70 && only_stick.sensors[3] < 512);
+    const int expected_stick_left =
+        static_cast<int>(512l - std::lround(113.0f * hybrid.gyro_sensitivity));
+    CHECK(only_stick.rx == 0 && only_stick.ry < 70 &&
+          std::abs((int)only_stick.sensors[0] - expected_stick_left) <= 1 &&
+          only_stick.sensors[1] < 399 && only_stick.sensors[2] < 512 && only_stick.sensors[3] < 512);
+    const auto only_stick_horiz = steady_report(hybrid, tight_stick);
+    CHECK(only_stick_horiz.sensors[1] == 399 && only_stick_horiz.sensors[2] == 512);
 
-    // Mouse leaky virtual stick: captures 1px sweeps, caps forward flicks to avoid jump spikes,
-    // turns/counter-steers crisply, and returns smoothly to 0
+    // Sixaxis profiles scale Stick R travel proportionally over the calibrated +-113 range.
+    std::array<float, ACTION_COUNT> full_ru{};
+    full_ru[R_RIGHT] = 1.0f;
+    full_ru[R_UP] = 1.0f;
+    const auto profile_report = [&](SixaxisProfile prof) {
+        Config pcfg = defaults();
+        apply_sixaxis_profile(pcfg, prof);
+        pcfg.motion = MotionMode::RightStick;
+        SixaxisState pst;
+        MotionPulse pp;
+        Report rep;
+        for (unsigned i = 0; i < 120; ++i)
+            rep = make_gamepad_report(full_ru, pcfg, false, fa, std::array<float, 3>{},
+                                      0.010f, 5000 + i * 10, pst, pp);
+        return rep;
+    };
+    const auto prof_smooth = profile_report(SixaxisProfile::Smooth);
+    const auto prof_standard = profile_report(SixaxisProfile::Standard);
+    const auto prof_fast = profile_report(SixaxisProfile::Fast);
+    CHECK(prof_smooth.sensors[0] == 608 && prof_smooth.sensors[2] == 416);
+    CHECK(prof_standard.sensors[0] == 625 && prof_standard.sensors[2] == 399);
+    CHECK(prof_fast.sensors[0] == 670 && prof_fast.sensors[2] == 354);
+    CHECK(prof_smooth.sensors[0] < prof_standard.sensors[0] && prof_standard.sensors[0] < prof_fast.sensors[0]);
+
+    // Vibration scaling (0%, 50%, 100%, small motor balance, and out-of-range clamping)
+    uint16_t r_lo = 0, r_hi = 0;
+    scale_rumble_motors(65535, 65535, 0, r_lo, r_hi);
+    CHECK(r_lo == 0 && r_hi == 0);
+    scale_rumble_motors(65535, 65535, 50, r_lo, r_hi);
+    CHECK(r_lo == 32768 && r_hi == 22937 && r_hi < r_lo);
+    scale_rumble_motors(65535, 65535, 100, r_lo, r_hi);
+    CHECK(r_lo == 65535 && r_hi == 45875 && r_hi < r_lo);
+    scale_rumble_motors(128 * 257, 0, 50, r_lo, r_hi);
+    CHECK(r_lo == 16448 && r_hi == 0);
+    scale_rumble_motors(65535, 65535, -20, r_lo, r_hi);
+    CHECK(r_lo == 0 && r_hi == 0);
+    scale_rumble_motors(65535, 65535, 200, r_lo, r_hi);
+    CHECK(r_lo == 65535 && r_hi == 45875);
+
+    // Mouse leaky virtual stick: captures 1px sweeps, responds symmetrically in X/Y on the calibrated
+    // +-113 range without jump-spike workarounds, counter-steers crisply, and returns smoothly to 0
     float mvx = 0.f, mvy = 0.f;
     step_mouse_virtual_stick(mvx, mvy, 0, 0, 0.5f, 0.008f);
     CHECK(mvx == 0.0f && mvy == 0.0f);
     step_mouse_virtual_stick(mvx, mvy, 1, 0, 0.5f, 0.008f);
     CHECK(mvx > 0.0f && mvx < 0.02f && mvy == 0.0f);
+    float dummy_x = 0.f, mvy_fwd = 0.f, mvy_back = 0.f;
+    step_mouse_virtual_stick(dummy_x, mvy_fwd, 0, -6, 0.5f, 0.004f);
+    step_mouse_virtual_stick(dummy_x, mvy_back, 0, 6, 0.5f, 0.004f);
+    CHECK(mvy_fwd < 0.0f && std::abs(mvy_fwd + mvy_back) < 1e-6f);
+    mvy_fwd = 0.f;
+    mvy_back = 0.f;
+    step_mouse_virtual_stick(dummy_x, mvy_fwd, 0, -200, 0.5f, 0.008f);
+    step_mouse_virtual_stick(dummy_x, mvy_back, 0, 200, 0.5f, 0.008f);
+    CHECK(mvy_fwd == -1.0f && mvy_back == 1.0f);
     mvx = 0.f;
-    step_mouse_virtual_stick(mvx, mvy, 0, -6, 0.5f, 0.001f);
-    CHECK(mvy < 0.0f && mvy > -0.05f); // short tick / abrupt forward flick does not spike to jump threshold
-    step_mouse_virtual_stick(mvx, mvy, 0, -200, 0.5f, 0.008f);
-    CHECK(mvy > -0.05f); // large forward flick is slew-limited so it will not jump
     mvy = 0.f;
     for (int i = 0; i < 15; ++i)
         step_mouse_virtual_stick(mvx, mvy, 12, 0, 0.5f, 0.008f);
-    CHECK(mvx > 0.65f && mvx <= 1.0f);
+    CHECK(mvx > 0.90f && mvx <= 1.0f);
     float peak_x = mvx;
     step_mouse_virtual_stick(mvx, mvy, -12, 0, 0.5f, 0.008f); // counter-steer cuts turn faster
-    CHECK(mvx < peak_x - 0.10f);
+    CHECK(mvx < peak_x - 0.20f);
+    float cmvy = -1.0f;
+    step_mouse_virtual_stick(dummy_x, cmvy, 0, 12, 0.5f, 0.008f); // counter-steer from forward boost to brake
+    CHECK(cmvy > -1.0f + 0.20f);
     for (int i = 0; i < 160; ++i)
         step_mouse_virtual_stick(mvx, mvy, 0, 0, 0.5f, 0.010f);
     CHECK(mvx == 0.0f && mvy == 0.0f);
+
+    // Exact PS3 Sixaxis axis decoder (func_002E3930 / func_002E3374: deadzone 0.035, clamp 3.0G)
+    const auto decode_ps3_axis = [](uint16_t s) {
+        const float raw = static_cast<float>(static_cast<int>(s) - 512) / 113.0f;
+        const float mag = std::min(std::abs(raw), 3.0f);
+        if (mag <= 0.035f)
+            return 0.0f;
+        return std::copysign((mag - 0.035f) / 0.965f, raw);
+    };
+
+    // Mouse Bakugan throw (CShootControlBakuganTask::func_000E4804): a 1-frame casual forward flick (-80 px)
+    // crosses Y < -1.0 and delta_Y < -1.0 across Smooth, Standard, and Fast profiles
+    for (SixaxisProfile prof : {SixaxisProfile::Smooth, SixaxisProfile::Standard, SixaxisProfile::Fast}) {
+        Config tcfg = defaults();
+        apply_sixaxis_profile(tcfg, prof);
+        SixaxisState tst;
+        MotionPulse tp;
+        float vx = 0.f, vy = 0.f;
+        const float prev_y = decode_ps3_axis(399);
+        Report throw_rep;
+        for (int i = 0; i < 8; ++i) {
+            step_mouse_virtual_stick(vx, vy, 0, -10, tcfg.mouse_sensitivity, 0.004f);
+            throw_rep = make_keyboard_mouse_report(std::array<float, ACTION_COUNT>{}, vx, vy, tcfg, 0.004f,
+                                                   6000 + static_cast<uint64_t>(i) * 4, tst, tp);
+        }
+        const float curr_y = decode_ps3_axis(throw_rep.sensors[1]);
+        CHECK(curr_y < -1.0f && (curr_y - prev_y) < -1.0f);
+    }
+
+    // End-to-end mouse Bakugan steering & throw: calibrated +-113 accel/brake on sensors[2],
+    // sensors[1] throw/shake range (59..739) without jump spikes on release/reversal, and horizontal isolation
+    const auto run_mouse_sweep = [&](SixaxisProfile prof, MotionMode mode, int dx, int dy, int first_dx, int first_dy) {
+        Config mcfg = defaults();
+        apply_sixaxis_profile(mcfg, prof);
+        mcfg.motion = mode;
+        SixaxisState mst;
+        MotionPulse mp;
+        float vx = 0.f, vy = 0.f;
+        Report rep;
+        for (int i = 0; i < 80; ++i) {
+            step_mouse_virtual_stick(vx, vy, i == 0 ? first_dx : dx, i == 0 ? first_dy : dy,
+                                     mcfg.mouse_sensitivity, 0.008f);
+            rep = make_keyboard_mouse_report(std::array<float, ACTION_COUNT>{}, vx, vy, mcfg, 0.008f,
+                                             7000 + static_cast<uint64_t>(i) * 8, mst, mp);
+        }
+        return rep;
+    };
+    const auto m_fwd_smooth = run_mouse_sweep(SixaxisProfile::Smooth, MotionMode::Auto, 0, -20, 0, -200);
+    const auto m_fwd_standard = run_mouse_sweep(SixaxisProfile::Standard, MotionMode::Auto, 0, -20, 0, -200);
+    const auto m_fwd_fast = run_mouse_sweep(SixaxisProfile::Fast, MotionMode::Auto, 0, -20, 0, -200);
+    CHECK(m_fwd_smooth.sensors[2] == 416 && m_fwd_standard.sensors[2] == 399 && m_fwd_fast.sensors[2] == 354);
+    CHECK(m_fwd_smooth.sensors[1] == 59 && m_fwd_standard.sensors[1] == 59 && m_fwd_fast.sensors[1] == 59);
+    CHECK(m_fwd_fast.ry == 0 && m_fwd_standard.ry == 0 && m_fwd_smooth.ry == 0);
+
+    const auto m_brk_smooth = run_mouse_sweep(SixaxisProfile::Smooth, MotionMode::Auto, 0, 20, 0, 200);
+    const auto m_brk_standard = run_mouse_sweep(SixaxisProfile::Standard, MotionMode::Auto, 0, 20, 0, 200);
+    const auto m_brk_fast = run_mouse_sweep(SixaxisProfile::Fast, MotionMode::Auto, 0, 20, 0, 200);
+    CHECK(m_brk_smooth.sensors[2] == 608 && m_brk_standard.sensors[2] == 625 && m_brk_fast.sensors[2] == 670);
+    CHECK(m_brk_smooth.sensors[1] == 739 && m_brk_standard.sensors[1] == 739 && m_brk_fast.sensors[1] == 739);
+    CHECK(m_brk_fast.ry == 255 && m_brk_standard.ry == 255 && m_brk_smooth.ry == 255);
+    CHECK((512 - m_fwd_fast.sensors[2]) == (m_brk_fast.sensors[2] - 512));
+
+    const auto m_horiz = run_mouse_sweep(SixaxisProfile::Fast, MotionMode::Auto, 20, 0, 20, 0);
+    CHECK(m_horiz.sensors[0] == 670 && m_horiz.sensors[1] == 399 &&
+          m_horiz.sensors[2] == 512 && m_horiz.sensors[3] == 684);
+
+    // Rolling jump safety (func_000C6F90): bounded upward slew keeps delta_Y <= +1.0G/frame (< +1.10G)
+    // across sudden forward->idle release, forward->brake mouse reversal, and Stick R forward->brake snap
+    {
+        Config scfg = defaults();
+        auto check_mouse_recovery = [&](int rev_first_dy, int rev_dy, uint16_t expected_end_s1) {
+            SixaxisState mst;
+            MotionPulse mp;
+            float vx = 0.f, vy = 0.f;
+            Report rep;
+            for (int i = 0; i < 80; ++i) {
+                step_mouse_virtual_stick(vx, vy, 0, -20, scfg.mouse_sensitivity, 0.008f);
+                rep = make_keyboard_mouse_report(std::array<float, ACTION_COUNT>{}, vx, vy, scfg, 0.008f,
+                                                 11000 + static_cast<uint64_t>(i) * 8, mst, mp);
+            }
+            CHECK(rep.sensors[1] == 59);
+            float prev_y = decode_ps3_axis(rep.sensors[1]);
+            uint64_t t_ms = 12000;
+            for (int f = 0; f < 40; ++f) {
+                for (int sub = 0; sub < 4; ++sub) {
+                    const int dy = (f == 0 && sub == 0) ? rev_first_dy : rev_dy;
+                    step_mouse_virtual_stick(vx, vy, 0, dy, scfg.mouse_sensitivity, 0.00825f);
+                    t_ms += 8;
+                    rep = make_keyboard_mouse_report(std::array<float, ACTION_COUNT>{}, vx, vy, scfg, 0.00825f,
+                                                     t_ms, mst, mp);
+                }
+                const float curr_y = decode_ps3_axis(rep.sensors[1]);
+                CHECK((curr_y - prev_y) <= 1.0f);
+                prev_y = curr_y;
+            }
+            CHECK(rep.sensors[1] == expected_end_s1);
+        };
+        check_mouse_recovery(0, 0, 399);
+        check_mouse_recovery(200, 20, 739);
+
+        Config rcfg = defaults();
+        rcfg.motion = MotionMode::RightStick;
+        SixaxisState pst;
+        MotionPulse pp;
+        std::array<float, ACTION_COUNT> stick_fwd{};
+        stick_fwd[R_UP] = 1.0f;
+        Report srep;
+        for (int i = 0; i < 40; ++i)
+            srep = make_gamepad_report(stick_fwd, rcfg, false, fa, std::array<float, 3>{},
+                                       0.008f, 13000 + static_cast<uint64_t>(i) * 8, pst, pp);
+        CHECK(srep.sensors[1] == 59);
+        std::array<float, ACTION_COUNT> stick_brk{};
+        stick_brk[R_DOWN] = 1.0f;
+        float prev_sy = decode_ps3_axis(srep.sensors[1]);
+        uint64_t ts_ms = 14000;
+        for (int f = 0; f < 20; ++f) {
+            for (int sub = 0; sub < 4; ++sub) {
+                ts_ms += 8;
+                srep = make_gamepad_report(stick_brk, rcfg, false, fa, std::array<float, 3>{},
+                                           0.00825f, ts_ms, pst, pp);
+            }
+            const float curr_sy = decode_ps3_axis(srep.sensors[1]);
+            CHECK((curr_sy - prev_sy) <= 1.0f);
+            prev_sy = curr_sy;
+        }
+        CHECK(srep.sensors[1] == 739);
+    }
+
+    // Diagonal turn + boost under MotionMode::Sensors still steers cleanly and decays to rest
+    {
+        Config mcfg = defaults();
+        mcfg.motion = MotionMode::Sensors;
+        SixaxisState mst;
+        MotionPulse mp;
+        float vx = 0.f, vy = 0.f;
+        Report diag_rep;
+        for (int i = 0; i < 80; ++i) {
+            step_mouse_virtual_stick(vx, vy, 20, -20, mcfg.mouse_sensitivity, 0.008f);
+            diag_rep = make_keyboard_mouse_report(std::array<float, ACTION_COUNT>{}, vx, vy, mcfg, 0.008f,
+                                                  8000 + static_cast<uint64_t>(i) * 8, mst, mp);
+            for (int s = 0; s < 4; ++s)
+                CHECK(diag_rep.sensors[s] <= 1023);
+        }
+        CHECK(diag_rep.rx == 255 && diag_rep.ry == 0);
+        CHECK(diag_rep.sensors[0] == 670 && diag_rep.sensors[1] == 59 &&
+              diag_rep.sensors[2] == 354 && diag_rep.sensors[3] == 684);
+
+        for (int i = 0; i < 160; ++i) {
+            step_mouse_virtual_stick(vx, vy, 0, 0, mcfg.mouse_sensitivity, 0.010f);
+            diag_rep = make_keyboard_mouse_report(std::array<float, ACTION_COUNT>{}, vx, vy, mcfg, 0.010f,
+                                                  9000 + static_cast<uint64_t>(i) * 10, mst, mp);
+        }
+        CHECK(vx == 0.0f && vy == 0.0f);
+        CHECK(diag_rep.rx == 128 && diag_rep.ry == 128);
+        CHECK(diag_rep.sensors[0] == 512 && diag_rep.sensors[1] == 399 &&
+              diag_rep.sensors[2] == 512 && diag_rep.sensors[3] == 512);
+
+        // Counter-acting a held keyboard direction returns rx and sensors[0] to neutral
+        std::array<float, ACTION_COUNT> kb_right{};
+        kb_right[R_RIGHT] = 1.0f;
+        SixaxisState kst;
+        MotionPulse kp;
+        Report oppose_rep;
+        for (int i = 0; i < 80; ++i)
+            oppose_rep = make_keyboard_mouse_report(kb_right, -1.0f, 0.0f, mcfg, 0.008f,
+                                                    10000 + static_cast<uint64_t>(i) * 8, kst, kp);
+        CHECK(oppose_rep.rx == 128 && oppose_rep.sensors[0] == 512);
+    }
     Gamepads devices;
     std::string input_error;
     CHECK(devices.init(input_error));

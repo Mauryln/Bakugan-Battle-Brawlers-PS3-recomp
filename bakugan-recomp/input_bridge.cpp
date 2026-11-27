@@ -6,6 +6,7 @@
 #include "gamepad_devices.h"
 #include "input_model.h"
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <cstring>
@@ -14,11 +15,32 @@ namespace {
 // Exported by the toolkit's cellGcmSys.c; the port links against it.
 extern "C" unsigned cellGcm_flip_request_count(void);
 extern "C" bool bakugan_savedata_overlay_active();
+extern "C" void rsx_d3d12_backend_set_button_prompts(int style);
 SRWLOCK lock = SRWLOCK_INIT;
 HANDLE worker = nullptr, stop_event = nullptr;
 player::Config config;
 player::Gamepads pads;
+std::atomic<int> active_prompt_style{static_cast<int>(player::ButtonPromptStyle::PlayStation)};
+int last_published_prompt_style = -1;
+void publish_prompt_style(player::ButtonPromptStyle style) {
+    const int next = static_cast<int>(style);
+    active_prompt_style.store(next, std::memory_order_relaxed);
+    if (next != last_published_prompt_style) {
+        last_published_prompt_style = next;
+        rsx_d3d12_backend_set_button_prompts(next);
+        fprintf(stderr, "[input] button prompts -> %s\n", player::prompt_style_name(style));
+    }
+}
 constexpr int MAX_PORTS = 7; // matches CELL_PAD_MAX_PORT_NUM
+constexpr Uint32 RUMBLE_HOLD_MS = 1000;
+constexpr ULONGLONG RUMBLE_RENEW_MS = 400;
+struct RumbleTarget {
+    uint16_t lo = 0;
+    uint16_t hi = 0;
+    bool dirty = false;
+};
+SRWLOCK rumble_lock = SRWLOCK_INIT;
+std::array<RumbleTarget, MAX_PORTS> rumble_targets{};
 struct PortState {
     bool connected = false;
     bool is_gamepad = false;
@@ -29,6 +51,19 @@ struct PortState {
 };
 std::array<PortState, MAX_PORTS> ports{};
 bool installed = false;
+int actuator_sink(u32 port, u16 low_freq, u16 high_freq, void *) {
+    if (port >= MAX_PORTS)
+        return 0;
+    AcquireSRWLockExclusive(&rumble_lock);
+    auto &t = rumble_targets[port];
+    if (t.lo != low_freq || t.hi != high_freq) {
+        t.lo = low_freq;
+        t.hi = high_freq;
+        t.dirty = true;
+    }
+    ReleaseSRWLockExclusive(&rumble_lock);
+    return 1;
+}
 ps3_host_pad_report neutral_report() {
     ps3_host_pad_report r{};
     r.lx = r.ly = r.rx = r.ry = 128;
@@ -213,7 +248,7 @@ void update_mouse(HWND hwnd, std::array<float, player::ACTION_COUNT> &v,
     bool held = config.mouse_look && (mouse_buttons & 2);
     if (held) {
         // Right click held: mouse look / camera aim (drives Left stick smoothly across 250 Hz ticks)
-        player::step_mouse_virtual_stick(mouse_look_x, mouse_look_y, raw_dx, raw_dy, sens * 1.4f, dt_sec);
+        player::step_mouse_virtual_stick(mouse_look_x, mouse_look_y, raw_dx, raw_dy, sens * 1.1f, dt_sec);
         v[player::L_LEFT] = std::max(v[player::L_LEFT], std::max(0.f, -mouse_look_x));
         v[player::L_RIGHT] = std::max(v[player::L_RIGHT], std::max(0.f, mouse_look_x));
         v[player::L_UP] = std::max(v[player::L_UP], std::max(0.f, -mouse_look_y));
@@ -285,25 +320,9 @@ ps3_host_pad_report sample_keyboard(bool foreground, HWND hwnd, MouseCapture &ca
         kb_sixaxis = {};
         pulse = {};
     }
-    float kb_tilt_x = kb_values[player::R_RIGHT] - kb_values[player::R_LEFT];
-    float kb_tilt_y = kb_values[player::R_DOWN] - kb_values[player::R_UP];
-    float raw_tilt_x = std::clamp(kb_tilt_x + mouse_virt_x, -1.0f, 1.0f);
-    float raw_tilt_y = std::clamp(kb_tilt_y + mouse_virt_y, -1.0f, 1.0f);
-    float tilt_x = 0.0f, tilt_y = 0.0f;
-    std::array<float, 3> a{0.0f, 9.80665f, 0.0f}, g{}, filt_a{0.0f, 9.80665f, 0.0f}, filt_g{};
-    if (foreground && !overlay_open) {
-        player::step_sixaxis(kb_sixaxis, raw_tilt_x, raw_tilt_y, 0.0f, false, a, g,
-                             config, dt_sec, tilt_x, tilt_y, filt_a, filt_g);
-        kb_values[player::R_LEFT] = std::max(kb_values[player::R_LEFT], std::max(0.0f, -tilt_x));
-        kb_values[player::R_RIGHT] = std::max(kb_values[player::R_RIGHT], std::max(0.0f, tilt_x));
-        kb_values[player::R_UP] = std::max(kb_values[player::R_UP], std::max(0.0f, -tilt_y));
-        kb_values[player::R_DOWN] = std::max(kb_values[player::R_DOWN], std::max(0.0f, tilt_y));
-    }
-    player::MotionMode kb_mode = config.motion == player::MotionMode::Sensors
-                                     ? player::MotionMode::Auto
-                                     : config.motion;
-    ps3_host_pad_report result = to_host_report(
-        player::make_report_with_tilt(kb_values, tilt_x, tilt_y, kb_mode, false, filt_a, filt_g, now, pulse));
+    ps3_host_pad_report result = to_host_report(player::make_keyboard_mouse_report(
+        kb_values, mouse_virt_x, mouse_virt_y, config, dt_sec, now, kb_sixaxis, pulse,
+        foreground && !overlay_open));
     if (foreground && !overlay_open && vm.active)
         result.buttons |= (uint16_t)vm.segs[vm.cur].pad;
     return result;
@@ -322,6 +341,13 @@ unsigned __stdcall run(void *) {
     auto prev_tick = std::chrono::steady_clock::now();
     VirtualMouse vm;
     std::string prior;
+    struct AppliedRumble {
+        SDL_JoystickID device_id = 0;
+        uint16_t lo = 0;
+        uint16_t hi = 0;
+        ULONGLONG last_sent_ms = 0;
+    };
+    std::array<AppliedRumble, MAX_PORTS> applied_rumble{};
     while (WaitForSingleObject(stop_event, 4) == WAIT_TIMEOUT) {
         auto tick_now = std::chrono::steady_clock::now();
         float dt_sec = std::clamp(
@@ -355,6 +381,10 @@ unsigned __stdcall run(void *) {
                     ordered.push_back(d);
             }
         }
+        const player::ButtonPromptStyle detected_style = !ordered.empty()
+            ? player::prompt_style_from_gamepad_type(ordered[0]->type)
+            : player::ButtonPromptStyle::PlayStation;
+        publish_prompt_style(player::resolve_prompt_style(config.button_prompts, detected_style));
         HWND hwnd = nullptr;
         bool foreground = focused(hwnd);
         if (!allow_keyboard || !foreground) {
@@ -405,12 +435,73 @@ unsigned __stdcall run(void *) {
         for (int i = 0; i < MAX_PORTS; ++i)
             ports[i] = next_ports[i];
         ReleaseSRWLockExclusive(&lock);
+
+        std::array<RumbleTarget, MAX_PORTS> targets{};
+        AcquireSRWLockExclusive(&rumble_lock);
+        for (int i = 0; i < MAX_PORTS; ++i) {
+            targets[i] = rumble_targets[i];
+            rumble_targets[i].dirty = false;
+        }
+        ReleaseSRWLockExclusive(&rumble_lock);
+
+        const bool overlay_open = bakugan_savedata_overlay_active();
+        for (int p = 0; p < MAX_PORTS; ++p) {
+            const SDL_JoystickID cur_id = next_ports[p].is_gamepad ? next_ports[p].device_id : 0;
+            const SDL_JoystickID old_id = applied_rumble[p].device_id;
+            if (old_id != cur_id) {
+                if (old_id && (applied_rumble[p].lo || applied_rumble[p].hi)) {
+                    bool still_assigned = false;
+                    for (int q = 0; q < MAX_PORTS; ++q) {
+                        if (next_ports[q].is_gamepad && next_ports[q].device_id == old_id) {
+                            still_assigned = true;
+                            break;
+                        }
+                    }
+                    if (!still_assigned) {
+                        if (SDL_Gamepad *old_pad = pads.handle_by_id(old_id))
+                            SDL_RumbleGamepad(old_pad, 0, 0, 0);
+                    }
+                }
+                applied_rumble[p] = {cur_id, 0, 0, 0};
+            }
+        }
+        for (int p = 0; p < MAX_PORTS; ++p) {
+            const SDL_JoystickID cur_id = next_ports[p].is_gamepad ? next_ports[p].device_id : 0;
+            SDL_Gamepad *cur_pad = cur_id ? pads.handle_by_id(cur_id) : nullptr;
+            uint16_t eff_lo = 0, eff_hi = 0;
+            if (cur_pad && foreground && !overlay_open) {
+                player::scale_rumble_motors(targets[p].lo, targets[p].hi,
+                                            config.vibration_strength, eff_lo, eff_hi);
+            }
+            const bool active = (eff_lo != 0 || eff_hi != 0);
+            const bool changed = (eff_lo != applied_rumble[p].lo ||
+                                  eff_hi != applied_rumble[p].hi ||
+                                  (targets[p].dirty && active));
+            const bool renew = active && (applied_rumble[p].last_sent_ms == 0 ||
+                                          now - applied_rumble[p].last_sent_ms >= RUMBLE_RENEW_MS);
+            if (cur_pad && (changed || renew)) {
+                if (active) {
+                    SDL_RumbleGamepad(cur_pad, eff_lo, eff_hi, RUMBLE_HOLD_MS);
+                    applied_rumble[p].last_sent_ms = now;
+                } else {
+                    SDL_RumbleGamepad(cur_pad, 0, 0, 0);
+                    applied_rumble[p].last_sent_ms = 0;
+                }
+                applied_rumble[p].lo = eff_lo;
+                applied_rumble[p].hi = eff_hi;
+                applied_rumble[p].device_id = cur_id;
+            } else if (!cur_pad) {
+                applied_rumble[p] = {0, 0, 0, 0};
+            }
+        }
+
         if (state != prior) {
             fprintf(stderr, "[input] %s\n", state.c_str());
             prior = state;
         }
     }
     release_cursor_clip(capture.clipped);
+    pads.stop_all_rumble();
     pads.close(false);
     return 0;
 }
@@ -439,14 +530,26 @@ bool bakugan_input_install() {
             return false;
         }
     }
+    config.vibration_strength = player::resolve_vibration_strength(config);
+    config.button_prompts = player::resolve_button_prompts(config);
     std::string sdl_error;
     if (!pads.init(sdl_error)) {
         fprintf(stderr, "[input] SDL3 init failed: %s\n", sdl_error.c_str());
         return false;
     }
+    {
+        player::Device *preferred = (config.input != player::InputMode::KeyboardMouse)
+                                       ? pads.selected(config)
+                                       : nullptr;
+        const player::ButtonPromptStyle detected = preferred
+            ? player::prompt_style_from_gamepad_type(preferred->type)
+            : player::ButtonPromptStyle::PlayStation;
+        publish_prompt_style(player::resolve_prompt_style(config.button_prompts, detected));
+    }
     for (int i = 0; i < MAX_PORTS; ++i) {
         ports[i] = {};
         ports[i].report = neutral_report();
+        rumble_targets[i] = {};
     }
     stop_event = CreateEventW(nullptr, TRUE, FALSE, nullptr);
     if (!stop_event) {
@@ -462,11 +565,14 @@ bool bakugan_input_install() {
     }
     installed = true;
     ps3_pad_set_host_provider(provider, nullptr);
+    ps3_pad_set_host_actuator(actuator_sink, nullptr);
     return true;
 }
 void bakugan_input_shutdown() {
     if (!installed)
         return;
+    ps3_pad_set_host_actuator(nullptr, nullptr);
+    ps3_pad_set_host_provider(nullptr, nullptr);
     SetEvent(stop_event);
     WaitForSingleObject(worker, INFINITE);
     CloseHandle(worker);
@@ -481,4 +587,7 @@ bool bakugan_input_gamepad_snapshot(ps3_host_pad_report *out) {
     *out = (ports[0].connected && ports[0].is_gamepad) ? ports[0].report : ps3_host_pad_report{};
     ReleaseSRWLockShared(&lock);
     return true;
+}
+int bakugan_input_button_prompt_style() {
+    return active_prompt_style.load(std::memory_order_relaxed);
 }

@@ -1,6 +1,7 @@
 #include "libs/input/cellPad.h"
 #include "include/ps3emu/host_input.h"
 #include "include/ps3emu/endian.h"
+#include "../../bakugan-recomp/input_model.h"
 #include <array>
 #include <chrono>
 #include <cstdio>
@@ -28,12 +29,27 @@ static int provide(u32 port, ps3_host_pad_report *out, void *) {
     *out = snapshots[port];
     return 1;
 }
+struct ActuatorLog {
+    u16 lo = 0;
+    u16 hi = 0;
+    int calls = 0;
+};
+static std::array<ActuatorLog, CELL_PAD_MAX_PORT_NUM> act_logs;
+static int record_actuator(u32 port, u16 lo, u16 hi, void *) {
+    if (port >= act_logs.size())
+        return 0;
+    act_logs[port].lo = lo;
+    act_logs[port].hi = hi;
+    act_logs[port].calls++;
+    return 1;
+}
 int main() {
     for (auto key : {"PAD_RECORD", "PAD_REPLAY", "PAD_FILE", "PAD_AUTOPRESS", "PAD_SCRIPT", "PAD_STICK",
                      "PAD_SWEEP", "YDKJ_INJECT_PAD"})
         _putenv_s(key, "");
     _putenv_s("PAD_NO_KEYBOARD", "1");
     ps3_pad_set_host_provider(provide, nullptr);
+    ps3_pad_set_host_actuator(record_actuator, nullptr);
     if (cellPadInit(7) != CELL_OK)
         return 1;
     cellPadSetPortSetting(0, CELL_PAD_SETTING_SENSOR_ON | CELL_PAD_SETTING_PRESS_ON);
@@ -122,8 +138,73 @@ int main() {
         return 11;
     ok = ok && word(CELL_PAD_BTN_OFFSET_SENSOR_X) == 512 && word(CELL_PAD_BTN_OFFSET_SENSOR_Y) == 399 &&
          word(CELL_PAD_BTN_OFFSET_SENSOR_Z) == 512 && word(CELL_PAD_BTN_OFFSET_SENSOR_G) == 512;
+
+    // Calibrated Stick R full-deflection sensor words (right + up at 1.0x sensitivity)
+    snapshots[0].sensors[0] = 625;
+    snapshots[0].sensors[1] = 399;
+    snapshots[0].sensors[2] = 399;
+    snapshots[0].sensors[3] = 635;
+    snapshots[0].sensors_valid = 1;
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    if (cellPadGetData(0, (CellPadData *)0x100) != CELL_OK)
+        return 12;
+    ok = ok && word(CELL_PAD_BTN_OFFSET_SENSOR_X) == 625 && word(CELL_PAD_BTN_OFFSET_SENSOR_Y) == 399 &&
+         word(CELL_PAD_BTN_OFFSET_SENSOR_Z) == 399 && word(CELL_PAD_BTN_OFFSET_SENSOR_G) == 635;
+
+    auto *act = (CellPadActParam *)(guest.data() + 0xF00);
+    auto set_act = [&](u32 port, u8 small_motor, u8 large_motor) {
+        act->motor[CELL_PAD_ACTUATOR_PARAM_SMALL] = small_motor;
+        act->motor[CELL_PAD_ACTUATOR_PARAM_LARGE] = large_motor;
+        return cellPadSetActDirect(port, (CellPadActParam *)0xF00);
+    };
+    ok = ok && set_act(0, 1, 0) == CELL_OK &&
+         act_logs[0].lo == 0 && act_logs[0].hi == 65535 && act_logs[0].calls == 1;
+    ok = ok && set_act(0, 0, 128) == CELL_OK &&
+         act_logs[0].lo == 128 * 257 && act_logs[0].hi == 0 && act_logs[0].calls == 2;
+    {
+        uint16_t scaled_lo = 0, scaled_hi = 0;
+        player::scale_rumble_motors(act_logs[0].lo, act_logs[0].hi, 50, scaled_lo, scaled_hi);
+        ok = ok && scaled_lo == 16448 && scaled_hi == 0;
+    }
+    ok = ok && set_act(0, 1, 255) == CELL_OK &&
+         act_logs[0].lo == 65535 && act_logs[0].hi == 65535 && act_logs[0].calls == 3;
+    {
+        uint16_t lo0 = 0, hi0 = 0, lo50 = 0, hi50 = 0, lo100 = 0, hi100 = 0;
+        player::scale_rumble_motors(act_logs[0].lo, act_logs[0].hi, 0, lo0, hi0);
+        player::scale_rumble_motors(act_logs[0].lo, act_logs[0].hi, 50, lo50, hi50);
+        player::scale_rumble_motors(act_logs[0].lo, act_logs[0].hi, 100, lo100, hi100);
+        ok = ok && lo0 == 0 && hi0 == 0 &&
+             lo50 == 32768 && hi50 == 22937 &&
+             lo100 == 65535 && hi100 == 45875;
+    }
+    ok = ok && set_act(0, 255, 0) == CELL_OK &&
+         act_logs[0].lo == 0 && act_logs[0].hi == 65535 && act_logs[0].calls == 4;
+    ok = ok && set_act(0, 0, 0) == CELL_OK &&
+         act_logs[0].lo == 0 && act_logs[0].hi == 0 && act_logs[0].calls == 5;
+
+    // Multi-port isolation + invalid args
+    ok = ok && set_act(1, 0, 64) == CELL_OK &&
+         act_logs[1].lo == 64 * 257 && act_logs[1].hi == 0 && act_logs[1].calls == 1;
+    ok = ok && set_act(2, 1, 200) == CELL_OK &&
+         act_logs[2].lo == 200 * 257 && act_logs[2].hi == 65535 && act_logs[2].calls == 1;
+    ok = ok && act_logs[0].calls == 5;
+    ok = ok && set_act(CELL_PAD_MAX_PORT_NUM, 1, 1) == (s32)CELL_PAD_ERROR_INVALID_PARAMETER;
+    ok = ok && cellPadSetActDirect(0, nullptr) == (s32)CELL_PAD_ERROR_INVALID_PARAMETER;
+    ok = ok && act_logs[0].calls == 5;
+
+    // Re-arm port 0 and confirm cellPadEnd stops all ports
+    ok = ok && set_act(0, 1, 100) == CELL_OK && act_logs[0].calls == 6;
+    std::array<int, CELL_PAD_MAX_PORT_NUM> pre_end_calls{};
+    for (size_t i = 0; i < pre_end_calls.size(); ++i)
+        pre_end_calls[i] = act_logs[i].calls;
+
     cellPadEnd();
-    std::printf("cellPad multi-port provider / GetInfo / GetData / Sixaxis: %s\n",
+    for (size_t i = 0; i < act_logs.size(); ++i) {
+        ok = ok && act_logs[i].lo == 0 && act_logs[i].hi == 0 &&
+             act_logs[i].calls == pre_end_calls[i] + 1;
+    }
+    ok = ok && set_act(0, 1, 1) == (s32)CELL_PAD_ERROR_NOT_OPENED;
+    std::printf("cellPad multi-port provider / GetInfo / GetData / Sixaxis / Actuator: %s\n",
                 ok ? "PASS" : "FAIL");
     return ok ? 0 : 3;
 }

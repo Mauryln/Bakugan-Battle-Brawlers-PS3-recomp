@@ -5,3 +5,4 @@ bool bakugan_input_install();
 void bakugan_input_shutdown();
 // A configured keyboard-only mode owns the picker too, with a neutral pad.
 bool bakugan_input_gamepad_snapshot(ps3_host_pad_report *out);
+int bakugan_input_button_prompt_style();

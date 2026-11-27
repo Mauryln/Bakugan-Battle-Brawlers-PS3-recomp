@@ -143,6 +143,7 @@ extern "C" void rsx_d3d12_backend_present(void);
 extern "C" void rsx_d3d12_backend_flush_shader_cache(void);
 extern "C" void rsx_d3d12_backend_shutdown(void);
 extern "C" int  rsx_d3d12_backend_pump_messages(void);
+extern "C" void rsx_d3d12_backend_set_button_prompts(int style);
 #  define rsx_backend_init    rsx_d3d12_backend_init
 #  define rsx_backend_present rsx_d3d12_backend_present
 #  define rsx_backend_pump    rsx_d3d12_backend_pump_messages
@@ -363,6 +364,8 @@ static void fps_cap_wait(void)
             if ((double)c.QuadPart / s_qpc_freq2 >= target) break;
             Sleep(0);
         }
+        if (av_sync_debug())
+            s_av_cap_wait_ms += ((double)c.QuadPart / s_qpc_freq2 - now) * 1000.0;
     }
 }
 
@@ -1058,6 +1061,7 @@ int main(int argc, char** argv)
             set_default("PS3_ANISO", std::to_wstring(cfg.aniso));
             set_default("PS3_WINDOW_MODE", cfg.display_mode);
             set_default("PS3_WINDOW_MONITOR", L"primary");
+            set_default("PS3_VIBRATION_STRENGTH", std::to_wstring(std::clamp(cfg.vibration_strength, 0, 100)));
             const bool default_input = !player::has_input_overrides(cfg);
             if (!default_input && !getenv("PS3_PLAYER_CONFIG")) {
                 const std::wstring wpath = player::config_path();
@@ -1070,6 +1074,10 @@ int main(int argc, char** argv)
         if (!getenv(PS3_ENV_FPS_CAP))
             _putenv_s(PS3_ENV_FPS_CAP, PS3_DEFAULT_FPS_CAP);
         _wputenv_s(bakugan::FRAME_GEN_ENV, player::resolve_frame_gen(cfg).c_str());
+        const std::wstring resolved_prompts = player::resolve_button_prompts(cfg);
+        _wputenv_s(L"PS3_BUTTON_PROMPTS", resolved_prompts.c_str());
+        rsx_d3d12_backend_set_button_prompts(static_cast<int>(
+            player::resolve_prompt_style(resolved_prompts, player::ButtonPromptStyle::PlayStation)));
     }
     if (!getenv("PS3_VERBOSE")) _putenv_s("PS3_VERBOSE", "0");
     /* The same applies to the renderer's diagnostic switches: every one of
@@ -1105,7 +1113,7 @@ int main(int argc, char** argv)
                 "PS3_PLAYER_CONFIG", "PS3_INTERNAL", "PS3_OUTPUT", "PS3_FSR", "PS3_AA", "PS3_FSR_SHARPNESS",
                 PS3_ENV_FRAME_GEN, "PS3_FPS_CAP", "PS3_TICK_HZ", "PS3_WINDOW_MODE",
                 "PS3_WINDOW_MONITOR", "PS3_LANG", "PS3_ANISO",
-                "PS3_LOD_BIAS", "SPU_INTERP_UNLIFTED", "RSX_ACCUM_FRAME", "GCM_FULL_FRAMES",
+                "PS3_LOD_BIAS", "PS3_VIBRATION_STRENGTH", "PS3_BUTTON_PROMPTS", "SPU_INTERP_UNLIFTED", "RSX_ACCUM_FRAME", "GCM_FULL_FRAMES",
                 "RSX_PACK_WORKERS", "PAD_REPLAY", "PAD_CLOCK", "PS3_SAVEDATA_CHOICE"};
             for (const char* key : keys)
                 fprintf(file, "%s=%s\n", key, getenv(key) ? getenv(key) : "<unset>");

@@ -1,0 +1,56 @@
+diff --git a/include/ps3emu/host_input.h b/include/ps3emu/host_input.h
+--- a/include/ps3emu/host_input.h
++++ b/include/ps3emu/host_input.h
+@@ -15,6 +15,11 @@
+ } ps3_host_pad_report;
+ typedef int (*ps3_host_pad_provider)(u32 port, ps3_host_pad_report* out, void* userdata);
+ void ps3_pad_set_host_provider(ps3_host_pad_provider provider, void* userdata);
++/* Optional title host actuator (rumble) sink. Install before guest threads start.
++ * Must be safe to call from any guest thread.
++ * Returning non-zero claims the port and skips the built-in backend fallback. */
++typedef int (*ps3_host_pad_actuator)(u32 port, u16 low_freq, u16 high_freq, void* userdata);
++void ps3_pad_set_host_actuator(ps3_host_pad_actuator actuator, void* userdata);
+ int ps3_pad_sensor_active(u32 port);
+ #ifdef __cplusplus
+ }
+diff --git a/libs/input/cellPad.c b/libs/input/cellPad.c
+--- a/libs/input/cellPad.c
++++ b/libs/input/cellPad.c
+@@ -153,6 +153,14 @@
+     s_host_provider_userdata = userdata;
+ }
+ 
++static ps3_host_pad_actuator s_host_actuator;
++static void* s_host_actuator_userdata;
++void ps3_pad_set_host_actuator(ps3_host_pad_actuator actuator, void* userdata)
++{
++    s_host_actuator = actuator;
++    s_host_actuator_userdata = userdata;
++}
++
+ static int pad_external_report(u32 port_no, ps3_host_pad_report* out)
+ {
+     if (port_no >= PAD_MAX_HOST_PORTS || !s_host_provider)
+@@ -632,6 +640,12 @@
+ 
+     if (!s_pad_initialized)
+         return CELL_PAD_ERROR_NOT_OPENED;
++
++    if (s_host_actuator) {
++        for (u32 i = 0; i < PAD_MAX_HOST_PORTS; i++)
++            s_host_actuator(i, 0, 0, s_host_actuator_userdata);
++    }
++    memset(s_rumble, 0, sizeof s_rumble);
+ 
+     pad_shutdown_backend();
+ 
+@@ -1559,6 +1573,9 @@
+     s_rumble[port_no].lo = lo;
+     s_rumble[port_no].hi = hi;
+ 
++    if (s_host_actuator && s_host_actuator(port_no, lo, hi, s_host_actuator_userdata))
++        return CELL_OK;
++
+ #if PAD_BACKEND_XINPUT
+     /* XInput keeps the motors at what they were last set to: no renewal. */
+     if (port_no < PAD_XINPUT_MAX_PORTS && s_host_state[port_no].connected) {

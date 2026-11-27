@@ -40,11 +40,15 @@ enum {
     ID_SIXAXIS_SMOOTH,
     ID_AA_MODE,
     ID_SHARPNESS,
-    ID_FRAME_GEN
+    ID_FRAME_GEN,
+    ID_VIBRATION,
+    ID_VIBRATION_LABEL,
+    ID_BUTTON_PROMPTS,
+    ID_BUTTON_PROMPTS_STATUS
 };
 constexpr UINT WM_APP_REBUILD = WM_APP + 1;
 constexpr int WIDTH = 1000, HEIGHT = 800;
-constexpr int CANVAS_WIDTH = 628, CANVAS_HEIGHT = 396;
+constexpr int CANVAS_WIDTH = 628, CANVAS_HEIGHT = 364;
 struct Control {
     HWND hwnd;
     int x, y, w, h;
@@ -95,6 +99,48 @@ const wchar_t *outputs[] = {L"720p", L"1080p", L"1440p", L"2160p", L"auto", L"na
 const wchar_t *windows[] = {L"windowed", L"borderless", L"fullscreen"};
 const wchar_t *languages[] = {L"auto", L"es", L"en", L"fr", L"de", L"it", L"nl", L"sv"};
 const wchar_t *ui_languages[] = {L"auto", L"es", L"en"};
+const wchar_t *button_prompt_values[] = {L"auto", L"playstation", L"xbox", L"nintendo"};
+ButtonPromptStyle last_prompt_style = ButtonPromptStyle::PlayStation;
+
+ButtonPromptStyle detected_prompt_style() {
+    Device *device = pads.selected(config);
+    return device ? prompt_style_from_gamepad_type(device->type) : ButtonPromptStyle::PlayStation;
+}
+
+ButtonPromptStyle active_prompt_style() {
+    return resolve_prompt_style(config.button_prompts, detected_prompt_style());
+}
+
+const wchar_t *prompt_style_display_name(ButtonPromptStyle style) {
+    switch (style) {
+    case ButtonPromptStyle::Xbox:
+        return L"Xbox";
+    case ButtonPromptStyle::Nintendo:
+        return L"Nintendo";
+    case ButtonPromptStyle::PlayStation:
+    default:
+        return L"PlayStation";
+    }
+}
+
+void update_prompt_style_label() {
+    HWND lbl = GetDlgItem(window, ID_BUTTON_PROMPTS_STATUS);
+    if (!lbl)
+        return;
+    const ButtonPromptStyle active = active_prompt_style();
+    const wchar_t *name = prompt_style_display_name(active);
+    std::wstring text;
+    if (normalize_button_prompts(config.button_prompts, L"auto") == L"auto") {
+        if (pads.selected(config)) {
+            text = std::wstring(S(L"Estilo detectado: ", L"Detected style: ")) + name;
+        } else {
+            text = std::wstring(S(L"Estilo activo: ", L"Active style: ")) + name + L" (Auto)";
+        }
+    } else {
+        text = std::wstring(S(L"Estilo activo: ", L"Active style: ")) + name;
+    }
+    SetWindowTextW(lbl, text.c_str());
+}
 
 int selected(int id) { return (int)SendMessageW(GetDlgItem(window, id), CB_GETCURSEL, 0, 0); }
 void message(const std::wstring &text) { SetWindowTextW(status, text.c_str()); }
@@ -209,6 +255,12 @@ void refresh_devices(bool force = false) {
         sensor_status = std::move(info);
         update_bindings();
     }
+    const ButtonPromptStyle cur_style = active_prompt_style();
+    if (force || cur_style != last_prompt_style) {
+        last_prompt_style = cur_style;
+        update_prompt_style_label();
+        update_bindings();
+    }
 }
 
 void read_controls() {
@@ -228,6 +280,8 @@ void read_controls() {
     config.aniso = aniso[index(ID_ANISO, 5)];
     config.language = languages[index(ID_LANG, 8)];
     config.ui_language = ui_languages[index(ID_UI_LANG, 3)];
+    config.button_prompts =
+        button_prompt_values[index(ID_BUTTON_PROMPTS, static_cast<int>(std::size(button_prompt_values)))];
     config.motion = (MotionMode)index(ID_MOTION_MODE, 3);
     config.sixaxis_profile = (SixaxisProfile)index(ID_SIXAXIS_PROFILE, 4);
     const auto read_slider = [](int id, float &value) {
@@ -239,9 +293,16 @@ void read_controls() {
     read_slider(ID_DEADZONE, config.deadzone);
     read_slider(ID_SIXAXIS_SMOOTH, config.sixaxis_smoothing);
     read_slider(ID_SENSITIVITY, config.mouse_sensitivity);
+    config.vibration_strength = std::clamp(position(ID_VIBRATION), 0, 100);
     config.mouse_look = checked(ID_MOUSE_LOOK);
     config.mouse_left_cross = checked(ID_MOUSE_CROSS);
     read_device();
+}
+
+void update_vibration_label(int strength) {
+    const int pct = std::clamp(strength, 0, 100);
+    std::wstring text = S(L"Vibración: ", L"Vibration: ") + std::to_wstring(pct) + L"%";
+    SetWindowTextW(GetDlgItem(window, ID_VIBRATION_LABEL), text.c_str());
 }
 
 void sync_sixaxis_sliders() {
@@ -273,7 +334,11 @@ void fill_controls() {
     choose(ID_SHARPNESS, sharp_idx);
     choose(ID_SIXAXIS_PROFILE, (int)config.sixaxis_profile);
     choose(ID_MOTION_MODE, (int)config.motion);
+    choose(ID_BUTTON_PROMPTS, button_prompt_values, normalize_button_prompts(config.button_prompts, L"auto"));
     sync_sixaxis_sliders();
+    const int vib = std::clamp(config.vibration_strength, 0, 100);
+    SendMessageW(GetDlgItem(window, ID_VIBRATION), TBM_SETPOS, TRUE, vib);
+    update_vibration_label(vib);
     SendMessageW(GetDlgItem(window, ID_SENSITIVITY), TBM_SETPOS, TRUE, (int)std::lround(config.mouse_sensitivity * 100.f));
     check(ID_MOUSE_LOOK, config.mouse_look);
     check(ID_MOUSE_CROSS, config.mouse_left_cross);
@@ -567,9 +632,9 @@ struct ButtonHotspot {
 // Crop the margins of the supplied image. The same transform places the hotspots.
 struct ControllerCrop { float x, y, width, height; };
 constexpr ControllerCrop CONTROLLER_CROP{200, 157, 1120, 702};
-constexpr float CONTROLLER_SCALE = 0.42f;
+constexpr float CONTROLLER_SCALE = 0.385f;
 constexpr float CONTROLLER_X = (CANVAS_WIDTH - CONTROLLER_CROP.width * CONTROLLER_SCALE) / 2;
-constexpr float CONTROLLER_Y = 5.f;
+constexpr float CONTROLLER_Y = 4.f;
 
 constexpr ButtonHotspot pad_button(int action, const wchar_t *symbol, const wchar_t *es, const wchar_t *en,
                                    float image_x, float image_y, float width, float height, bool circle) {
@@ -581,31 +646,68 @@ constexpr ButtonHotspot pad_button(int action, const wchar_t *symbol, const wcha
 
 constexpr ButtonHotspot kButtons[ACTION_COUNT] = {
     pad_button(player::SELECT, L"SEL", L"Seleccionar / Mapa", L"Select / Map", 657, 496, 40.f, 18.f, false),
-    pad_button(player::L3, L"L3", L"Stick izquierdo (pulsar)", L"Left stick click", 598, 665, 30.f, 30.f, true),
-    pad_button(player::R3, L"R3", L"Stick derecho (pulsar)", L"Right stick click", 916, 665, 30.f, 30.f, true),
+    pad_button(player::L3, L"L3", L"Stick izquierdo (pulsar)", L"Left stick click", 598, 665, 28.f, 28.f, true),
+    pad_button(player::R3, L"R3", L"Stick derecho (pulsar)", L"Right stick click", 916, 665, 28.f, 28.f, true),
     pad_button(player::START, L"START", L"Pausa / Opciones", L"Pause / Start", 854, 496, 48.f, 18.f, false),
-    pad_button(player::UP, L"▲", L"Cruceta arriba", L"D-Pad up", 432, 422, 26.f, 24.f, false),
-    pad_button(player::RIGHT, L"▶", L"Cruceta derecha", L"D-Pad right", 507, 500, 24.f, 24.f, false),
-    pad_button(player::DOWN, L"▼", L"Cruceta abajo", L"D-Pad down", 432, 571, 26.f, 24.f, false),
-    pad_button(player::LEFT, L"◀", L"Cruceta izquierda", L"D-Pad left", 358, 500, 24.f, 24.f, false),
-    pad_button(player::L2, L"L2", L"Gatillo L2 analógico", L"Left trigger L2", 441, 194, 48.f, 17.f, false),
-    pad_button(player::R2, L"R2", L"Gatillo R2 analógico", L"Right trigger R2", 1074, 194, 48.f, 17.f, false),
-    pad_button(player::L1, L"L1", L"Botón superior L1", L"Left shoulder L1", 441, 238, 48.f, 17.f, false),
-    pad_button(player::R1, L"R1", L"Botón superior R1", L"Right shoulder R1", 1074, 238, 48.f, 17.f, false),
-    pad_button(player::TRIANGLE, L"△", L"Triángulo / Acción superior", L"Triangle / North action", 1075, 414, 26.f, 26.f, true),
-    pad_button(player::CIRCLE, L"○", L"Círculo / Cancelar", L"Circle / East action", 1163, 499, 26.f, 26.f, true),
-    pad_button(player::CROSS, L"✕", L"Cruz / Aceptar / Salto", L"Cross / South action", 1074, 582, 26.f, 26.f, true),
-    pad_button(player::SQUARE, L"□", L"Cuadrado / Ataque", L"Square / West action", 988, 499, 26.f, 26.f, true),
-    pad_button(player::MOTION_THROW, L"SIX", L"Impulso Sixaxis / Lanzar", L"Sixaxis impulse / Throw", 757, 562, 28.f, 28.f, true),
-    pad_button(player::L_UP, L"▲", L"Stick L arriba", L"Left stick up", 598, 580, 22.f, 20.f, false),
-    pad_button(player::L_RIGHT, L"▶", L"Stick L derecha", L"Left stick right", 688, 665, 20.f, 20.f, false),
-    pad_button(player::L_DOWN, L"▼", L"Stick L abajo", L"Left stick down", 598, 751, 22.f, 20.f, false),
-    pad_button(player::L_LEFT, L"◀", L"Stick L izquierda", L"Left stick left", 508, 665, 20.f, 20.f, false),
-    pad_button(player::R_UP, L"▲", L"Stick R arriba (Sixaxis)", L"Right stick up (Sixaxis)", 916, 580, 22.f, 20.f, false),
-    pad_button(player::R_RIGHT, L"▶", L"Stick R derecha (Sixaxis)", L"Right stick right (Sixaxis)", 1006, 665, 20.f, 20.f, false),
-    pad_button(player::R_DOWN, L"▼", L"Stick R abajo (Sixaxis)", L"Right stick down (Sixaxis)", 916, 751, 22.f, 20.f, false),
-    pad_button(player::R_LEFT, L"◀", L"Stick R izquierda (Sixaxis)", L"Right stick left (Sixaxis)", 826, 665, 20.f, 20.f, false),
+    pad_button(player::UP, L"▲", L"Cruceta arriba", L"D-Pad up", 432, 422, 24.f, 22.f, false),
+    pad_button(player::RIGHT, L"▶", L"Cruceta derecha", L"D-Pad right", 507, 500, 22.f, 22.f, false),
+    pad_button(player::DOWN, L"▼", L"Cruceta abajo", L"D-Pad down", 432, 571, 24.f, 22.f, false),
+    pad_button(player::LEFT, L"◀", L"Cruceta izquierda", L"D-Pad left", 358, 500, 22.f, 22.f, false),
+    pad_button(player::L2, L"L2", L"Gatillo L2 analógico", L"Left trigger L2", 441, 194, 44.f, 15.5f, false),
+    pad_button(player::R2, L"R2", L"Gatillo R2 analógico", L"Right trigger R2", 1074, 194, 44.f, 15.5f, false),
+    pad_button(player::L1, L"L1", L"Botón superior L1", L"Left shoulder L1", 441, 238, 44.f, 15.5f, false),
+    pad_button(player::R1, L"R1", L"Botón superior R1", L"Right shoulder R1", 1074, 238, 44.f, 15.5f, false),
+    pad_button(player::TRIANGLE, L"△", L"Triángulo / Acción superior", L"Triangle / North action", 1075, 414, 25.f, 25.f, true),
+    pad_button(player::CIRCLE, L"○", L"Círculo / Cancelar", L"Circle / East action", 1163, 499, 25.f, 25.f, true),
+    pad_button(player::CROSS, L"✕", L"Cruz / Aceptar / Salto", L"Cross / South action", 1074, 582, 25.f, 25.f, true),
+    pad_button(player::SQUARE, L"□", L"Cuadrado / Ataque", L"Square / West action", 988, 499, 25.f, 25.f, true),
+    pad_button(player::MOTION_THROW, L"SIX", L"Impulso Sixaxis / Lanzar", L"Sixaxis impulse / Throw", 757, 562, 26.f, 26.f, true),
+    pad_button(player::L_UP, L"▲", L"Stick L arriba", L"Left stick up", 598, 580, 20.f, 19.f, false),
+    pad_button(player::L_RIGHT, L"▶", L"Stick L derecha", L"Left stick right", 688, 665, 19.f, 19.f, false),
+    pad_button(player::L_DOWN, L"▼", L"Stick L abajo", L"Left stick down", 598, 751, 20.f, 19.f, false),
+    pad_button(player::L_LEFT, L"◀", L"Stick L izquierda", L"Left stick left", 508, 665, 19.f, 19.f, false),
+    pad_button(player::R_UP, L"▲", L"Stick R arriba (Sixaxis)", L"Right stick up (Sixaxis)", 916, 580, 20.f, 19.f, false),
+    pad_button(player::R_RIGHT, L"▶", L"Stick R derecha (Sixaxis)", L"Right stick right (Sixaxis)", 1006, 665, 19.f, 19.f, false),
+    pad_button(player::R_DOWN, L"▼", L"Stick R abajo (Sixaxis)", L"Right stick down (Sixaxis)", 916, 751, 20.f, 19.f, false),
+    pad_button(player::R_LEFT, L"◀", L"Stick R izquierda (Sixaxis)", L"Right stick left (Sixaxis)", 826, 665, 19.f, 19.f, false),
 };
+
+const wchar_t *prompt_button_label(const ButtonHotspot &b, ButtonPromptStyle style) {
+    if (style == ButtonPromptStyle::Xbox) {
+        switch (b.action) {
+        case player::SELECT:   return L"VIEW";
+        case player::START:    return L"MENU";
+        case player::L3:       return L"LS";
+        case player::R3:       return L"RS";
+        case player::L2:       return L"LT";
+        case player::R2:       return L"RT";
+        case player::L1:       return L"LB";
+        case player::R1:       return L"RB";
+        case player::TRIANGLE: return L"Y";
+        case player::CIRCLE:   return L"B";
+        case player::CROSS:    return L"A";
+        case player::SQUARE:   return L"X";
+        default: break;
+        }
+    } else if (style == ButtonPromptStyle::Nintendo) {
+        switch (b.action) {
+        case player::SELECT:   return L"-";
+        case player::START:    return L"+";
+        case player::L3:       return L"LS";
+        case player::R3:       return L"RS";
+        case player::L2:       return L"ZL";
+        case player::R2:       return L"ZR";
+        case player::L1:       return L"L";
+        case player::R1:       return L"R";
+        case player::TRIANGLE: return L"X";
+        case player::CIRCLE:   return L"A";
+        case player::CROSS:    return L"B";
+        case player::SQUARE:   return L"Y";
+        default: break;
+        }
+    }
+    return b.ps_name;
+}
 
 struct ConflictResult {
     bool conflict = false;
@@ -686,8 +788,10 @@ void draw_gamepad(Gdiplus::Graphics &g, int width, int height) {
 
     bool is_gamepad = selected(ID_MAP_MODE) == 1;
     const auto &bindings = is_gamepad ? config.gamepad : config.keyboard;
+    const ButtonPromptStyle prompt_style = active_prompt_style();
 
     Font sym_font(L"Segoe UI", 12.f, FontStyleBold, UnitPixel);
+    Font small_sym_font(L"Segoe UI", 10.5f, FontStyleBold, UnitPixel);
     StringFormat sf_center;
     sf_center.SetAlignment(StringAlignmentCenter);
     sf_center.SetLineAlignment(StringAlignmentCenter);
@@ -724,21 +828,46 @@ void draw_gamepad(Gdiplus::Graphics &g, int width, int height) {
             g.DrawRectangle(&btn_pen, r);
         }
 
-        // Color for PlayStation Symbols
         Color sym_col = Color(255, 240, 245, 255);
-        if (b.action == player::TRIANGLE)
-            sym_col = Color(255, 70, 220, 120);
-        else if (b.action == player::CIRCLE)
-            sym_col = Color(255, 245, 70, 70);
-        else if (b.action == player::CROSS)
-            sym_col = Color(255, 65, 180, 255);
-        else if (b.action == player::SQUARE)
-            sym_col = Color(255, 240, 110, 190);
-        else if (b.action == player::MOTION_THROW)
-            sym_col = Color(255, 238, 193, 97);
+        if (prompt_style == ButtonPromptStyle::Xbox) {
+            if (b.action == player::TRIANGLE)
+                sym_col = Color(255, 245, 200, 60);
+            else if (b.action == player::CIRCLE)
+                sym_col = Color(255, 240, 75, 75);
+            else if (b.action == player::CROSS)
+                sym_col = Color(255, 75, 215, 95);
+            else if (b.action == player::SQUARE)
+                sym_col = Color(255, 70, 165, 255);
+            else if (b.action == player::MOTION_THROW)
+                sym_col = Color(255, 238, 193, 97);
+        } else if (prompt_style == ButtonPromptStyle::Nintendo) {
+            if (b.action == player::TRIANGLE)
+                sym_col = Color(255, 225, 230, 240);
+            else if (b.action == player::CIRCLE)
+                sym_col = Color(255, 245, 85, 85);
+            else if (b.action == player::CROSS)
+                sym_col = Color(255, 245, 195, 75);
+            else if (b.action == player::SQUARE)
+                sym_col = Color(255, 95, 185, 255);
+            else if (b.action == player::MOTION_THROW)
+                sym_col = Color(255, 238, 193, 97);
+        } else {
+            if (b.action == player::TRIANGLE)
+                sym_col = Color(255, 70, 220, 120);
+            else if (b.action == player::CIRCLE)
+                sym_col = Color(255, 245, 70, 70);
+            else if (b.action == player::CROSS)
+                sym_col = Color(255, 65, 180, 255);
+            else if (b.action == player::SQUARE)
+                sym_col = Color(255, 240, 110, 190);
+            else if (b.action == player::MOTION_THROW)
+                sym_col = Color(255, 238, 193, 97);
+        }
 
         SolidBrush sym_brush(sym_col);
-        g.DrawString(b.ps_name, -1, &sym_font, r, &sf_center, &sym_brush);
+        const Font &label_font =
+            (b.action == player::SELECT || b.action == player::START) ? small_sym_font : sym_font;
+        g.DrawString(prompt_button_label(b, prompt_style), -1, &label_font, r, &sf_center, &sym_brush);
 
         // Conflict exclamation badge
         if (cr.conflict) {
@@ -750,11 +879,11 @@ void draw_gamepad(Gdiplus::Graphics &g, int width, int height) {
         }
     }
 
-    // Inspector Panel Card at the bottom (y = 310 .. 386)
+    // Inspector Panel Card at the bottom (y = 282 .. 358)
     SolidBrush panel_bg(Color(255, 28, 25, 29));
     Pen panel_border(Color(255, 68, 53, 59), 1.0f);
-    g.FillRectangle(&panel_bg, RectF(12.f, 308.f, 604.f, 78.f));
-    g.DrawRectangle(&panel_border, RectF(12.f, 308.f, 604.f, 78.f));
+    g.FillRectangle(&panel_bg, RectF(12.f, 282.f, 604.f, 76.f));
+    g.DrawRectangle(&panel_border, RectF(12.f, 282.f, 604.f, 76.f));
 
     int cur_act = (selected_action >= 0 && selected_action < ACTION_COUNT) ? selected_action : player::CROSS;
     const auto &cur_b = kButtons[cur_act];
@@ -769,19 +898,20 @@ void draw_gamepad(Gdiplus::Graphics &g, int width, int height) {
     SolidBrush white_txt(Color(255, 240, 245, 255));
     SolidBrush dim_txt(Color(255, 182, 170, 173));
 
-    std::wstring title = std::wstring(cur_b.ps_name) + L" — " + (ui_english ? cur_b.desc_en : cur_b.desc_es);
-    g.DrawString(title.c_str(), -1, &head_font, PointF(24.f, 316.f), &gold_txt);
+    std::wstring title = std::wstring(prompt_button_label(cur_b, prompt_style)) + L" — " +
+                         (ui_english ? cur_b.desc_en : cur_b.desc_es);
+    g.DrawString(title.c_str(), -1, &head_font, PointF(24.f, 290.f), &gold_txt);
 
     std::wstring b_text = binding_name(bindings[cur_act], ui_english);
     std::wstring bind_label = S(L"Asignación actual: [ ", L"Current binding: [ ") + b_text + L" ]";
-    g.DrawString(bind_label.c_str(), -1, &val_font, PointF(24.f, 342.f), &white_txt);
+    g.DrawString(bind_label.c_str(), -1, &val_font, PointF(24.f, 315.f), &white_txt);
 
     std::wstring dev_mode_str = is_gamepad ? S(L"Editando Mando (SDL3)", L"Editing Gamepad (SDL3)")
                                            : S(L"Editando Teclado y Ratón", L"Editing Keyboard & Mouse");
-    g.DrawString(dev_mode_str.c_str(), -1, &sub_font, PointF(24.f, 363.f), &dim_txt);
+    g.DrawString(dev_mode_str.c_str(), -1, &sub_font, PointF(24.f, 336.f), &dim_txt);
 
-    // Right status / alert sub-box (x = 340 .. 604)
-    RectF status_card(336.f, 314.f, 272.f, 66.f);
+    // Right status / alert sub-box (x = 336 .. 608)
+    RectF status_card(336.f, 288.f, 272.f, 64.f);
     if (capture == cur_act) {
         SolidBrush cap_bg(Color(255, 65, 50, 15));
         Pen cap_pen(Color(255, 238, 193, 97), 1.5f);
@@ -789,10 +919,10 @@ void draw_gamepad(Gdiplus::Graphics &g, int width, int height) {
         g.DrawRectangle(&cap_pen, status_card);
 
         SolidBrush cap_head(Color(255, 255, 220, 120));
-        g.DrawString(S(L"Pulsa una entrada", L"Press an input"), -1, &head_font, PointF(344.f, 320.f), &cap_head);
+        g.DrawString(S(L"Pulsa una entrada", L"Press an input"), -1, &head_font, PointF(344.f, 294.f), &cap_head);
         g.DrawString(S(L"Pulsa una tecla, botón o eje.\nEsc cancela · Supr desasigna.",
                        L"Press a key, button, or axis.\nEsc cancels · Del clears."),
-                     -1, &sub_font, PointF(344.f, 340.f), &white_txt);
+                     -1, &sub_font, PointF(344.f, 314.f), &white_txt);
     } else if (cur_cr.conflict) {
         SolidBrush cr_bg(Color(255, 65, 20, 25));
         Pen cr_pen(Color(255, 240, 60, 60), 1.5f);
@@ -800,13 +930,13 @@ void draw_gamepad(Gdiplus::Graphics &g, int width, int height) {
         g.DrawRectangle(&cr_pen, status_card);
 
         SolidBrush cr_head(Color(255, 255, 90, 90));
-        g.DrawString(S(L"Conflicto de asignación", L"Binding conflict"), -1, &head_font, PointF(344.f, 320.f), &cr_head);
+        g.DrawString(S(L"Conflicto de asignación", L"Binding conflict"), -1, &head_font, PointF(344.f, 294.f), &cr_head);
         std::wstring other_name = action_name(cur_cr.other_action, ui_english);
         std::wstring cr_desc = S(L"Coincide con: ", L"Clashes with: ") + other_name;
-        g.DrawString(cr_desc.c_str(), -1, &sub_font, PointF(344.f, 342.f), &white_txt);
+        g.DrawString(cr_desc.c_str(), -1, &sub_font, PointF(344.f, 316.f), &white_txt);
     } else {
-        g.DrawString(L"Sixaxis", -1, &head_font, PointF(344.f, 320.f), &gold_txt);
-        g.DrawString(sensor_status.c_str(), -1, &sub_font, RectF(344.f, 342.f, 260.f, 34.f), nullptr, &dim_txt);
+        g.DrawString(L"Sixaxis", -1, &head_font, PointF(344.f, 294.f), &gold_txt);
+        g.DrawString(sensor_status.c_str(), -1, &sub_font, RectF(344.f, 316.f, 260.f, 34.f), nullptr, &dim_txt);
     }
 }
 
@@ -935,18 +1065,24 @@ void create_controls() {
     combo(ID_MOTION_MODE, 751, 201, 217,
           {S(L"Híbrido (Auto)", L"Hybrid (Auto)"), S(L"Solo sensores", L"Sensors only"),
            S(L"Solo stick R", L"Right stick only")});
-
-    label(S(L"Sensibilidad Sixaxis", L"Sixaxis sensitivity"), 348, 234, 185);
-    slider(ID_GYRO_SENS, 344, 251, 190, 10, 500, 100);
-    label(S(L"Zona muerta", L"Deadzone"), 560, 234, 185);
-    slider(ID_DEADZONE, 556, 251, 190, 2, 50, 15);
-    label(S(L"Suavizado Sixaxis", L"Sixaxis smoothing"), 774, 234, 194);
-    slider(ID_SIXAXIS_SMOOTH, 770, 251, 198, 0, 100, 45);
-
-    label(S(L"Mapeo a editar", L"Mapping to edit"), 348, 281, 110);
-    combo(ID_MAP_MODE, 465, 277, 263,
+    label(S(L"Iconos de botones", L"Button icons"), 348, 237, 115);
+    combo(ID_BUTTON_PROMPTS, 465, 233, 163,
+          {S(L"Automático", L"Auto"), L"PlayStation", L"Xbox", L"Nintendo"});
+    label(S(L"Mapeo a editar", L"Mapping to edit"), 646, 237, 103);
+    combo(ID_MAP_MODE, 751, 233, 217,
           {S(L"Teclado y ratón", L"Keyboard and mouse"), S(L"Mando", L"Controller")});
-    add(L"BUTTON", S(L"Restaurar mapeo", L"Reset mapping"), ID_DEFAULTS, 751, 277, 217, 28, WS_TABSTOP);
+
+    label(S(L"Sensibilidad Sixaxis", L"Sixaxis sensitivity"), 348, 265, 143);
+    slider(ID_GYRO_SENS, 344, 282, 147, 10, 500, 140);
+    label(S(L"Zona muerta", L"Deadzone"), 507, 265, 143);
+    slider(ID_DEADZONE, 503, 282, 147, 2, 50, 10);
+    label(S(L"Suavizado Sixaxis", L"Sixaxis smoothing"), 666, 265, 143);
+    slider(ID_SIXAXIS_SMOOTH, 662, 282, 147, 0, 100, 15);
+    add(L"STATIC", S(L"Vibración: 80%", L"Vibration: 80%"), ID_VIBRATION_LABEL, 825, 265, 143, 22);
+    slider(ID_VIBRATION, 821, 282, 147, 0, 100, 80);
+
+    add(L"STATIC", L"", ID_BUTTON_PROMPTS_STATUS, 348, 314, 390, 20);
+    add(L"BUTTON", S(L"Restaurar mapeo", L"Reset mapping"), ID_DEFAULTS, 751, 311, 217, 25, WS_TABSTOP);
 
     WNDCLASSW canvas_class{};
     canvas_class.lpfnWndProc = canvas_wndproc;
@@ -955,7 +1091,7 @@ void create_controls() {
     canvas_class.lpszClassName = L"bakugan_gamepad_canvas";
     RegisterClassW(&canvas_class);
 
-    constexpr int canvas_x = 344, canvas_y = 308;
+    constexpr int canvas_x = 344, canvas_y = 340;
     gamepad_canvas = CreateWindowExW(0, canvas_class.lpszClassName, L"", WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS,
                                      canvas_x, canvas_y, CANVAS_WIDTH, CANVAS_HEIGHT, window,
                                      (HMENU)ID_GAMEPAD_CANVAS, GetModuleHandleW(nullptr), nullptr);
@@ -1039,9 +1175,11 @@ LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     }
     case WM_HSCROLL: {
         HWND slider_hwnd = (HWND)lp;
-        if (slider_hwnd == GetDlgItem(window, ID_GYRO_SENS) ||
-            slider_hwnd == GetDlgItem(window, ID_DEADZONE) ||
-            slider_hwnd == GetDlgItem(window, ID_SIXAXIS_SMOOTH)) {
+        if (slider_hwnd == GetDlgItem(window, ID_VIBRATION)) {
+            update_vibration_label(position(ID_VIBRATION));
+        } else if (slider_hwnd == GetDlgItem(window, ID_GYRO_SENS) ||
+                   slider_hwnd == GetDlgItem(window, ID_DEADZONE) ||
+                   slider_hwnd == GetDlgItem(window, ID_SIXAXIS_SMOOTH)) {
             choose(ID_SIXAXIS_PROFILE, (int)SixaxisProfile::Custom);
         }
         return 0;
@@ -1062,6 +1200,12 @@ LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         } else if (id == ID_DEVICE && HIWORD(wp) == CBN_SELCHANGE) {
             read_device();
             refresh_devices();
+            update_bindings();
+        } else if (id == ID_BUTTON_PROMPTS && HIWORD(wp) == CBN_SELCHANGE) {
+            config.button_prompts = button_prompt_values[std::clamp(
+                selected(ID_BUTTON_PROMPTS), 0, static_cast<int>(std::size(button_prompt_values)) - 1)];
+            last_prompt_style = active_prompt_style();
+            update_prompt_style_label();
             update_bindings();
         } else if (id == ID_UI_LANG && HIWORD(wp) == CBN_SELCHANGE) {
             read_controls();
