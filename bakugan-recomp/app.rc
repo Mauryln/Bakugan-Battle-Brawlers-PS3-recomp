@@ -1,5 +1,6 @@
 /* Icon sourced from the player's own save ICON0.PNG (see assets/make_icon.py). */
 1 ICON "assets/bakugan.ico"
+1 24 "app.manifest"
 
 1 VERSIONINFO
  FILEVERSION 1,4,0,0
