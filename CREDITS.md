@@ -3,9 +3,8 @@
 ## PS3Recomp Toolkit
 
 Special thanks and sincere gratitude to **Ned Heller (sp00nznet)** and the developers of the **PS3Recomp** project:
-- Official Toolkit Repositories:
+- Official Toolkit Repository:
   - <https://github.com/sp00nznet/ps3recomp>
-  - <https://github.com/arnold9401/ps3recomp>
 
 This project is built upon the pioneering static recompilation research and HLE runtime architecture established by PS3Recomp (licensed under MIT). Without their foundational work, this native PC port would not exist.
 

@@ -189,8 +189,10 @@ Tres métodos de control funcionan simultáneamente y pueden ajustarse desde `Ba
 
 Este port no hubiera sido posible sin la comunidad de emulación y recompilación de código abierto:
 
-- **Equipo de PS3Recomp y Ned Heller ([sp00nznet](https://github.com/sp00nznet) / [arnold9401](https://github.com/arnold9401))**:  
-  Nuestro más sincero agradecimiento a los creadores del proyecto de recompilación estática **[PS3Recomp](https://github.com/arnold9401/ps3recomp)**. Su trabajo pionero en la traducción PPU/SPU y la arquitectura del runtime HLE hizo viable este proyecto.
+- **Equipo de PS3Recomp y Ned Heller ([sp00nznet](https://github.com/sp00nznet))**:  
+  Nuestro más sincero agradecimiento a los creadores del proyecto de recompilación estática **[PS3Recomp](https://github.com/sp00nznet/ps3recomp)**. Su trabajo pionero en la traducción PPU/SPU y la arquitectura del runtime HLE hizo viable este proyecto.
+- **Desarrolladores de RPCS3 ([RPCS3](https://github.com/rpcs3/rpcs3) / [rpcs3.net](https://rpcs3.net))**:  
+  Por su emulador de PS3 y su documentación de ingeniería inversa sobre Cell Broadband Engine, RSX y el software del sistema PlayStation 3.
 - **libsdl-org ([SDL3](https://github.com/libsdl-org/SDL))**:  
   Por el soporte multiplataforma de detección de mandos, vibración y lectura de sensores de movimiento.
 - **AMD FidelityFX**:  

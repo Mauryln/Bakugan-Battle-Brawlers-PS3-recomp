@@ -189,8 +189,10 @@ Three motion input methods work seamlessly and can be tuned in `BakuganLauncher.
 
 This port would not exist without the open-source emulation and recompilation community:
 
-- **PS3Recomp Team & Ned Heller ([sp00nznet](https://github.com/sp00nznet) / [arnold9401](https://github.com/arnold9401))**:  
-  Heartfelt thanks to the creators of the **[PS3Recomp](https://github.com/arnold9401/ps3recomp)** static recompilation framework. Their research into PPU/SPU translation and PS3 HLE runtime design made this native Windows port achievable.
+- **PS3Recomp Team & Ned Heller ([sp00nznet](https://github.com/sp00nznet))**:  
+  Heartfelt thanks to the creators of the **[PS3Recomp](https://github.com/sp00nznet/ps3recomp)** static recompilation framework. Their research into PPU/SPU translation and PS3 HLE runtime design made this native Windows port achievable.
+- **RPCS3 Developers ([RPCS3](https://github.com/rpcs3/rpcs3) / [rpcs3.net](https://rpcs3.net))**:  
+  For their PS3 emulator and reverse-engineering documentation of the Cell Broadband Engine, RSX, and PlayStation 3 system software.
 - **libsdl-org ([SDL3](https://github.com/libsdl-org/SDL))**:  
   For cross-platform controller enumeration, actuator rumble, and physical motion sensor handling.
 - **AMD FidelityFX**:  
