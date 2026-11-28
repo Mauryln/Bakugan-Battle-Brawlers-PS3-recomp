@@ -56,6 +56,23 @@ The game is **fully playable from start to finish**: story mode, tutorials, batt
 > See the release notes in [docs/RELEASE_1.4.0.md](docs/RELEASE_1.4.0.md), [docs/RELEASE_1.3.6.md](docs/RELEASE_1.3.6.md), [docs/RELEASE_1.3.5.md](docs/RELEASE_1.3.5.md), and [docs/RELEASE_1.3.0.md](docs/RELEASE_1.3.0.md).
 > **v1.4.0** adds SDL3 controller rumble & Sixaxis calibration, Xbox/Nintendo UI button prompts, synchronized FMV A/V playback, unpacked `PS3_GAME` folder install support, and native C# `SelfExtract` handling in a zero-emulator installer package.
 
+### v1.4.0 Highlights
+- **Full Controller Rumble (SDL3 / DualSense / Switch Pro / XInput)**: Native vibration via `cellPadSetActDirect` for PS5 DualSense, DualShock 4, Switch Pro, and Xbox controllers (USB & Bluetooth) plus a vibration intensity slider (0–100%) in `BakuganLauncher.exe` (Issues #10 and #8).
+- **Xbox & Nintendo Button Prompts**: Automatic connected-controller detection (`Auto`) and manual selector (`PlayStation` / `Xbox` / `Nintendo`) in the launcher, updating in-game 2D prompts, launcher controller diagram, and save-data overlay (Issue #5).
+- **Sixaxis Calibration in Hybrid Mode**: True `±113`-count range and Z-axis (`sensors[2]`) acceleration/braking on the Right Stick without accidental jumps, keeping Hybrid Mode (Gyroscope + Right Stick) by default alongside the **Standard** profile (Issue #8).
+- **FMV A/V Sync & FSR 3.1 Pacing**: High-precision QPC anchor in `sys_timer_usleep`, smoother FSR 3.1 transitions, and `.MP4` cutscene sync against `waveOutGetPosition` (Issue #9).
+- **Folder (`PS3_GAME`) Installer & Safe Uninstaller**: **Folder...** (`--folder`) button in `BakuganSetup.exe` for extracted PS3 dumps alongside `.iso` (Issue #8), native C# `SelfExtract` with zero emulator binaries, and the hardened WinForms/silent `Uninstall.exe` protecting saves and `player.ini` in `%LOCALAPPDATA%\BakuganRecomp`.
+
+### Security Verification (VirusTotal — v1.4.0)
+
+| File | VirusTotal Result | SHA-256 | Report |
+| :--- | :--- | :--- | :--- |
+| `Bakugan-Battle-Brawlers-Recomp-1.4.0-win64.zip` | **0 / 64** (Clean) | `770F6375EDBC8833144F2CE247A05E1090D8BF862171A71654DC171FB0E0CCD5` | [View report](https://www.virustotal.com/gui/file/770f6375edbc8833144f2ce247a05e1090d8bf862171a71654dc171fb0e0ccd5) |
+| `BakuganSetup.exe` | **0 / 68** (Clean) | `2EDE9B140891F884E95244B24A34FBFF8CAE012AF3F7C4EFDEBD19FFFDE42CE4` | [View report](https://www.virustotal.com/gui/file/2ede9b140891f884e95244b24a34fbff8cae012af3f7c4efdebd19fffde42ce4) |
+| `BakuganRecomp.exe` | **0 / 67** (Clean) | `A455679A8B58C95A1680658805F6B79ED1AADEB2D1110AB42B5DF4F47E8ADC97` | [View report](https://www.virustotal.com/gui/file/a455679a8b58c95a1680658805f6b79ed1aadeb2d1110ab42b5df4f47e8adc97) |
+| `BakuganLauncher.exe` | **0 / 68** (Clean) | `8988A3AB37F71CDE3CD11982EB9E41BB8E777E62C406C517132F3E176BBC2B96` | [View report](https://www.virustotal.com/gui/file/8988a3ab37f71cde3cd11982eb9e41bb8e777e62c406c517132f3e176bbc2b96) |
+| `Uninstall.exe` | **0 / 68** (Clean) | `042D1B5EEBD339DCFDBD8AC1DFDA06FB2CAAA6425683D4D2CB188481187D3452` | [View report](https://www.virustotal.com/gui/file/042d1b5eebd339dcfdbd8ac1dfda06fb2caaa6425683d4d2cb188481187d3452) |
+
 ### D3D12 Performance & Graphics
 - **AMD FSR 3.1 Frame Generation (Optical Flow)**: Interpolates 30 native FPS to ~60 presented FPS in compatible arenas with **HUD separation (`hudless`)** so menus, cards, and UI elements stay sharp without ghosting.
 - **SMAA Antialiasing & FSR 1 Upscaling**: Full post-processing pipeline with **SMAA**, **AMD FSR 1.0 (EASU + configurable RCAS sharpness)** across 720p / 1080p / 1440p / 4K outputs, and **16x Anisotropic Filtering** (with a 2D mip-guard).
